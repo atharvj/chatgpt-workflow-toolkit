@@ -128,24 +128,18 @@ test('classifyPrompt escalates debugging and rigorous proof work to High', () =>
   assertClassifiesAs('Prove rigorously that the square root of 2 is irrational.', 'high');
 });
 
-test('classifyPrompt reserves Extra High or Ultra for independently complex work', () => {
+test('classifyPrompt reserves Extra High for independently complex work', () => {
   const result = toolkit.classifyPrompt(
     'Design a production multi-tenant authentication architecture. Include a threat model, concurrency risks, migration steps, rollback plan, tests, and security tradeoffs.',
   );
-  assert.ok(
-    ['extra-high', 'ultra'].includes(canonicalLevel(result)),
-    `expected Extra High or Ultra, received ${JSON.stringify(result)}`,
-  );
+  assert.equal(canonicalLevel(result), 'extra-high');
 });
 
 test('classifyPrompt reserves Pro for difficult long-horizon workflows', () => {
   const result = toolkit.classifyPrompt(
     'Design and implement a production compiler end to end. Specify the parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument for every optimization.',
   );
-  assert.ok(
-    canonicalLevel(result).startsWith('pro'),
-    `expected a Pro tier, received ${JSON.stringify(result)}`,
-  );
+  assert.equal(canonicalLevel(result), 'pro');
 });
 
 test('classifyPrompt honors hard overrides even when prompt complexity disagrees', () => {

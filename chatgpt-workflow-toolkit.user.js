@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.4
+// @version      1.4.5
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Atharv Joshi
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.4';
+  const VERSION = '1.4.5';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -890,6 +890,23 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return true;
   }
 
+  function isMountedAndNotHidden(element) {
+    if (!element || !element.isConnected || element.hidden || element.getAttribute('aria-hidden') === 'true') return false;
+    const hiddenParent = element.closest && element.closest('[hidden], [aria-hidden="true"], [inert], [data-state="closed"]');
+    if (hiddenParent) return false;
+    try {
+      const view = element.ownerDocument && element.ownerDocument.defaultView;
+      for (let current = element; view && current && current.nodeType === 1; current = current.parentElement) {
+        const style = view.getComputedStyle(current);
+        if (style && (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse')) return false;
+      }
+    } catch (_error) {
+      // A mounted element inside the strongly scoped picker is still usable
+      // when computed style is temporarily unavailable during a rerender.
+    }
+    return true;
+  }
+
   function findComposer(doc) {
     if (!doc) return null;
     for (const selector of COMPOSER_SELECTORS) {
@@ -1236,13 +1253,9 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         ? 'medium'
         : score < 60
           ? 'high'
-          : score < 70
+          : score < 80
             ? 'extra-high'
-            : score < 80
-              ? 'ultra'
-              : score < 92
-                ? 'pro'
-                : 'pro-ultra';
+            : 'pro';
 
     if (highStakes && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
     if (debuggingWork && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
@@ -1250,10 +1263,10 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     if (modelLevelRank(target) >= ROUTE_LEVEL_RANK.pro && (
       strongGroups.size < 3 || !(longHorizon || expertWork || (highStakes && strongGroups.has('source synthesis')))
     )) {
-      target = score >= 70 ? 'ultra' : 'extra-high';
+      target = 'extra-high';
     }
 
-    const boundaries = [20, 40, 60, 70, 80, 92];
+    const boundaries = [20, 40, 60, 80];
     const margin = Math.min(...boundaries.map((boundary) => Math.abs(score - boundary)));
     const confidence = Math.max(0.45, Math.min(0.94, 0.58 + Math.min(margin, 10) * 0.018 + Math.min(strongGroups.size, 3) * 0.045));
     return {
@@ -1484,37 +1497,50 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const controlledIds = new Set(normalizeText(picker && picker.getAttribute('aria-controls')).split(/\s+/u).filter(Boolean));
     const pickerId = normalizeText(picker && picker.id);
     const roots = [...doc.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')]
-      .filter((root) => isProbablyVisible(root) && !root.closest('[data-state="closed"], [aria-hidden="true"], [hidden]'))
+      .filter(isMountedAndNotHidden)
       .map((root) => {
         const menu = root.closest('[data-radix-menu-content][role="menu"], [role="menu"], [role="listbox"]');
+        const controlledAncestor = [...controlledIds].some((id) => {
+          const controlled = doc.getElementById(id);
+          return controlled && (controlled === root || controlled.contains(root));
+        });
         let score = 0;
-        if (menu && controlledIds.has(normalizeText(menu.id))) score += 100;
+        if (controlledAncestor || menu && controlledIds.has(normalizeText(menu.id))) score += 100;
         if (menu && pickerId && normalizeText(menu.getAttribute('aria-labelledby')).split(/\s+/u).includes(pickerId)) score += 100;
         if (menu && menu.getAttribute('data-state') === 'open') score += 20;
         return { root, score };
       })
       .sort((left, right) => right.score - left.score);
 
-    for (const { root } of roots) {
-      const allRows = [...root.querySelectorAll('[role="menuitemradio"][data-radix-collection-item]')].filter((row) =>
-        isProbablyVisible(row) && !row.closest('[data-state="closed"], [aria-hidden="true"], [hidden]') &&
-        !row.closest(`#${UI_ROOT_ID}`) && !row.matches('[aria-disabled="true"], [data-disabled], :disabled') &&
-        !isModelUpsellLabel(accessibleText(row)) && Boolean(elementPickerLevel(row, { allowBareEffort: true })));
-      const groups = uniqueElements([
-        root.matches('[role="group"]') ? root : null,
-        ...root.querySelectorAll('[role="group"]'),
-      ]).filter((group) => group.closest('[data-testid="composer-intelligence-picker-content"]') === root);
-      if (groups.length) {
-        const groupedRows = groups.map((group) => {
-          const rows = allRows.filter((row) => row.closest('[role="group"]') === group);
-          const levels = new Set(rows.map(optionLevel).filter(Boolean));
-          const checked = rows.some((row) => row.matches('[aria-checked="true"], [data-state="checked"]'));
-          return { rows, distinct: levels.size, checked };
-        }).sort((left, right) => right.distinct - left.distinct || Number(right.checked) - Number(left.checked) || right.rows.length - left.rows.length);
+    const bestScore = roots.length ? roots[0].score : -1;
+    const eligibleRoots = roots.filter(({ score }) => score === bestScore);
+    if (eligibleRoots.length > 1) return [];
+
+    for (const { root } of eligibleRoots) {
+      const rowSelector = '[role="menuitemradio"], [role="radio"], [role="option"], [data-radix-collection-item], button';
+      const allRows = [...root.querySelectorAll(rowSelector)].filter((row) => {
+        if (!isMountedAndNotHidden(row) || row.closest(`#${UI_ROOT_ID}`) ||
+          row.matches('[aria-disabled="true"], [data-disabled], :disabled') || isModelUpsellLabel(accessibleText(row))) return false;
+        const level = elementPickerLevel(row, { allowBareEffort: true });
+        if (!level) return false;
+        const outerRow = row.parentElement && row.parentElement.closest(rowSelector);
+        return !outerRow || !root.contains(outerRow) ||
+          elementPickerLevel(outerRow, { allowBareEffort: true }) !== level;
+      });
+      if (allRows.length) {
+        const grouped = new Map();
+        for (const row of allRows) {
+          const group = row.closest('[role="group"], [role="radiogroup"]') || root;
+          if (!grouped.has(group)) grouped.set(group, []);
+          grouped.get(group).push(row);
+        }
+        const groupedRows = [...grouped.values()].map((rows) => ({
+          rows,
+          distinct: new Set(rows.map(optionLevel).filter(Boolean)).size,
+          checked: rows.some((row) => row.matches('[aria-checked="true"], [aria-selected="true"], [data-state="checked"]')),
+        })).sort((left, right) => right.distinct - left.distinct || Number(right.checked) - Number(left.checked) || right.rows.length - left.rows.length);
         if (groupedRows[0] && groupedRows[0].rows.length) return groupedRows[0].rows;
-        continue;
       }
-      if (allRows.length) return allRows;
       const fallback = findModelOptions(root, picker) || [];
       if (fallback.length) return fallback;
     }
@@ -1895,7 +1921,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
             <input type="checkbox" data-cgs-setting="adaptiveRouting" aria-label="Choose a model level for every message">
           </label>
           <label class="cgs-setting">
-            <span><strong>Maximum Auto level</strong><small>“Highest available” allows recognized Extra High, Ultra, and Pro-class labels currently shown in the picker, only when the prompt has multiple hard-task signals. Prefix a prompt with <code>!route:high</code>, <code>!route:pro</code>, or <code>!route:max</code> for a one-message override; this safety cap still applies.</small></span>
+            <span><strong>Maximum Auto level</strong><small>“Highest available” allows Extra High and Pro when the prompt has multiple hard-task signals. Prefix a prompt with <code>!route:high</code>, <code>!route:pro</code>, or <code>!route:max</code> for a one-message override; this safety cap still applies.</small></span>
             <select data-cgs-setting="autoMaxLevel" aria-label="Maximum Adaptive Auto level"><option value="high">High</option><option value="extra-high">Extra High</option><option value="highest">Highest available</option></select>
           </label>
           <label class="cgs-setting">
@@ -2477,9 +2503,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       });
     }
 
-    function activateModelControl(node) {
+    function dispatchModelControlPointer(node) {
       if (!node || typeof node.dispatchEvent !== 'function') return false;
-      const before = modelControlActivationSnapshot(node);
       let rect = null;
       try { rect = node.getBoundingClientRect && node.getBoundingClientRect(); } catch (_error) { rect = null; }
       const clientX = rect && Number.isFinite(rect.left) ? rect.left + Math.max(0, rect.width || 0) / 2 : 0;
@@ -2502,16 +2527,78 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         };
         node.dispatchEvent(new EventConstructor(type, init));
       };
-      let pointerDispatched = false;
       try {
         dispatchPointer('pointerdown', 1);
-        pointerDispatched = true;
         dispatchPointer('pointerup', 0);
+        return true;
       } catch (_error) {
-        pointerDispatched = false;
+        return false;
       }
+    }
+
+    function activateModelControl(node) {
+      if (!node || typeof node.dispatchEvent !== 'function') return false;
+      const before = modelControlActivationSnapshot(node);
+      const pointerDispatched = dispatchModelControlPointer(node);
       if (!modelControlActivationChanged(node, before)) return programmaticClick(node);
       return pointerDispatched;
+    }
+
+    function modelControlOpenedAfter(picker, before) {
+      const after = modelControlActivationSnapshot(picker);
+      if (after.expanded === 'true' || after.state === 'open') return picker;
+      const openedRoot = after.roots.find((entry) => {
+        if (!entry.connected || entry.hidden || entry.ariaHidden === 'true' || entry.state === 'closed') return false;
+        const previous = before.roots.find((candidate) => candidate.root === entry.root);
+        return !previous || previous.hidden !== entry.hidden || previous.ariaHidden !== entry.ariaHidden ||
+          previous.state !== entry.state || previous.visible !== entry.visible;
+      });
+      return openedRoot && openedRoot.root || null;
+    }
+
+    async function openModelControl(node, snapshot = null, deadline = Date.now() + 1_500) {
+      if (!node || typeof node.dispatchEvent !== 'function') return false;
+      if (node.getAttribute('aria-expanded') === 'true' || node.getAttribute('data-state') === 'open') return true;
+      const canContinue = () => !state.adaptiveCancelled && (!snapshot || validateSendSnapshot(snapshot).ok);
+      const waitForOpen = (before, maximumWait) => {
+        const remaining = Math.max(0, deadline - Date.now());
+        const immediate = modelControlOpenedAfter(node, before);
+        if (immediate || remaining < 50) return Promise.resolve(immediate);
+        return waitForCondition(() => modelControlOpenedAfter(node, before), {
+          root: doc.documentElement,
+          win,
+          timeout: Math.min(maximumWait, remaining),
+          attributes: true,
+        });
+      };
+
+      let before = modelControlActivationSnapshot(node);
+      const pointerDispatched = dispatchModelControlPointer(node);
+      const immediatePointerOpen = modelControlOpenedAfter(node, before);
+      if (pointerDispatched && immediatePointerOpen) return true;
+      if (!canContinue()) return false;
+
+      before = modelControlActivationSnapshot(node);
+      try { node.focus({ preventScroll: true }); } catch (_error) { try { node.focus(); } catch (_focusError) { /* ignore */ } }
+      try {
+        node.dispatchEvent(new win.KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          code: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        }));
+      } catch (_error) {
+        return false;
+      }
+      if (await waitForOpen(before, 120)) return true;
+      if (!canContinue()) return false;
+
+      // Legacy controls may still be ordinary buttons. ChatGPT's current
+      // BasicTrigger ignores click, so this never substitutes for the
+      // pointer/ArrowDown path above; it only preserves older layouts.
+      before = modelControlActivationSnapshot(node);
+      return Boolean(programmaticClick(node) && await waitForOpen(before, 350));
     }
 
     function controlledModelMenu(picker) {
@@ -2621,8 +2708,17 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           attributeFilter: ['aria-hidden', 'data-state', 'hidden', 'class', 'style', 'role'],
         });
       }
-      if (!activateModelControl(picker)) {
+      if (!await openModelControl(picker, snapshot, activeDiscoveryDeadline)) {
         if (menuMutationObserver) menuMutationObserver.disconnect();
+        if (state.adaptiveCancelled) {
+          toast('Adaptive send cancelled. Your draft is unchanged.');
+          return false;
+        }
+        const activationValidation = validateSendSnapshot(snapshot);
+        if (!activationValidation.ok) {
+          toast(`${activationValidation.reason} It was not sent.`, 7_000);
+          return false;
+        }
         if (hasAlternatePicker) {
           return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
         }
@@ -2743,10 +2839,16 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           return replayNativeSend(snapshot, decision, target === 'instant' && finalSliderLevel === 'auto' ? 'auto' : target, manual, reason);
         }
       }
-      const exactTargetVisible = target === 'max' || (options || []).some((option) => {
+      const exactTargetOptions = target === 'max' ? [] : (options || []).filter((option) => {
         const level = optionLevel(option);
         return level === target || target === 'instant' && level === 'auto';
       });
+      const exactTargetVisible = target === 'max' || exactTargetOptions.length > 0;
+      if (exactTargetOptions.length > 1) {
+        closeModelMenu(picker);
+        toast(`ChatGPT showed more than one ${modelLevelLabel(target)} control. Your draft was not sent.`, 8_000);
+        return false;
+      }
       if ((!options || !options.length || !exactTargetVisible) && hasAlternatePicker) {
         closeModelMenu(picker);
         return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
@@ -2811,7 +2913,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           if (verificationPicker) {
             const alreadyOpen = verificationPicker.getAttribute('aria-expanded') === 'true' ||
               verificationPicker.getAttribute('data-state') === 'open';
-            if (alreadyOpen || activateModelControl(verificationPicker)) {
+            if (alreadyOpen || await openModelControl(verificationPicker, snapshot, Date.now() + 1_200)) {
               const verificationOptions = await waitForCondition(() => {
                 const found = currentIntelligenceOptions(doc, verificationPicker);
                 return found.length ? found : null;

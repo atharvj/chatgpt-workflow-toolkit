@@ -129,6 +129,185 @@ async function createHarness(options = {}) {
   };
 }
 
+async function createProductionIntelligenceHarness(options = {}) {
+  const {
+    prompt = 'what is 2+2',
+    sourceLevel = 'Extra High',
+    activation = 'pointer-sync',
+    duplicateLevel = '',
+    radixRows = false,
+    zeroRectRows = false,
+  } = options;
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div role="menu" data-state="open" id="unrelated-intelligence-menu">
+      <div data-testid="composer-intelligence-picker-content" role="group">
+        <div role="group"><div id="unrelated-instant" role="menuitemradio">Instant</div></div>
+      </div>
+    </div>
+    <main><div data-composer-surface="true"><form>
+      <textarea id="prompt-textarea"></textarea>
+      <button type="button" class="__composer-pill" id="production-intelligence-trigger" aria-haspopup="menu" aria-expanded="false" data-state="closed"></button>
+      <button type="button" data-testid="send-button">Send</button>
+    </form></div></main>
+  </body></html>`, {
+    url: 'https://chatgpt.com/c/production-intelligence-harness',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const composer = document.querySelector('#prompt-textarea');
+  const picker = document.querySelector('#production-intelligence-trigger');
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  const levels = [
+    ['Instant', '5.5'],
+    ['Medium', '5.6'],
+    ['High', '5.6'],
+    ['Extra High', '5.6'],
+    ['Pro', '5.6'],
+  ];
+  const counters = {
+    clicks: 0,
+    decoyClicks: 0,
+    keydowns: 0,
+    optionClicks: 0,
+    pointerdowns: 0,
+    sends: 0,
+  };
+  const timers = new Set();
+  let currentLevel = sourceLevel;
+  let internalOpen = false;
+
+  const setPickerLabel = () => {
+    const version = levels.find(([level]) => level === currentLevel)?.[1] || '5.6';
+    picker.innerHTML = `<span>${currentLevel}</span><span>${version}</span>`;
+  };
+  const closeMenu = () => {
+    internalOpen = false;
+    document.querySelector('#production-intelligence-menu')?.remove();
+    picker.removeAttribute('aria-controls');
+    picker.setAttribute('aria-expanded', 'false');
+    picker.dataset.state = 'closed';
+  };
+  const renderState = () => {
+    if (!internalOpen) {
+      closeMenu();
+      return;
+    }
+    if (document.querySelector('#production-intelligence-menu')) return;
+    const menu = document.createElement('div');
+    menu.id = 'production-intelligence-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-labelledby', picker.id);
+    menu.setAttribute('data-radix-menu-content', '');
+    menu.dataset.state = 'open';
+    const content = document.createElement('div');
+    content.dataset.testid = 'composer-intelligence-picker-content';
+    content.setAttribute('role', 'group');
+    if (zeroRectRows) content.style.display = 'contents';
+    const singletonGroup = document.createElement('div');
+    singletonGroup.setAttribute('role', 'group');
+    const singleton = document.createElement('div');
+    singleton.setAttribute('role', 'menuitemradio');
+    singleton.textContent = 'Instant';
+    singleton.addEventListener('click', () => { counters.decoyClicks += 1; });
+    singletonGroup.append(singleton);
+    content.append(singletonGroup);
+    const radioGroup = document.createElement('div');
+    radioGroup.setAttribute('role', 'group');
+    for (const [label, version] of levels) {
+      const option = document.createElement('div');
+      option.setAttribute('role', 'menuitemradio');
+      if (radixRows) option.setAttribute('data-radix-collection-item', '');
+      option.setAttribute('aria-checked', String(label === currentLevel));
+      option.innerHTML = `<span>${label}</span><span>${version}</span>`;
+      if (zeroRectRows) option.style.display = 'contents';
+      option.addEventListener('click', () => {
+        counters.optionClicks += 1;
+        currentLevel = label;
+        setPickerLabel();
+        closeMenu();
+      });
+      radioGroup.append(option);
+    }
+    if (duplicateLevel) {
+      const duplicate = document.createElement('div');
+      duplicate.setAttribute('role', 'menuitemradio');
+      duplicate.textContent = duplicateLevel;
+      duplicate.addEventListener('click', () => { counters.optionClicks += 1; });
+      radioGroup.append(duplicate);
+    }
+    content.append(radioGroup);
+    menu.append(content);
+    document.body.append(menu);
+    picker.setAttribute('aria-controls', menu.id);
+    picker.setAttribute('aria-expanded', 'true');
+    picker.dataset.state = 'open';
+  };
+  const scheduleRender = () => {
+    const timer = dom.window.setTimeout(() => {
+      timers.delete(timer);
+      renderState();
+    }, 40);
+    timers.add(timer);
+  };
+
+  composer.value = prompt;
+  setPickerLabel();
+  document.querySelector('#unrelated-instant').addEventListener('click', () => { counters.decoyClicks += 1; });
+  picker.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    counters.pointerdowns += 1;
+    if (activation === 'keyboard') return;
+    internalOpen = true;
+    if (activation === 'pointer-async') scheduleRender();
+    else renderState();
+  });
+  picker.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowDown') return;
+    counters.keydowns += 1;
+    internalOpen = true;
+    if (activation === 'pointer-sync') renderState();
+    else scheduleRender();
+  });
+  picker.addEventListener('click', (event) => {
+    event.preventDefault();
+    counters.clicks += 1;
+    if (activation === 'pointer-async') {
+      internalOpen = !internalOpen;
+      scheduleRender();
+    }
+  });
+  sendButton.addEventListener('click', () => { counters.sends += 1; });
+
+  if (zeroRectRows) {
+    Object.defineProperty(dom.window.navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 Chrome/149.0.0.0 Safari/537.36',
+    });
+    const rect = { x: 0, y: 0, top: 0, left: 0, right: 120, bottom: 32, width: 120, height: 32 };
+    for (const element of [composer, picker, sendButton]) {
+      element.getClientRects = () => [rect];
+      element.getBoundingClientRect = () => rect;
+    }
+  }
+
+  const app = toolkit.createApp(document, dom.window);
+  await app.start();
+  return {
+    app,
+    composer,
+    counters,
+    document,
+    dom,
+    picker,
+    sendButton,
+    cleanup() {
+      for (const timer of timers) dom.window.clearTimeout(timer);
+      if (app.state.observer) app.state.observer.disconnect();
+      dom.window.close();
+    },
+  };
+}
+
 async function finishAdaptiveSend(harness) {
   let pending = harness.app.state.adaptiveSendPromise;
   if (!pending) {
@@ -323,6 +502,123 @@ test('current pointerdown Radix picker switches High5.6 to Instant5.5', async (t
   assert.equal(app.state.lastRouteDecision.target, 'instant');
   assert.equal(app.state.lastRouteDecision.level, 'instant');
   assert.doesNotMatch(document.querySelector('#cgs-toast').textContent, /no compatible auto level/iu);
+});
+
+test('production BasicTrigger waits for async open and accepts zero-rect direct rows', async (t) => {
+  const harness = await createProductionIntelligenceHarness({
+    prompt: 'what is 2+2',
+    sourceLevel: 'Extra High',
+    activation: 'pointer-async',
+    radixRows: false,
+    zeroRectRows: true,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.pointerdowns, 1);
+  assert.equal(harness.counters.keydowns, 1, 'ArrowDown may safely reinforce an asynchronously opening BasicTrigger');
+  assert.equal(harness.counters.clicks, 0, 'the no-op BasicTrigger click fallback must not toggle an async open closed');
+  assert.equal(harness.counters.decoyClicks, 0);
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'instant');
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('production BasicTrigger uses ArrowDown when synthetic pointerdown is ignored', async (t) => {
+  const harness = await createProductionIntelligenceHarness({
+    prompt: 'what is 2+2',
+    sourceLevel: 'Extra High',
+    activation: 'keyboard',
+    radixRows: false,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.pointerdowns, 1);
+  assert.equal(harness.counters.keydowns, 1);
+  assert.equal(harness.counters.clicks, 0, 'the current BasicTrigger must open without relying on click');
+  assert.equal(harness.counters.decoyClicks, 0);
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'instant');
+  assert.equal(harness.counters.sends, 1);
+});
+
+test('ambiguous duplicate target rows are never clicked or sent', async (t) => {
+  const prompt = 'what is 2+2';
+  const harness = await createProductionIntelligenceHarness({
+    prompt,
+    sourceLevel: 'Extra High',
+    activation: 'pointer-sync',
+    duplicateLevel: 'Instant',
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.optionClicks, 0);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.composer.value, prompt);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /more than one Instant control.*draft was not sent/iu);
+});
+
+test('automatic routing selects every available direct Intelligence level', async (t) => {
+  const cases = [
+    {
+      expected: 'instant',
+      prompt: 'what is 2+2',
+      sourceLevel: 'Extra High',
+    },
+    {
+      expected: 'medium',
+      prompt: 'Compare TCP and UDP for a beginner.',
+      sourceLevel: 'Instant',
+    },
+    {
+      expected: 'high',
+      prompt: 'Debug this failing test:\nTypeError: cannot read property of undefined',
+      sourceLevel: 'Medium',
+    },
+    {
+      expected: 'extra-high',
+      prompt: 'Design a production API architecture with concurrency risks, migration, rollback, tests, and security tradeoffs.',
+      sourceLevel: 'High',
+    },
+    {
+      expected: 'pro',
+      prompt: 'Design and implement a production compiler end to end. Specify the parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument for every optimization.',
+      sourceLevel: 'Extra High',
+    },
+  ];
+
+  for (const [index, scenario] of cases.entries()) {
+    await t.test(scenario.expected, async () => {
+      const harness = await createProductionIntelligenceHarness({
+        prompt: scenario.prompt,
+        sourceLevel: scenario.sourceLevel,
+        activation: 'pointer-sync',
+        radixRows: index % 2 === 0,
+      });
+      try {
+        harness.sendButton.click();
+        await finishAdaptiveSend(harness);
+
+        assert.equal(harness.counters.decoyClicks, 0);
+        assert.equal(harness.counters.optionClicks, 1);
+        assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), scenario.expected);
+        assert.equal(harness.counters.sends, 1);
+        assert.equal(harness.app.state.lastRouteDecision.level, scenario.expected);
+      } finally {
+        harness.cleanup();
+      }
+    });
+  }
 });
 
 test('Power slider moves Extra High through High and Medium to Instant before sending', async (t) => {
@@ -1168,7 +1464,7 @@ test('plain Enter is captured, while Shift+Enter and IME Enter are untouched', a
   assert.equal(harness.counters.sends, 1);
 });
 
-test('draft mutation while a delayed model menu opens cancels replay', async (t) => {
+test('draft mutation before model activation cancels replay without opening the picker', async (t) => {
   const harness = await createHarness({
     prompt: 'Thanks!',
     pickerLevel: 'High',
@@ -1180,7 +1476,7 @@ test('draft mutation while a delayed model menu opens cancels replay', async (t)
   harness.composer.value = 'Changed while the menu was opening';
   await finishAdaptiveSend(harness);
 
-  assert.equal(harness.counters.pickerOpens, 1);
+  assert.equal(harness.counters.pickerOpens, 0);
   assert.equal(harness.counters.optionClicks, 0);
   assert.equal(harness.counters.sends, 0);
   assert.equal(harness.composer.value, 'Changed while the menu was opening');
