@@ -70,7 +70,7 @@ test('completed turn helpers exclude the actively streaming response', () => {
   assert.equal(toolkit.isTurnStreaming(document.querySelector('[data-testid="conversation-turn-2"]'), document), true);
 });
 
-test('decorateTurn adds one Ask aside control per assistant response', () => {
+test('decorateTurn adds one Ask in new chat control per assistant response', () => {
   const { document } = createDom(`
     <article id="assistant" data-testid="conversation-turn-1" data-turn="assistant">
       <div class="actions"><button data-testid="copy-turn-action-button">Copy</button></div>
@@ -82,7 +82,7 @@ test('decorateTurn adds one Ask aside control per assistant response', () => {
   const fallback = document.querySelector('#fallback');
 
   assert.equal(toolkit.decorateTurn(document, assistant), true);
-  assert.equal(assistant.querySelector('.actions > .cgs-turn-action').textContent, '↗ Ask aside');
+  assert.equal(assistant.querySelector('.actions > .cgs-turn-action').textContent, '↗ Ask in new chat');
   assert.equal(toolkit.decorateTurn(document, assistant), false, 'duplicate controls are not added');
   assert.equal(toolkit.decorateTurn(document, fallback), true);
   assert.ok(fallback.querySelector('.cgs-turn-fallback-row > .cgs-turn-action'));

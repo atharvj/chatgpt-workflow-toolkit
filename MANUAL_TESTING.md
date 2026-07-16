@@ -7,36 +7,44 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 ## Baseline
 
 - Enable the userscript and reload `https://chatgpt.com/`.
-- Confirm the **Continue lightweight** dock appears after the first completed response and ordinary scrolling, typing, streaming, copy, edit, retry, and voice controls still work.
+- Confirm the **Continue in fresh chat** dock appears after the first completed response and ordinary scrolling, typing, streaming, copy, edit, retry, and voice controls still work.
 - Confirm the continuation action stays hidden on the blank home composer and while a response is streaming.
 - Open DevTools and confirm Workflow Toolkit produces no errors and no network requests.
 
-## Ask aside
+## Settings
+
+- Click the in-page gear and confirm a centered settings modal opens above ChatGPT.
+- Click inside the modal, its backdrop, and the covered page; confirm settings remains open.
+- Confirm the close button and Escape each close the modal.
+- Open the userscript menu and confirm **Open Workflow Toolkit settings…** is its only toolkit action and opens the same modal.
+- Repeat at a narrow mobile viewport and confirm the modal remains centered and scrolls internally.
+
+## Ask in new chat
 
 - Ask ChatGPT for a numbered set of at least five instructions.
-- Click **Ask aside** under the response, type a question about step 3, and open it.
+- Click **Ask in new chat** under the response, type a question about step 3, and open it.
 - Confirm a separate popup/tab is created, the URL changes to a new conversation, and the question is filled there for review.
 - Confirm the original tab remains at the same scroll position and has no new message.
 - Ask a second follow-up in the new branch and confirm it understands the earlier conversation.
-- Add another exchange to the original, ask aside from an older response with **Through latest response**, and confirm the branch includes the later completed exchange.
+- Add another exchange to the original, ask from an older response with **Through latest response**, and confirm the branch includes the later completed exchange.
 - Repeat with **Only through this response** and confirm the branch stops at the selected response.
 - Turn automatic sending off and confirm the next side question is filled but not sent.
 
 ## Selected instruction
 
 - Select part of one instruction in an assistant response.
-- Confirm the temporary **Ask aside** pill appears near the selection.
+- Confirm the temporary **Ask in new chat** pill appears near the selection.
 - Open it and confirm the selected text is quoted, including multiline selections.
 - Select ordinary text outside an assistant response and confirm no pill appears.
 
-## Continue lightweight
+## Continue in fresh chat
 
-- Click **Continue lightweight → Prepare** and confirm the handoff request is filled but not sent.
+- Click **Continue in fresh chat → Prepare** and confirm the handoff request is filled but not sent.
 - Send it, use ChatGPT's normal Copy action on the result, then choose **Open fresh**.
 - Confirm the new side chat is empty, prompts you to paste, and contains none of the old rendered turns.
 - Paste the handoff and continue normally.
 - Confirm **Prepare** refuses to overwrite an unrelated existing draft.
-- Choose **Use full-context branch** and confirm the full native branch path remains available.
+- Choose **Branch with full context** and confirm the full native branch path remains available only inside this dialog.
 - Repeat the fresh-chat and branch paths with **New tab** selected in Workflow Toolkit settings.
 
 ## Adaptive Auto

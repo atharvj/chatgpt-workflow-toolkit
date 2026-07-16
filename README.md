@@ -4,8 +4,8 @@ A lightweight userscript that adds better conversation tools to ChatGPT.
 
 ## Features
 
-- Ask questions about any response in a separate, context-aware chat.
-- Continue laggy conversations in a fresh chat with a compact handoff.
+- **Ask in new chat** about any response without changing the original conversation.
+- **Continue in fresh chat** with a compact handoff when a conversation becomes laggy.
 - Automatically choose a model/intelligence level for each message.
 - Remove the “Start writing” prompt.
 - Keep the original conversation open in a side window or tab.

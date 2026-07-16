@@ -7,7 +7,7 @@ const test = require('node:test');
 const toolkit = require(join(__dirname, '..', 'chatgpt-workflow-toolkit.user.js'));
 
 test('normalizeText and settings sanitization use stable defaults', () => {
-  assert.equal(toolkit.normalizeText('  Ask\n\t aside  '), 'Ask aside');
+  assert.equal(toolkit.normalizeText('  Ask\n\t in new chat  '), 'Ask in new chat');
   assert.deepEqual(toolkit.sanitizeSettings(null), toolkit.DEFAULT_SETTINGS);
   assert.deepEqual(toolkit.sanitizeSettings({
     openMode: 'tab',

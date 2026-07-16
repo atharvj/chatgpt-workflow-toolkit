@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.2.0
+// @version      1.3.0
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Atharv Joshi
 // @license      MIT
@@ -42,7 +42,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -207,13 +207,18 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     .cgs-auto-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #10a37f; }
     .cgs-auto-badge[data-enabled="false"] { color: var(--text-secondary, #6b7280); background: rgba(127, 127, 127, .12); }
     .cgs-auto-badge[data-enabled="false"]::before { background: #9ca3af; }
-    #cgs-settings {
+    #cgs-settings-backdrop {
       position: fixed;
-      right: 18px;
-      bottom: 132px;
-      z-index: 2147483001;
-      width: min(370px, calc(100vw - 24px));
-      max-height: min(650px, calc(100vh - 160px));
+      inset: 0;
+      z-index: 2147483002;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      background: rgba(0, 0, 0, .42);
+    }
+    #cgs-settings {
+      width: min(520px, 100%);
+      max-height: min(720px, calc(100vh - 36px));
       overflow: auto;
       padding: 16px;
       border: 1px solid color-mix(in srgb, var(--text-primary, #111827) 14%, transparent);
@@ -335,7 +340,6 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     .cgs-recovery-note { padding: 9px 10px; border-radius: 9px; color: #7c4a03; background: #fff4d6; font-size: 12px; }
     @media (max-width: 720px) {
       #cgs-dock { right: 10px; bottom: 68px; }
-      #cgs-settings { right: 10px; bottom: 120px; }
       .cgs-dock-label, .cgs-auto-badge { display: none; }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -1585,48 +1589,50 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     root.id = UI_ROOT_ID;
     root.innerHTML = `
       <div id="cgs-dock" aria-label="ChatGPT Workflow Toolkit controls" hidden>
-        <button class="cgs-button" type="button" data-cgs-action="open-handoff" aria-label="Continue lightweight" title="Continue in a fresh chat with a compact handoff">
-          <span aria-hidden="true">↗</span><span class="cgs-dock-label">Continue lightweight</span>
+        <button class="cgs-button" type="button" data-cgs-action="open-handoff" aria-label="Continue in fresh chat" title="Continue in a fresh chat with a compact handoff">
+          <span aria-hidden="true">↗</span><span class="cgs-dock-label">Continue in fresh chat</span>
         </button>
         <span class="cgs-auto-badge" data-cgs-auto-badge data-enabled="true" title="Adaptive Auto is ready">Adaptive Auto</span>
         <button class="cgs-icon-button" type="button" data-cgs-action="toggle-settings" aria-label="Open Workflow Toolkit settings" title="Workflow Toolkit settings">⚙</button>
       </div>
 
-      <section id="cgs-settings" aria-label="ChatGPT Workflow Toolkit settings" hidden>
-        <div class="cgs-panel-head">
-          <div><h2>ChatGPT Workflow Toolkit</h2><p>Branches, handoffs, and per-message model routing</p></div>
-          <button class="cgs-icon-button" type="button" data-cgs-action="close-settings" aria-label="Close settings">×</button>
-        </div>
-        <label class="cgs-setting">
-          <span><strong>Adaptive Auto for every message</strong><small>On Send, a fast local heuristic chooses the lowest likely-sufficient level your account exposes—from Instant through the strongest available option. It never sends your draft anywhere else. Hold Alt while sending to bypass it once. ChatGPT’s own automatic switching can still promote Instant to Medium.</small></span>
-          <input type="checkbox" data-cgs-setting="adaptiveRouting" aria-label="Choose a model level for every message">
-        </label>
-        <label class="cgs-setting">
-          <span><strong>Maximum Auto level</strong><small>“Highest available” allows recognized Extra High, Ultra, and Pro-class labels currently shown in the picker, only when the prompt has multiple hard-task signals. Prefix a prompt with <code>!route:high</code>, <code>!route:pro</code>, or <code>!route:max</code> for a one-message override; this safety cap still applies.</small></span>
-          <select data-cgs-setting="autoMaxLevel" aria-label="Maximum Adaptive Auto level"><option value="high">High</option><option value="extra-high">Extra High</option><option value="highest">Highest available</option></select>
-        </label>
-        <label class="cgs-setting">
-          <span><strong>Open branches in</strong><small>A side window keeps the original instructions visible. Small screens use a tab.</small></span>
-          <select data-cgs-setting="openMode" aria-label="Open branches in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
-        </label>
-        <label class="cgs-setting">
-          <span><strong>Send side questions automatically</strong><small>The question is sent only after ChatGPT finishes creating the native branch.</small></span>
-          <input type="checkbox" data-cgs-setting="autoSend" aria-label="Send side questions automatically">
-        </label>
-        <label class="cgs-setting">
-          <span><strong>Show “Ask aside” on responses</strong><small>You can also select response text to get a temporary Ask aside button.</small></span>
-          <input type="checkbox" data-cgs-setting="showTurnButtons" aria-label="Show Ask aside buttons">
-        </label>
-        <label class="cgs-setting">
-          <span><strong>Remove “Start writing”</strong><small>Clears that exact placeholder/control without touching message content.</small></span>
-          <input type="checkbox" data-cgs-setting="hideStartWriting" aria-label="Remove Start writing">
-        </label>
-        <div class="cgs-version">v${VERSION} · Adaptive choices are estimates, not an accuracy guarantee · <a class="cgs-help-link" href="https://help.openai.com/en/articles/20001354" target="_blank" rel="noopener noreferrer">model availability</a></div>
-      </section>
+      <div id="cgs-settings-backdrop" hidden>
+        <section id="cgs-settings" role="dialog" aria-modal="true" aria-labelledby="cgs-settings-title">
+          <div class="cgs-panel-head">
+            <div><h2 id="cgs-settings-title">ChatGPT Workflow Toolkit</h2><p>Branches, handoffs, and per-message model routing</p></div>
+            <button class="cgs-icon-button" type="button" data-cgs-action="close-settings" aria-label="Close settings">×</button>
+          </div>
+          <label class="cgs-setting">
+            <span><strong>Adaptive Auto for every message</strong><small>On Send, a fast local heuristic chooses the lowest likely-sufficient level your account exposes—from Instant through the strongest available option. It never sends your draft anywhere else. Hold Alt while sending to bypass it once. ChatGPT’s own automatic switching can still promote Instant to Medium.</small></span>
+            <input type="checkbox" data-cgs-setting="adaptiveRouting" aria-label="Choose a model level for every message">
+          </label>
+          <label class="cgs-setting">
+            <span><strong>Maximum Auto level</strong><small>“Highest available” allows recognized Extra High, Ultra, and Pro-class labels currently shown in the picker, only when the prompt has multiple hard-task signals. Prefix a prompt with <code>!route:high</code>, <code>!route:pro</code>, or <code>!route:max</code> for a one-message override; this safety cap still applies.</small></span>
+            <select data-cgs-setting="autoMaxLevel" aria-label="Maximum Adaptive Auto level"><option value="high">High</option><option value="extra-high">Extra High</option><option value="highest">Highest available</option></select>
+          </label>
+          <label class="cgs-setting">
+            <span><strong>Open branches in</strong><small>A side window keeps the original instructions visible. Small screens use a tab.</small></span>
+            <select data-cgs-setting="openMode" aria-label="Open branches in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
+          </label>
+          <label class="cgs-setting">
+            <span><strong>Send side questions automatically</strong><small>The question is sent only after ChatGPT finishes creating the native branch.</small></span>
+            <input type="checkbox" data-cgs-setting="autoSend" aria-label="Send side questions automatically">
+          </label>
+          <label class="cgs-setting">
+            <span><strong>Show “Ask in new chat” on responses</strong><small>You can also select response text to get a temporary Ask in new chat button.</small></span>
+            <input type="checkbox" data-cgs-setting="showTurnButtons" aria-label="Show Ask in new chat buttons">
+          </label>
+          <label class="cgs-setting">
+            <span><strong>Remove “Start writing”</strong><small>Clears that exact placeholder/control without touching message content.</small></span>
+            <input type="checkbox" data-cgs-setting="hideStartWriting" aria-label="Remove Start writing">
+          </label>
+          <div class="cgs-version">v${VERSION} · Adaptive choices are estimates, not an accuracy guarantee · <a class="cgs-help-link" href="https://help.openai.com/en/articles/20001354" target="_blank" rel="noopener noreferrer">model availability</a></div>
+        </section>
+      </div>
 
       <div id="cgs-handoff-backdrop" hidden>
         <section class="cgs-dialog" role="dialog" aria-modal="true" aria-labelledby="cgs-handoff-title">
-          <h2 id="cgs-handoff-title">Continue lightweight</h2>
+          <h2 id="cgs-handoff-title">Continue in fresh chat</h2>
           <p>A full branch keeps every old turn and can remain heavy. This two-step handoff creates a genuinely fresh chat without Workflow Toolkit reading the transcript or clipboard.</p>
           <div class="cgs-setting">
             <span><strong>1. Ask for a compact handoff</strong><small>Workflow Toolkit puts a handoff request in the current composer for you to review and send. When ChatGPT answers, use its normal Copy button.</small></span>
@@ -1637,7 +1643,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
             <button class="cgs-primary" type="button" data-cgs-action="open-fresh-chat">Open fresh</button>
           </div>
           <div class="cgs-dialog-actions">
-            <button class="cgs-secondary" type="button" data-cgs-action="full-branch-latest">Use full-context branch</button>
+            <button class="cgs-secondary" type="button" data-cgs-action="full-branch-latest">Branch with full context</button>
             <button class="cgs-secondary" type="button" data-cgs-action="close-handoff">Close</button>
           </div>
         </section>
@@ -1645,7 +1651,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
 
       <div id="cgs-dialog-backdrop" hidden>
         <section class="cgs-dialog" role="dialog" aria-modal="true" aria-labelledby="cgs-dialog-title">
-          <h2 id="cgs-dialog-title">Ask in a separate chat</h2>
+          <h2 id="cgs-dialog-title">Ask in new chat</h2>
           <p>The new chat uses ChatGPT’s native branch, so it keeps context while this page stays put.</p>
           <textarea id="cgs-question" aria-label="Side question" placeholder="What are you stuck on?"></textarea>
           <div class="cgs-dialog-options">
@@ -1673,7 +1679,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
         </section>
       </div>
 
-      <button id="cgs-selection-pill" type="button" data-cgs-action="ask-selection" hidden>Ask aside</button>
+      <button id="cgs-selection-pill" type="button" data-cgs-action="ask-selection" hidden>Ask in new chat</button>
       <div id="cgs-toast" role="status" aria-live="polite" hidden></div>
     `;
     doc.body.append(root);
@@ -1687,9 +1693,9 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     button.type = 'button';
     button.className = TURN_BUTTON_CLASS;
     button.dataset.cgsAction = 'ask-turn';
-    button.setAttribute('aria-label', 'Ask about this response in a separate branched chat');
-    button.title = 'Ask about this response in a separate chat';
-    button.textContent = '↗ Ask aside';
+    button.setAttribute('aria-label', 'Ask about this response in a new chat');
+    button.title = 'Ask about this response in a new chat';
+    button.textContent = '↗ Ask in new chat';
 
     const anchor = turn.querySelector(
       'button[data-testid="copy-turn-action-button"], button[data-testid*="copy-turn"], button[aria-label^="Copy"]',
@@ -1716,6 +1722,9 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
   }
 
   function createApp(doc, win, options = {}) {
+    const injectedMenuRegister = typeof options.registerMenuCommand === 'function'
+      ? options.registerMenuCommand
+      : null;
     const state = {
       settings: { ...DEFAULT_SETTINGS },
       root: null,
@@ -2315,6 +2324,26 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       state.focusReturn = null;
     }
 
+    function openSettings() {
+      syncSettingsUI();
+      const backdrop = element('#cgs-settings-backdrop');
+      if (!backdrop || !backdrop.hidden) return;
+      state.focusReturn = doc.activeElement;
+      backdrop.hidden = false;
+      win.setTimeout(() => {
+        const closeButton = element('[data-cgs-action="close-settings"]');
+        if (closeButton) closeButton.focus();
+      }, 0);
+    }
+
+    function closeSettings(restoreFocus = true) {
+      const backdrop = element('#cgs-settings-backdrop');
+      if (!backdrop || backdrop.hidden) return;
+      backdrop.hidden = true;
+      if (restoreFocus && state.focusReturn && state.focusReturn.isConnected) state.focusReturn.focus();
+      state.focusReturn = null;
+    }
+
     function hideSelectionPill() {
       const pill = element('#cgs-selection-pill');
       if (pill) pill.hidden = true;
@@ -2328,11 +2357,11 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
         return;
       }
       if (hasActiveGeneration(doc)) {
-        toast('Wait for ChatGPT to finish before preparing a lightweight continuation.');
+        toast('Wait for ChatGPT to finish before preparing a fresh-chat continuation.');
         return;
       }
       if (!getCompletedAssistantTurns(doc).length) {
-        toast('Continue lightweight becomes available after ChatGPT completes a response.');
+        toast('Continue in fresh chat becomes available after ChatGPT completes a response.');
         return;
       }
       state.focusReturn = doc.activeElement;
@@ -2835,12 +2864,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
 
     async function onClick(event) {
       const actionNode = event.target.closest && event.target.closest('[data-cgs-action]');
-      if (!actionNode) {
-        if (!event.target.closest('#cgs-settings') && !event.target.closest('[data-cgs-action="toggle-settings"]')) {
-          element('#cgs-settings').hidden = true;
-        }
-        return;
-      }
+      if (!actionNode) return;
       const action = actionNode.dataset.cgsAction;
       if (action === 'ask-turn') {
         event.preventDefault();
@@ -2852,13 +2876,6 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
         const quote = state.selectedQuote;
         hideSelectionPill();
         openQuestion(turn, quote);
-      } else if (action === 'continue') {
-        const turns = getCompletedAssistantTurns(doc);
-        const turn = turns[turns.length - 1];
-        if (!turn) return toast('No completed response is available to continue from.');
-        const draft = getComposerText(findComposer(doc));
-        const reservation = reserveBranchWindow();
-        await launchBranch(turn, { kind: 'continue', question: draft, autoSend: false, reservation });
       } else if (action === 'open-handoff') {
         openHandoff();
       } else if (action === 'close-handoff') {
@@ -2880,10 +2897,9 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
           reservation,
         });
       } else if (action === 'toggle-settings') {
-        syncSettingsUI();
-        element('#cgs-settings').hidden = !element('#cgs-settings').hidden;
+        openSettings();
       } else if (action === 'close-settings') {
-        element('#cgs-settings').hidden = true;
+        closeSettings();
       } else if (action === 'select-instant') {
         await ensureInstant({ userInitiated: true });
       } else if (action === 'cancel-question') {
@@ -2928,7 +2944,9 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
           ? element('#cgs-dialog-backdrop')
           : !element('#cgs-handoff-backdrop').hidden
             ? element('#cgs-handoff-backdrop')
-            : null;
+            : !element('#cgs-settings-backdrop').hidden
+              ? element('#cgs-settings-backdrop')
+              : null;
         if (activeModal) {
           const focusable = [...activeModal.querySelectorAll('button, textarea, select, input, a[href]')]
             .filter((node) => !node.disabled && isProbablyVisible(node));
@@ -2952,7 +2970,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
           finishIncomingJob();
         }
         else if (!element('#cgs-handoff-backdrop').hidden) closeHandoff();
-        else element('#cgs-settings').hidden = true;
+        else if (!element('#cgs-settings-backdrop').hidden) closeSettings();
       }
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !element('#cgs-dialog-backdrop').hidden) {
         event.preventDefault();
@@ -2984,33 +3002,12 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     }
 
     function registerMenus() {
-      const register = gmRegisterMenuCommand ||
+      const register = injectedMenuRegister || gmRegisterMenuCommand ||
         (global.GM && typeof global.GM.registerMenuCommand === 'function'
           ? global.GM.registerMenuCommand.bind(global.GM)
           : null);
       if (!register) return;
-      register('Continue lightweight…', openHandoff);
-      register('Branch latest with full context', () => {
-        const turns = getCompletedAssistantTurns(doc);
-        const turn = turns[turns.length - 1];
-        if (turn) {
-          const reservation = reserveBranchWindow();
-          launchBranch(turn, {
-            kind: 'continue',
-            question: getComposerText(findComposer(doc)),
-            autoSend: false,
-            reservation,
-          });
-        }
-        else toast('No completed response is available to continue from.');
-      });
-      register('Ask latest response aside…', () => {
-        const turns = getCompletedAssistantTurns(doc);
-        openQuestion(turns[turns.length - 1]);
-      });
-      register('Workflow Toolkit settings', () => {
-        element('#cgs-settings').hidden = false;
-      });
+      register('Open Workflow Toolkit settings…', openSettings);
     }
 
     async function start() {
