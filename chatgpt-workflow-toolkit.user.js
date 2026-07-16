@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.5
+// @version      1.4.6
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Atharv Joshi
 // @license      MIT
@@ -44,12 +44,13 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.5';
+  const VERSION = '1.4.6';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
   const JOB_INDEX_KEY = 'chatgptSidecar.jobIndex.v1';
   const JOB_PREFIX = 'chatgptSidecar.job.v1.';
+  const JOB_LOCK_PREFIX = 'chatgptWorkflowToolkit.sideJob.v1.';
   const JOB_HASH_KEY = 'cwt-job';
   const FRESH_HASH_KEY = 'cwt-fresh';
   const FRESH_HANDOFF_PREFIX = 'chatgptWorkflowToolkit.freshHandoff.v1.';
@@ -58,6 +59,7 @@
   const FRESH_HANDOFF_MAX_AGE_MS = 10 * 60 * 1000;
   const FRESH_HANDOFF_MAX_LENGTH = 28_000;
   const QUESTION_MAX_LENGTH = 30_000;
+  const TARGET_FINGERPRINT_MAX_LENGTH = 1_200;
   const SELECTED_QUOTE_MAX_LENGTH = 2_000;
   const UI_ROOT_ID = 'cgs-root';
   const TURN_BUTTON_CLASS = 'cgs-turn-action';
@@ -313,19 +315,6 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       outline: none;
     }
     .cgs-dialog textarea:focus { border-color: #10a37f; box-shadow: 0 0 0 2px rgba(16, 163, 127, .18); }
-    .cgs-dialog-options { display: grid; gap: 11px; margin-top: 10px; }
-    .cgs-dialog-options label { display: flex; align-items: center; gap: 7px; color: var(--text-secondary, #6b7280); font-size: 12px; }
-    .cgs-dialog-options .cgs-context-label { align-items: flex-start; flex-direction: column; gap: 5px; }
-    .cgs-dialog-options input { accent-color: #10a37f; }
-    .cgs-dialog-options select {
-      padding: 5px 7px;
-      border: 1px solid color-mix(in srgb, var(--text-primary, #111827) 18%, transparent);
-      border-radius: 7px;
-      color: var(--text-primary, #111827);
-      background: var(--main-surface-primary, #fff);
-      font: inherit;
-    }
-    .cgs-dialog-help { margin: 5px 0 0 !important; line-height: 1.45; }
     .cgs-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
     .cgs-primary, .cgs-secondary { min-height: 36px; padding: 8px 12px; border-radius: 9px; font-weight: 700; }
     .cgs-primary { color: #fff; background: #10a37f; }
@@ -512,6 +501,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     });
   }
 
+  function getLatestCompletedAssistantTurn(root, fallback = null) {
+    const turns = getCompletedAssistantTurns(root);
+    return turns[turns.length - 1] || fallback;
+  }
+
   function hasActiveGeneration(doc) {
     if (!doc) return false;
     const stopButton = [...doc.querySelectorAll(
@@ -657,6 +651,38 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return text.slice(0, FRESH_HANDOFF_MAX_LENGTH).trim();
   }
 
+  function assistantTurnFingerprint(turn) {
+    const text = normalizeText(extractAssistantHandoff(turn) || readableNodeText(turn));
+    if (!text) return '';
+    if (text.length <= TARGET_FINGERPRINT_MAX_LENGTH - 20) return `${text.length}:${text}`;
+    const edgeLength = Math.floor((TARGET_FINGERPRINT_MAX_LENGTH - 30) / 2);
+    return `${text.length}:${text.slice(0, edgeLength)}\u241f${text.slice(-edgeLength)}`;
+  }
+
+  function conversationContextFingerprint(root, throughTurn = null) {
+    const turns = getTurns(root);
+    const lastIndex = throughTurn ? turns.indexOf(throughTurn) : turns.length - 1;
+    if (lastIndex < 0) return '';
+    let hashA = 0x811c9dc5;
+    let hashB = 0x9e3779b9;
+    let length = 0;
+    const update = (value) => {
+      const text = String(value);
+      length += text.length;
+      for (let index = 0; index < text.length; index += 1) {
+        const code = text.charCodeAt(index);
+        hashA = Math.imul(hashA ^ code, 0x01000193) >>> 0;
+        hashB = Math.imul(hashB ^ code, 0x85ebca6b) >>> 0;
+      }
+    };
+    for (const turn of turns.slice(0, lastIndex + 1)) {
+      const role = roleOfTurn(turn);
+      const content = role === 'assistant' ? extractAssistantHandoff(turn) : readableNodeText(turn);
+      update(`${role}\u241e${normalizeText(content)}\u241f`);
+    }
+    return `${lastIndex + 1}:${length}:${hashA.toString(16).padStart(8, '0')}:${hashB.toString(16).padStart(8, '0')}`;
+  }
+
   function isEditableElement(element) {
     if (!element || element.nodeType !== 1) return false;
     const tag = element.tagName.toLowerCase();
@@ -731,6 +757,23 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     } catch (_error) {
       return '';
     }
+  }
+
+  function conversationIdentity(value) {
+    try {
+      const segments = new URL(String(value)).pathname.split('/').filter(Boolean);
+      for (let index = segments.length - 2; index >= 0; index -= 1) {
+        if (segments[index] === 'c' && segments[index + 1]) return segments[index + 1];
+      }
+      return '';
+    } catch (_error) {
+      return '';
+    }
+  }
+
+  function sanitizeConversationIdentity(value) {
+    const identity = String(value == null ? '' : value).trim();
+    return /^[a-z0-9_-]{1,200}$/iu.test(identity) ? identity : '';
   }
 
   function isReadOnlyChatPage(value) {
@@ -835,15 +878,33 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     if (!kind || !Number.isFinite(createdAt) || createdAt > now + 60_000 || now - createdAt > JOB_MAX_AGE_MS) return null;
     if (!isAllowedChatGPTUrl(sourceUrl)) return null;
     const question = String(raw.question == null ? '' : raw.question).slice(0, QUESTION_MAX_LENGTH);
+    const targetFingerprint = String(raw.targetFingerprint == null ? '' : raw.targetFingerprint)
+      .slice(0, TARGET_FINGERPRINT_MAX_LENGTH);
+    const rawContextFingerprint = String(raw.contextFingerprint == null ? '' : raw.contextFingerprint);
+    const contextFingerprint = /^\d{1,6}:\d{1,12}:[0-9a-f]{8}:[0-9a-f]{8}$/u.test(rawContextFingerprint)
+      ? rawContextFingerprint
+      : '';
+    const sourceConversation = conversationIdentity(sourceUrl);
+    const branchConversation = sanitizeConversationIdentity(raw.branchConversation);
+    const branchReloadFrom = isValidJobId(raw.branchReloadFrom) ? String(raw.branchReloadFrom) : '';
     return {
       version: 1,
       createdAt,
       sourceUrl,
       sourceRoute: routeKey(sourceUrl),
+      sourceConversation,
       kind,
       locator: sanitizeLocator(raw.locator),
+      targetFingerprint,
+      contextFingerprint,
       question,
       autoSend: raw.autoSend === true,
+      branchClickAttempted: raw.branchClickAttempted === true,
+      branchConversation: branchConversation && branchConversation !== sourceConversation ? branchConversation : '',
+      branchReloadFrom,
+      questionInserted: raw.questionInserted === true,
+      baselineUserCount: clampInteger(raw.baselineUserCount, -1, -1, 100_000),
+      sendAttempted: raw.sendAttempted === true,
     };
   }
 
@@ -1591,10 +1652,13 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       'button[title*="More" i]',
     ];
     for (const selector of preferred) {
-      const button = [...turn.querySelectorAll(selector)].find(isProbablyVisible);
+      const button = [...turn.querySelectorAll(selector)].find((candidate) =>
+        isProbablyVisible(candidate) && !candidate.matches(':disabled, [aria-disabled="true"], [data-disabled]'));
       if (button) return button;
     }
-    return [...turn.querySelectorAll('button')].find((button) => /^(?:\.\.\.|…|⋯)$/u.test(normalizeText(button.textContent)) && isProbablyVisible(button)) || null;
+    return [...turn.querySelectorAll('button')].find((button) =>
+      /^(?:\.\.\.|…|⋯)$/u.test(normalizeText(button.textContent)) && isProbablyVisible(button) &&
+      !button.matches(':disabled, [aria-disabled="true"], [data-disabled]')) || null;
   }
 
   function isBranchLabel(value) {
@@ -1605,7 +1669,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
   function findBranchAction(root, excluded = new Set()) {
     if (!root) return null;
     const candidates = [...root.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-collection-item], button, a')];
-    return candidates.find((candidate) => !excluded.has(candidate) && !candidate.closest(`#${UI_ROOT_ID}`) && isProbablyVisible(candidate) && isBranchLabel(accessibleText(candidate))) || null;
+    const matches = candidates.filter((candidate) => !excluded.has(candidate) && !candidate.closest(`#${UI_ROOT_ID}`) &&
+      !candidate.matches(':disabled, [aria-disabled="true"], [data-disabled]') && isProbablyVisible(candidate) &&
+      isBranchLabel(accessibleText(candidate)));
+    const distinct = matches.filter((candidate) => !matches.some((other) => other !== candidate && candidate.contains(other)));
+    return distinct.length === 1 ? distinct[0] : null;
   }
 
   function waitForCondition(test, options = {}) {
@@ -1673,7 +1741,38 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     });
   }
 
-  function waitForStableComposer(doc, win, previousComposer = null, timeout = 20_000) {
+  function waitForConversationChange(win, before, timeout = 15_000) {
+    if (!before) return Promise.resolve('');
+    return new Promise((resolve) => {
+      const startedAt = Date.now();
+      let lastIdentity = '';
+      let stableChecks = 0;
+      const interval = win.setInterval(() => {
+        const current = conversationIdentity(win.location.href);
+        if (current && current !== before) {
+          if (current === lastIdentity) stableChecks += 1;
+          else {
+            lastIdentity = current;
+            stableChecks = 1;
+          }
+          if (stableChecks >= 2) {
+            win.clearInterval(interval);
+            resolve(current);
+            return;
+          }
+        } else {
+          lastIdentity = '';
+          stableChecks = 0;
+        }
+        if (Date.now() - startedAt >= timeout) {
+          win.clearInterval(interval);
+          resolve('');
+        }
+      }, 125);
+    });
+  }
+
+  function waitForStableComposer(doc, win, previousComposer = null, timeout = 20_000, options = {}) {
     return new Promise((resolve) => {
       const startedAt = Date.now();
       let lastCandidate = null;
@@ -1682,10 +1781,10 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         const elapsed = Date.now() - startedAt;
         const candidate = findComposer(doc);
         if (candidate && candidate.isConnected) {
-          // During a branch transition, reusing the source composer is not a
-          // sufficient readiness signal. If ChatGPT intentionally retains it,
-          // the workflow falls back to an explicit user-confirmed insertion.
-          if (previousComposer && candidate === previousComposer && previousComposer.isConnected) {
+          // Before navigation is confirmed, reusing the source composer is not
+          // enough to prove that a branch exists. Once the caller has confirmed
+          // a distinct conversation, ChatGPT may retain the same SPA node.
+          if (!options.allowReused && previousComposer && candidate === previousComposer && previousComposer.isConnected) {
             lastCandidate = null;
             stableChecks = 0;
             if (elapsed >= timeout) {
@@ -1726,8 +1825,31 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     }
   }
 
-  async function clickNativeBranch(doc, win, turn) {
-    if (!turn || !turn.isConnected) return { ok: false, reason: 'The target response is not currently rendered.' };
+  function branchTargetIsStillLatest(doc, turn, expectedTargetFingerprint = '', expectedContextFingerprint = '') {
+    if (!turn || !turn.isConnected || hasActiveGeneration(doc)) return false;
+    const turns = getTurns(doc);
+    if (!turns.length || turns[turns.length - 1] !== turn || getLatestCompletedAssistantTurn(doc) !== turn) return false;
+    if (expectedTargetFingerprint && assistantTurnFingerprint(turn) !== expectedTargetFingerprint) return false;
+    return !expectedContextFingerprint || conversationContextFingerprint(doc, turn) === expectedContextFingerprint;
+  }
+
+  async function clickNativeBranch(
+    doc,
+    win,
+    turn,
+    expectedConversation = '',
+    expectedTargetFingerprint = '',
+    expectedContextFingerprint = '',
+  ) {
+    const stillExpected = () => !expectedConversation || conversationIdentity(win.location.href) === expectedConversation;
+    const targetStillExpected = () => stillExpected() && branchTargetIsStillLatest(
+      doc,
+      turn,
+      expectedTargetFingerprint,
+      expectedContextFingerprint,
+    );
+    if (!stillExpected()) return { ok: false, attempted: false, reason: 'The source conversation changed before branching.' };
+    if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
     try {
       turn.scrollIntoView({ block: 'center', behavior: 'auto' });
     } catch (_error) {
@@ -1736,16 +1858,24 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     turn.classList.add('cgs-branch-target');
     dispatchHover(turn, win);
 
-    const preexistingBranchActions = new Set(
-      [...doc.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-collection-item], button, a')]
-        .filter((candidate) => isProbablyVisible(candidate) && isBranchLabel(accessibleText(candidate))),
-    );
-    if (preexistingBranchActions.size) {
+    const visibleBranchActions = () => [...doc.querySelectorAll(
+      '[role="menuitem"], [role="option"], [data-radix-collection-item], button, a',
+    )].filter((candidate) => !candidate.closest(`#${UI_ROOT_ID}`) && isProbablyVisible(candidate) &&
+      isBranchLabel(accessibleText(candidate)));
+    if (visibleBranchActions().length) {
       try {
         doc.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       } catch (_error) {
-        // Opening the target menu below still fails safe if another portal remains open.
+        // The visibility check below still fails closed.
       }
+      const closed = await waitForCondition(() => visibleBranchActions().length === 0, {
+        root: doc.documentElement,
+        win,
+        timeout: 1_000,
+        attributes: true,
+      });
+      if (!closed) return { ok: false, attempted: false, reason: 'Close the open response menu and try again.' };
+      if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
     }
 
     let moreButton = findMoreButton(turn);
@@ -1757,21 +1887,31 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         attributes: true,
       });
     }
-    if (!moreButton) return { ok: false, reason: 'Could not find More actions on the response.' };
-    moreButton.click();
+    if (!moreButton) return { ok: false, attempted: false, reason: 'Could not find More actions on the response.' };
+    if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+    try {
+      moreButton.click();
+    } catch (_error) {
+      return { ok: false, attempted: false, reason: 'ChatGPT did not open the response menu.' };
+    }
 
     const controlledId = normalizeText(moreButton.getAttribute('aria-controls'));
     const controlledMenu = controlledId ? doc.getElementById(controlledId) : null;
 
     const branchAction = await waitForCondition(
-      () => findBranchAction(controlledMenu && controlledMenu.isConnected ? controlledMenu : doc, preexistingBranchActions), {
+      () => stillExpected() && findBranchAction(controlledMenu && controlledMenu.isConnected ? controlledMenu : doc), {
       root: controlledMenu || doc.documentElement,
       win,
       timeout: 4_000,
     });
-    if (!branchAction) return { ok: false, reason: 'Could not find “Branch in new chat” in ChatGPT’s menu.' };
-    branchAction.click();
-    return { ok: true };
+    if (!branchAction) return { ok: false, attempted: false, reason: 'Could not find “Branch in new chat” in ChatGPT’s menu.' };
+    if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+    try {
+      branchAction.click();
+    } catch (_error) {
+      return { ok: false, attempted: true, reason: 'ChatGPT did not confirm whether the automatic branch action was accepted.' };
+    }
+    return { ok: true, attempted: true };
   }
 
   function legacyGrant(name) {
@@ -1929,10 +2069,6 @@ The request should sound natural, for example: “Okay, let’s continue here. I
             <select data-cgs-setting="openMode" aria-label="Open side questions in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
           </label>
           <label class="cgs-setting">
-            <span><strong>Send questions right away</strong><small>On: sends your question when the new chat opens. Off: leaves it typed so you can edit it first.</small></span>
-            <input type="checkbox" data-cgs-setting="autoSend" aria-label="Send questions right away">
-          </label>
-          <label class="cgs-setting">
             <span><strong>Show “Ask in new chat” on responses</strong><small>You can also select response text to get a temporary Ask in new chat button.</small></span>
             <input type="checkbox" data-cgs-setting="showTurnButtons" aria-label="Show Ask in new chat buttons">
           </label>
@@ -1957,31 +2093,24 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       <div id="cgs-dialog-backdrop" hidden>
         <section class="cgs-dialog" role="dialog" aria-modal="false" aria-labelledby="cgs-dialog-title">
           <h2 id="cgs-dialog-title">Ask in new chat</h2>
-          <p>Write your question here. You can keep reading and scrolling the original chat while you type.</p>
+          <p>Write your question here. The new chat will remember the whole conversation so far, and you can keep reading or scrolling the original while you type.</p>
           <textarea id="cgs-question" aria-label="Question for new chat" placeholder="What are you stuck on?"></textarea>
-          <div class="cgs-dialog-options">
-            <label class="cgs-context-label"><span>What should the new chat remember?</span><select id="cgs-context-mode" aria-label="What the new chat should remember" aria-describedby="cgs-context-help"><option value="clicked">Chat up to this answer</option><option value="latest">Whole chat so far</option></select></label>
-            <p class="cgs-dialog-help" id="cgs-context-help"><strong>Chat up to this answer</strong> includes everything from the beginning through the answer you clicked. <strong>Whole chat so far</strong> includes everything from the beginning through the newest answer.</p>
-            <label><input id="cgs-dialog-autosend" type="checkbox" aria-describedby="cgs-autosend-help"> Send question right away</label>
-            <p class="cgs-dialog-help" id="cgs-autosend-help">On: sends your question as soon as the new chat opens. Off: puts it in the message box so you can edit it first.</p>
-          </div>
           <div class="cgs-dialog-actions">
             <button class="cgs-secondary" type="button" data-cgs-action="cancel-question">Cancel</button>
-            <button class="cgs-primary" type="button" data-cgs-action="submit-question">Open new chat</button>
+            <button class="cgs-primary" type="button" data-cgs-action="submit-question">Ask in new chat</button>
           </div>
         </section>
       </div>
 
       <div id="cgs-recovery-backdrop" hidden>
         <section class="cgs-dialog" role="region" aria-labelledby="cgs-recovery-title">
-          <h2 id="cgs-recovery-title">Finish the branch manually</h2>
+          <h2 id="cgs-recovery-title">Couldn’t finish automatically</h2>
           <p class="cgs-recovery-note" id="cgs-recovery-reason"></p>
-          <p>On the highlighted response, choose More actions (⋯) → Branch in new chat. Workflow Toolkit has kept your question below.</p>
+          <p>Your question was never added to the original conversation. You can safely close this window or try the automatic step again.</p>
           <textarea id="cgs-recovery-question" aria-label="Saved side question" readonly></textarea>
           <div class="cgs-dialog-actions">
             <button class="cgs-secondary" type="button" data-cgs-action="close-recovery">Close</button>
-            <button class="cgs-secondary" type="button" data-cgs-action="retry-branch">Try again</button>
-            <button class="cgs-primary" type="button" data-cgs-action="insert-recovery">I branched — insert question</button>
+            <button class="cgs-primary" type="button" data-cgs-action="retry-branch">Try again</button>
           </div>
         </section>
       </div>
@@ -2041,10 +2170,20 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         win.location.assign(url);
         return true;
     };
+    const reloadPage = typeof options.reloadPage === 'function'
+      ? options.reloadPage
+      : () => {
+        win.location.reload();
+        return true;
+      };
     const freshResponseTimeout = clampInteger(options.freshResponseTimeout, 5 * 60 * 1000, 500, 10 * 60 * 1000);
     const freshStabilityMs = clampInteger(options.freshStabilityMs, 650, 20, 5_000);
     const routingDiscoveryTimeout = clampInteger(options.routingDiscoveryTimeout, 2_500, 50, 10_000);
+    const branchNavigationTimeout = clampInteger(options.branchNavigationTimeout, 15_000, 250, 60_000);
+    const branchComposerTimeout = clampInteger(options.branchComposerTimeout, 20_000, 250, 60_000);
+    const sideSendAckTimeout = clampInteger(options.sideSendAckTimeout, 8_000, 250, 60_000);
     const state = {
+      pageInstanceId: isValidJobId(options.pageInstanceId) ? String(options.pageInstanceId) : createJobId(),
       settings: { ...DEFAULT_SETTINGS },
       root: null,
       observer: null,
@@ -2058,6 +2197,13 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       recoveryJob: null,
       recoveryTurn: null,
       incomingJobId: '',
+      branchConversation: '',
+      branchClickAttempted: false,
+      sideSendAttempted: false,
+      sideLaunchPromise: null,
+      sideAutomationActive: false,
+      incomingRunPromise: null,
+      incomingRecoveryAction: false,
       autoEnsurePromise: null,
       adaptiveSendPromise: null,
       replayingSend: false,
@@ -3048,8 +3194,6 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       state.focusReturn = doc.activeElement;
       const textarea = element('#cgs-question');
       textarea.value = buildSelectedQuestion(selectedText);
-      element('#cgs-dialog-autosend').checked = state.settings.autoSend;
-      element('#cgs-context-mode').value = 'clicked';
       element('#cgs-dialog-backdrop').hidden = false;
       win.setTimeout(() => {
         textarea.focus();
@@ -3091,7 +3235,15 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       state.selectedQuote = '';
     }
 
+    function sideHandoffIsActive() {
+      return Boolean(state.sideAutomationActive || state.incomingRunPromise || state.incomingJobId);
+    }
+
     function openHandoff() {
+      if (sideHandoffIsActive()) {
+        toast('Finish the separate-chat question before starting a fresh-chat continuation.');
+        return;
+      }
       if (isReadOnlyChatPage(win.location.href)) {
         toast('Shared ChatGPT pages are read-only. Open a signed-in conversation before continuing.');
         return;
@@ -3120,6 +3272,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     }
 
     function sendComposerDirectly(composer) {
+      if (sideHandoffIsActive()) return false;
       const sendButton = findSendButton(doc, composer);
       if (!sendButton || sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') return false;
       armSubmitReplayPermit(composer, 'fresh-handoff');
@@ -3223,6 +3376,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
 
     async function continueInFreshChat() {
       if (state.freshContinuationPromise) return state.freshContinuationPromise;
+      if (sideHandoffIsActive()) {
+        closeHandoff(false);
+        toast('Finish the separate-chat question before starting a fresh-chat continuation.');
+        return false;
+      }
       const task = (async () => {
         closeHandoff(false);
         if (isReadOnlyChatPage(win.location.href)) {
@@ -3482,14 +3640,21 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       }
       const jobId = reservation ? reservation.jobId : createJobId();
       const sourceUrl = canonicalPageUrl(win.location.href);
+      if (!conversationIdentity(sourceUrl)) {
+        closeReservedWindow(reservation);
+        toast('Save or send this conversation first so Workflow Toolkit can create a separate chat safely.', 7_000);
+        return false;
+      }
       const job = sanitizeJob({
         version: 1,
         createdAt: Date.now(),
         sourceUrl,
         kind: options.kind === 'continue' ? 'continue' : 'ask',
         locator,
+        targetFingerprint: assistantTurnFingerprint(turn),
+        contextFingerprint: conversationContextFingerprint(doc, turn),
         question: String(options.question || ''),
-        autoSend: options.autoSend === true,
+        autoSend: options.kind === 'continue' ? options.autoSend === true : true,
       });
       if (!job || !await storageSet(`${JOB_PREFIX}${jobId}`, job)) {
         closeReservedWindow(reservation);
@@ -3511,45 +3676,133 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       win.setTimeout(async () => {
         await deleteTrackedJob(jobId);
       }, JOB_MAX_AGE_MS + 5_000);
-      toast(options.kind === 'continue' ? 'Opening a separate native branch…' : 'Opening your side question in a native branch…');
+      toast(options.kind === 'continue' ? 'Opening a separate chat…' : 'Opening and sending your question in a separate chat…');
       return true;
     }
 
-    async function fillQuestion(job, fromRecovery = false, suppliedComposer = null) {
+    function isExpectedBranchConversation(job, expectedConversation = state.branchConversation) {
+      return Boolean(expectedConversation && expectedConversation !== job.sourceConversation &&
+        conversationIdentity(win.location.href) === expectedConversation);
+    }
+
+    async function waitForSideSendAcknowledgement(job, expectedConversation, baselineUserCount) {
+      return waitForCondition(() => {
+        if (!isExpectedBranchConversation(job, expectedConversation)) return { status: 'drift' };
+        const userCount = getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user').length;
+        if (userCount > baselineUserCount) return { status: 'sent' };
+        return null;
+      }, {
+        root: doc.documentElement,
+        win,
+        timeout: sideSendAckTimeout,
+        attributes: true,
+        characterData: true,
+      });
+    }
+
+    async function markSideSendAttempted(job) {
+      state.sideSendAttempted = true;
+      job.sendAttempted = true;
+      if (await persistIncomingJob(job)) return true;
+      if (state.incomingJobId) {
+        await deleteTrackedJob(state.incomingJobId);
+        state.incomingJobId = '';
+      }
+      return false;
+    }
+
+    async function finishObservedSideSend(job, expectedConversation, baselineUserCount) {
+      const acknowledgement = await waitForSideSendAcknowledgement(job, expectedConversation, baselineUserCount);
+      if (!acknowledgement || acknowledgement.status !== 'sent') {
+        showRecovery(
+          job,
+          acknowledgement && acknowledgement.status === 'drift'
+            ? 'The conversation changed after a Send action. Check the separate chat before doing anything else.'
+            : 'ChatGPT did not show the question as a new message. To avoid sending it twice, Workflow Toolkit stopped.',
+          state.recoveryTurn,
+          { canRetry: false },
+        );
+        return false;
+      }
+      toast('Side question sent in the separate chat.');
+      return true;
+    }
+
+    async function fillQuestion(job, fromRecovery = false, suppliedComposer = null, expectedConversation = state.branchConversation) {
       if (!job.question) {
         if (fromRecovery) closeRecovery();
         toast('Branch ready.');
         return true;
+      }
+      if (!isExpectedBranchConversation(job, expectedConversation)) {
+        showRecovery(job, 'The separate-chat safety check changed before the question could be inserted. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      const currentUserCount = () => getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user').length;
+      const baselineUserCount = job.baselineUserCount >= 0 ? job.baselineUserCount : currentUserCount();
+      if (state.sideSendAttempted || job.sendAttempted) {
+        return finishObservedSideSend(job, expectedConversation, baselineUserCount);
       }
       let composer = suppliedComposer || await waitForCondition(() => findComposer(doc), {
         root: doc.documentElement,
         win,
         timeout: 20_000,
       });
+      if (!isExpectedBranchConversation(job, expectedConversation)) {
+        showRecovery(job, 'The conversation changed while the separate chat was opening. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
       if (!composer) {
         showRecovery(job, 'The branch opened, but Workflow Toolkit could not find ChatGPT’s message box.');
         return false;
       }
 
-      if (!setComposerText(composer, job.question, win)) {
+      const existingDraft = getComposerText(composer).trim();
+      const attachments = attachmentState(composer);
+      if (attachments.count) {
+        showRecovery(job, 'The separate chat already has an attachment. Workflow Toolkit left it untouched.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      if (existingDraft && !composerTextEquals(composer, job.question)) {
+        showRecovery(job, 'The separate chat already has a different draft. Workflow Toolkit left it untouched.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      if (job.questionInserted && currentUserCount() > baselineUserCount) {
+        await markSideSendAttempted(job);
+        return finishObservedSideSend(job, expectedConversation, baselineUserCount);
+      }
+      if (job.questionInserted && !existingDraft) {
+        showRecovery(job, 'A previous insertion no longer appears in the message box. To avoid sending the question twice, Workflow Toolkit stopped.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      if (!job.questionInserted) {
+        job.questionInserted = true;
+        job.baselineUserCount = baselineUserCount;
+        if (!await persistIncomingJob(job) || !isExpectedBranchConversation(job, expectedConversation)) {
+          showRecovery(job, 'The question could not be staged safely in the verified separate chat. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+          return false;
+        }
+      }
+      if (!existingDraft && !setComposerText(composer, job.question, win)) {
         showRecovery(job, 'The branch opened, but ChatGPT did not accept the saved question automatically.');
         return false;
       }
 
       await new Promise((resolve) => win.setTimeout(resolve, 250));
-      if (!composer.isConnected || !composerTextEquals(composer, job.question)) {
-        const replacement = await waitForStableComposer(doc, win, composer, 5_000);
-        if (!replacement || !setComposerText(replacement, job.question, win)) {
-          showRecovery(job, 'ChatGPT replaced its message box during the branch transition. Your saved question is still available here.');
-          return false;
-        }
-        composer = replacement;
-        await new Promise((resolve) => win.setTimeout(resolve, 200));
-        if (!composer.isConnected || !composerTextEquals(composer, job.question)) {
-          showRecovery(job, 'ChatGPT’s message box did not keep the saved question.');
-          return false;
-        }
+      if (!isExpectedBranchConversation(job, expectedConversation)) {
+        showRecovery(job, 'The conversation changed before the question could be sent. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
       }
+      if (currentUserCount() > baselineUserCount || hasActiveGeneration(doc)) {
+        await markSideSendAttempted(job);
+        return finishObservedSideSend(job, expectedConversation, baselineUserCount);
+      }
+      const currentComposer = findComposer(doc);
+      if (!currentComposer || !composerTextEquals(currentComposer, job.question) || attachmentState(currentComposer).count) {
+        await markSideSendAttempted(job);
+        return finishObservedSideSend(job, expectedConversation, baselineUserCount);
+      }
+      composer = currentComposer;
 
       if (fromRecovery) closeRecovery();
 
@@ -3560,6 +3813,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       }
 
       const sendButton = await waitForCondition(() => {
+        if (!isExpectedBranchConversation(job, expectedConversation)) return null;
         const button = findSendButton(doc, composer);
         return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
       }, {
@@ -3568,28 +3822,59 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         timeout: 5_000,
         attributes: true,
       });
-      if (!sendButton) {
-        toast('Side question is ready. ChatGPT’s Send button was not available, so press Send when ready.', 7_000);
-        composer.focus();
-        return true;
+      if (!isExpectedBranchConversation(job, expectedConversation)) {
+        showRecovery(job, 'The conversation changed before Send became ready. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
       }
+      if (!sendButton) {
+        showRecovery(job, 'The separate chat opened, but ChatGPT’s Send button did not become ready.');
+        return false;
+      }
+      const readyComposer = findComposer(doc);
+      if (currentUserCount() > baselineUserCount || hasActiveGeneration(doc) ||
+        !readyComposer || !composerTextEquals(readyComposer, job.question)) {
+        await markSideSendAttempted(job);
+        return finishObservedSideSend(job, expectedConversation, baselineUserCount);
+      }
+      composer = readyComposer;
+      if (!await markSideSendAttempted(job)) {
+        showRecovery(job, 'Workflow Toolkit could not save the Send step safely, so it did not click Send.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      const persistedComposer = findComposer(doc);
+      const persistedSendButton = persistedComposer && findSendButton(doc, persistedComposer);
+      if (!isExpectedBranchConversation(job, expectedConversation) ||
+        currentUserCount() > baselineUserCount || hasActiveGeneration(doc) ||
+        !persistedComposer || !composerTextEquals(persistedComposer, job.question) ||
+        attachmentState(persistedComposer).count || !persistedSendButton ||
+        persistedSendButton.disabled || persistedSendButton.getAttribute('aria-disabled') === 'true') {
+        return finishObservedSideSend(job, expectedConversation, baselineUserCount);
+      }
+      composer = persistedComposer;
       const sent = await smartRouteAndSend({ composer, silent: true });
       if (!sent) {
-        toast('Side question is ready, but Adaptive Auto did not send it. Review the draft and press Send.', 7_000);
-        composer.focus();
-        return true;
+        const stillExpected = isExpectedBranchConversation(job, expectedConversation);
+        showRecovery(
+          job,
+          stillExpected
+            ? 'Adaptive Auto could not safely finish. To avoid a duplicate, Workflow Toolkit will not retry this staged question.'
+            : 'The conversation changed while Adaptive Auto was choosing. Nothing was sent.',
+          state.recoveryTurn,
+          { canRetry: false },
+        );
+        return false;
       }
-      toast('Side question sent in the separate branch.');
-      return true;
+      return finishObservedSideSend(job, expectedConversation, baselineUserCount);
     }
 
-    function showRecovery(job, reason, turn = state.recoveryTurn) {
+    function showRecovery(job, reason, turn = state.recoveryTurn, options = {}) {
       state.recoveryJob = job;
       state.recoveryTurn = turn || state.recoveryTurn;
       if (state.recoveryTurn && state.recoveryTurn.isConnected) state.recoveryTurn.classList.add('cgs-branch-target');
       element('#cgs-recovery-reason').textContent = reason;
       const question = element('#cgs-recovery-question');
-      question.value = job.question || '(No saved draft — finish the branch and continue normally.)';
+      question.value = job.question || '(No saved question.)';
+      element('[data-cgs-action="retry-branch"]').hidden = options.canRetry === false;
       element('#cgs-recovery-backdrop').hidden = false;
     }
 
@@ -3600,47 +3885,223 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       state.recoveryTurn = null;
     }
 
-    async function runIncomingJob(job) {
-      const turn = await waitForCondition(() => locateTurn(doc, job.locator), {
+    function turnMatchesBranchJob(turn, job) {
+      if (!turn || !isAssistantTurn(turn)) return false;
+      if (job.targetFingerprint && assistantTurnFingerprint(turn) !== job.targetFingerprint) return false;
+      return !job.contextFingerprint || conversationContextFingerprint(turn.ownerDocument, turn) === job.contextFingerprint;
+    }
+
+    async function persistIncomingJob(job) {
+      if (!state.incomingJobId) return true;
+      const normalized = sanitizeJob(job);
+      return Boolean(normalized && await storageSet(`${JOB_PREFIX}${state.incomingJobId}`, normalized));
+    }
+
+    async function requestVerifiedBranchReload(job) {
+      if (!state.incomingJobId) {
+        showRecovery(job, 'The separate chat opened, but its reload handoff was unavailable. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      job.branchReloadFrom = state.pageInstanceId;
+      if (!await persistIncomingJob(job) || !isExpectedBranchConversation(job, state.branchConversation)) {
+        showRecovery(job, 'The separate chat changed or its reload handoff could not be saved. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      const targetUrl = urlWithJob(canonicalPageUrl(win.location.href), state.incomingJobId);
+      if (!targetUrl) {
+        showRecovery(job, 'Workflow Toolkit could not prepare the verified separate-chat reload. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      try {
+        win.history.replaceState(win.history.state, '', targetUrl);
+        if (reloadPage() === false) throw new Error('reload rejected');
+      } catch (_error) {
+        showRecovery(job, 'The separate chat could not be reloaded for verification. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      toast('Verifying the separate chat before sending…');
+      return true;
+    }
+
+    async function runIncomingJobCore(job) {
+      state.branchClickAttempted = state.branchClickAttempted || job.branchClickAttempted;
+      state.branchConversation = state.branchConversation || job.branchConversation;
+      state.sideSendAttempted = state.sideSendAttempted || job.sendAttempted;
+      let currentConversation = conversationIdentity(win.location.href);
+      if (!state.branchConversation && state.branchClickAttempted && currentConversation && currentConversation !== job.sourceConversation) {
+        state.branchConversation = currentConversation;
+        job.branchConversation = currentConversation;
+        if (!await persistIncomingJob(job)) {
+          showRecovery(job, 'The separate chat was found, but Workflow Toolkit could not save its identity safely. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+          return false;
+        }
+      }
+      let resumingConfirmedBranch = Boolean(
+        state.branchConversation && currentConversation === state.branchConversation && currentConversation !== job.sourceConversation,
+      );
+      let beforeComposer = findComposer(doc);
+
+      if (!resumingConfirmedBranch) {
+        if (!currentConversation || currentConversation !== job.sourceConversation) {
+          showRecovery(job, 'The safety check could not confirm that this window is on the source or verified separate conversation. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+          return false;
+        }
+        if (!state.branchClickAttempted) {
+          const turn = await waitForCondition(() => {
+            if (conversationIdentity(win.location.href) !== job.sourceConversation) return null;
+            if (hasActiveGeneration(doc)) return null;
+            const candidate = getLatestCompletedAssistantTurn(doc);
+            const turns = getTurns(doc);
+            return candidate && turns[turns.length - 1] === candidate ? candidate : null;
+          }, {
+            root: doc.documentElement,
+            win,
+            timeout: 15_000,
+            attributes: true,
+            characterData: true,
+          });
+          if (!turn) {
+            showRecovery(job, 'The newest completed response did not become ready, so Workflow Toolkit did not branch or send anything.');
+            return false;
+          }
+          if (conversationIdentity(win.location.href) !== job.sourceConversation) {
+            showRecovery(job, 'The source conversation changed before the newest response could be saved. Nothing was branched or sent.', state.recoveryTurn, { canRetry: false });
+            return false;
+          }
+          job.locator = getTurnLocator(turn, doc);
+          job.targetFingerprint = assistantTurnFingerprint(turn);
+          job.contextFingerprint = conversationContextFingerprint(doc, turn);
+          if (!await persistIncomingJob(job)) {
+            showRecovery(job, 'Workflow Toolkit could not safely update the saved whole-chat target. Nothing was branched or sent.', state.recoveryTurn, { canRetry: false });
+            return false;
+          }
+          if (conversationIdentity(win.location.href) !== job.sourceConversation ||
+            !branchTargetIsStillLatest(doc, turn, job.targetFingerprint, job.contextFingerprint)) {
+            showRecovery(job, 'The source chat changed before branching. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+            return false;
+          }
+          state.recoveryTurn = turn;
+          beforeComposer = findComposer(doc);
+          state.branchClickAttempted = true;
+          job.branchClickAttempted = true;
+          if (!await persistIncomingJob(job)) {
+            state.branchClickAttempted = false;
+            job.branchClickAttempted = false;
+            showRecovery(job, 'Workflow Toolkit could not save the branch step safely. Nothing was branched or sent.', turn, { canRetry: false });
+            return false;
+          }
+          const clickResult = await clickNativeBranch(
+            doc,
+            win,
+            turn,
+            job.sourceConversation,
+            job.targetFingerprint,
+            job.contextFingerprint,
+          );
+          if (!clickResult.ok) {
+            if (!clickResult.attempted) {
+              state.branchClickAttempted = false;
+              job.branchClickAttempted = false;
+              if (!await persistIncomingJob(job)) {
+                showRecovery(job, 'The response menu changed and Workflow Toolkit could not safely reset the saved branch step.', turn, { canRetry: false });
+                return false;
+              }
+            }
+            showRecovery(job, clickResult.reason, turn);
+            return false;
+          }
+        }
+        const changedConversation = await waitForConversationChange(win, currentConversation, branchNavigationTimeout);
+        if (!changedConversation) {
+          showRecovery(job, 'ChatGPT did not confirm a separate conversation after the automatic branch action. Try again only checks for the result; it will not click Branch twice.');
+          return false;
+        }
+        state.branchConversation = changedConversation;
+        job.branchConversation = changedConversation;
+        if (!await persistIncomingJob(job)) {
+          showRecovery(job, 'The separate chat opened, but Workflow Toolkit could not save its verified identity. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+          return false;
+        }
+        if (state.recoveryTurn) state.recoveryTurn.classList.remove('cgs-branch-target');
+        state.recoveryTurn = null;
+        currentConversation = changedConversation;
+        resumingConfirmedBranch = true;
+      }
+
+      const expectedConversation = state.branchConversation;
+      if (!resumingConfirmedBranch || !isExpectedBranchConversation(job, expectedConversation)) {
+        showRecovery(job, 'The separate-chat identity changed before its context could be verified. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      if (!job.branchReloadFrom || job.branchReloadFrom === state.pageInstanceId) {
+        await requestVerifiedBranchReload(job);
+        return false;
+      }
+      await new Promise((resolve) => win.setTimeout(resolve, 500));
+      if (!isExpectedBranchConversation(job, expectedConversation)) {
+        showRecovery(job, 'The conversation changed while the separate chat was loading. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      const inheritedTurn = await waitForCondition(() => {
+        if (!isExpectedBranchConversation(job, expectedConversation)) return null;
+        const candidate = locateTurn(doc, job.locator);
+        return turnMatchesBranchJob(candidate, job) ? candidate : null;
+      }, {
         root: doc.documentElement,
         win,
-        timeout: 15_000,
+        timeout: branchComposerTimeout,
         attributes: true,
+        characterData: true,
       });
-      if (!turn) {
-        showRecovery(job, 'ChatGPT did not render the response Workflow Toolkit was asked to branch from.');
+      if (!inheritedTurn || !isExpectedBranchConversation(job, expectedConversation)) {
+        showRecovery(
+          job,
+          isExpectedBranchConversation(job, expectedConversation)
+            ? 'The separate chat opened, but its inherited conversation context could not be verified. Nothing was sent.'
+            : 'The conversation changed before its inherited context could be verified. Nothing was sent.',
+          state.recoveryTurn,
+          { canRetry: isExpectedBranchConversation(job, expectedConversation) },
+        );
         return false;
       }
-      state.recoveryTurn = turn;
-      const before = routeKey(win.location.href);
-      const beforeComposer = findComposer(doc);
-      const clickResult = await clickNativeBranch(doc, win, turn);
-      if (!clickResult.ok) {
-        showRecovery(job, clickResult.reason, turn);
+      const branchComposer = await waitForStableComposer(doc, win, beforeComposer, branchComposerTimeout, { allowReused: true });
+      if (!branchComposer || !isExpectedBranchConversation(job, expectedConversation) ||
+        !turnMatchesBranchJob(locateTurn(doc, job.locator), job)) {
+        showRecovery(
+          job,
+          isExpectedBranchConversation(job, expectedConversation)
+            ? 'The separate chat opened, but its message box or inherited context did not stay ready.'
+            : 'The conversation changed before its message box became ready. Nothing was sent.',
+          state.recoveryTurn,
+          { canRetry: isExpectedBranchConversation(job, expectedConversation) },
+        );
         return false;
       }
-      const changedRoute = await waitForRouteChange(win, before, 15_000);
-      if (!changedRoute) {
-        showRecovery(job, 'ChatGPT did not confirm a new branch after the menu action.', turn);
-        return false;
+      state.sideAutomationActive = true;
+      let completed;
+      try {
+        completed = await fillQuestion(job, false, branchComposer, expectedConversation);
+      } finally {
+        state.sideAutomationActive = false;
       }
-      turn.classList.remove('cgs-branch-target');
-      state.recoveryTurn = null;
-      const branchComposer = await waitForStableComposer(doc, win, beforeComposer, 20_000);
-      if (!branchComposer) {
-        showRecovery(job, 'The branch opened, but its message box did not become ready.');
-        return false;
-      }
-      const completed = await fillQuestion(job, false, branchComposer);
       if (completed) await finishIncomingJob();
       return completed;
     }
 
-    async function finishIncomingJob() {
-      const jobId = state.incomingJobId;
-      if (!jobId) return;
-      await deleteTrackedJob(jobId);
+    function runIncomingJob(job) {
+      if (state.incomingRunPromise) return state.incomingRunPromise;
+      const guarded = Promise.resolve(runIncomingJobCore(job)).finally(() => {
+        if (state.incomingRunPromise === guarded) state.incomingRunPromise = null;
+      });
+      state.incomingRunPromise = guarded;
+      return guarded;
+    }
+
+    function clearIncomingJobState() {
       state.incomingJobId = '';
+      state.branchConversation = '';
+      state.branchClickAttempted = false;
+      state.sideSendAttempted = false;
       try {
         if (parseJobId(win.location.href)) {
           win.history.replaceState(win.history.state, '', canonicalPageUrl(win.location.href));
@@ -3650,19 +4111,129 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       }
     }
 
+    async function finishIncomingJob() {
+      const jobId = state.incomingJobId;
+      if (jobId) await deleteTrackedJob(jobId);
+      clearIncomingJobState();
+    }
+
+    async function withIncomingJobLock(jobId, task, messages = {}) {
+      const lockManager = win.navigator && win.navigator.locks;
+      if (!isValidJobId(jobId) || !lockManager || typeof lockManager.request !== 'function') {
+        if (messages.unsupported !== '') {
+          toast(messages.unsupported || 'This browser cannot safely lock the separate-chat handoff, so Workflow Toolkit did not send anything.', 8_000);
+        }
+        return { acquired: false, value: false };
+      }
+      try {
+        return await lockManager.request(
+          `${JOB_LOCK_PREFIX}${jobId}`,
+          { mode: 'exclusive', ifAvailable: true },
+          async (lock) => {
+            if (!lock) {
+              if (messages.busy !== '') {
+                toast(messages.busy || 'This side question is already opening in another window. Nothing was sent here.', 7_000);
+              }
+              return { acquired: false, value: false };
+            }
+            return { acquired: true, value: await task() };
+          },
+        );
+      } catch (_error) {
+        if (messages.error !== '') {
+          toast(messages.error || 'Workflow Toolkit could not safely lock this separate-chat handoff. Nothing was sent.', 8_000);
+        }
+        return { acquired: false, value: false };
+      }
+    }
+
     async function consumeIncomingJob(capturedJobId = '') {
       const jobId = isValidJobId(capturedJobId) ? capturedJobId : parseJobId(win.location.href);
       if (!jobId) return;
-      const raw = await storageGet(`${JOB_PREFIX}${jobId}`, null);
-      const job = sanitizeJob(raw);
-      if (!job) {
-        await deleteTrackedJob(jobId);
-        try { win.history.replaceState(win.history.state, '', canonicalPageUrl(win.location.href)); } catch (_error) { /* Safe fixed-format fragment. */ }
-        toast('This Workflow Toolkit branch request expired. Return to the original chat and try again.');
-        return;
+      const outcome = await withIncomingJobLock(jobId, async () => {
+        // Read only after acquiring the lock so a second page cannot run a
+        // stale copy after the first page advances or completes the job.
+        const raw = await storageGet(`${JOB_PREFIX}${jobId}`, null);
+        const job = sanitizeJob(raw);
+        if (!job) {
+          await deleteTrackedJob(jobId);
+          clearIncomingJobState();
+          toast('This Workflow Toolkit branch request expired. Return to the original chat and try again.');
+          return false;
+        }
+        state.incomingJobId = jobId;
+        state.branchClickAttempted = job.branchClickAttempted;
+        state.branchConversation = job.branchConversation;
+        state.sideSendAttempted = job.sendAttempted;
+        return runIncomingJob(job);
+      });
+      return outcome.value;
+    }
+
+    async function retryIncomingJob() {
+      if (state.incomingRecoveryAction) {
+        toast('A recovery action is already running for this side question.');
+        return false;
       }
-      state.incomingJobId = jobId;
-      await runIncomingJob(job);
+      state.incomingRecoveryAction = true;
+      try {
+        const jobId = state.incomingJobId;
+        if (!isValidJobId(jobId)) {
+          toast('This separate-chat handoff can no longer be retried safely. Return to the original chat and ask again.');
+          return false;
+        }
+        const outcome = await withIncomingJobLock(jobId, async () => {
+          if (state.incomingJobId !== jobId) return false;
+          const job = sanitizeJob(await storageGet(`${JOB_PREFIX}${jobId}`, null));
+          if (!job) {
+            closeRecovery();
+            await finishIncomingJob();
+            toast('This Workflow Toolkit branch request expired. Return to the original chat and try again.');
+            return false;
+          }
+          if (state.incomingJobId !== jobId) return false;
+          state.branchClickAttempted = job.branchClickAttempted;
+          state.branchConversation = job.branchConversation;
+          state.sideSendAttempted = job.sendAttempted;
+          closeRecovery();
+          return runIncomingJob(job);
+        }, {
+          busy: 'Another window is already finishing this side question. Nothing was sent here.',
+        });
+        return outcome.value;
+      } finally {
+        state.incomingRecoveryAction = false;
+      }
+    }
+
+    async function closeIncomingJob() {
+      if (state.incomingRunPromise || state.incomingRecoveryAction) {
+        toast('The automatic side-chat step is already running. Wait for it to finish before closing this copy.', 7_000);
+        return false;
+      }
+      state.incomingRecoveryAction = true;
+      try {
+        const jobId = state.incomingJobId;
+        closeRecovery();
+        if (!isValidJobId(jobId)) {
+          clearIncomingJobState();
+          return true;
+        }
+        const outcome = await withIncomingJobLock(jobId, async () => {
+          if (state.incomingJobId !== jobId) return false;
+          await finishIncomingJob();
+          return true;
+        }, { busy: '', unsupported: '', error: '' });
+        if (!outcome.acquired) {
+          // Never delete shared job state without its lock. This page can still
+          // detach safely while the owner finishes in the other window.
+          clearIncomingJobState();
+          toast('Closed this window’s copy. Another window is already handling the side question.', 7_000);
+        }
+        return outcome.acquired;
+      } finally {
+        state.incomingRecoveryAction = false;
+      }
     }
 
     async function handleSettingChange(target) {
@@ -3736,6 +4307,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       const composer = findComposer(doc);
       const sendButton = findSendButton(doc, composer);
       if (!sendButton || potentialSend !== sendButton) return;
+      if (state.sideAutomationActive) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
       beginAdaptiveSend(event, composer);
     }
 
@@ -3747,6 +4323,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
       const composer = findComposer(doc);
       if (!composerContainsTarget(composer, event.target) || state.composingComposer === composer) return;
+      if (state.sideAutomationActive && !state.replayingSend) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
       if (event.altKey) {
         beginAdaptiveSend(null, composer, { altKey: true });
         return;
@@ -3766,8 +4347,19 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     function onAdaptiveSubmit(event) {
       const composer = findComposer(doc);
       if (!composer || !event.target || event.target !== composer.closest('form')) return;
-      if (consumeSubmitReplayPermit(event, composer)) return;
       if (state.replayingSend) return;
+      // ChatGPT may dispatch the actual form submit shortly after our
+      // programmatic Send click returns. Let only that short-lived, exact
+      // composer replay through while the broader side-job guard stays active.
+      if (state.sideAutomationActive) {
+        if (state.submitReplayPermit && state.submitReplayPermit.kind === 'adaptive-replay' &&
+          consumeSubmitReplayPermit(event, composer)) return;
+        state.submitReplayPermit = null;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (consumeSubmitReplayPermit(event, composer)) return;
       beginAdaptiveSend(event, composer);
     }
 
@@ -3809,36 +4401,38 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       } else if (action === 'cancel-question') {
         closeQuestion();
       } else if (action === 'submit-question') {
+        if (state.sideLaunchPromise) {
+          toast('The separate chat is already opening.');
+          return;
+        }
         const question = element('#cgs-question').value.trim();
         if (!question) {
           toast('Type the question you want to ask in the side chat.');
           return element('#cgs-question').focus();
         }
-        const reservation = reserveBranchWindow();
-        const autoSend = element('#cgs-dialog-autosend').checked;
-        state.settings.autoSend = autoSend;
-        await saveSettings();
         const clickedTurn = state.activeTurn;
-        const contextMode = element('#cgs-context-mode').value;
-        const turns = getCompletedAssistantTurns(doc);
-        const turn = contextMode === 'clicked' ? clickedTurn : turns[turns.length - 1] || clickedTurn;
-        const launched = await launchBranch(turn, { kind: 'ask', question, autoSend, reservation });
-        if (launched) closeQuestion(false);
-      } else if (action === 'close-recovery') {
-        closeRecovery();
-        await finishIncomingJob();
-      } else if (action === 'retry-branch') {
-        const job = state.recoveryJob;
-        closeRecovery();
-        if (job) await runIncomingJob(job);
-      } else if (action === 'insert-recovery') {
-        const job = state.recoveryJob;
-        if (!job) return;
-        if (routeKey(win.location.href) === job.sourceRoute) {
-          return toast('Choose “Branch in new chat” first, then click this button again.', 6_000);
+        const turn = getLatestCompletedAssistantTurn(doc, clickedTurn);
+        const conversationTurns = getTurns(doc);
+        const latestTurn = conversationTurns[conversationTurns.length - 1] || null;
+        if (hasActiveGeneration(doc) || !turn || latestTurn !== turn) {
+          toast('Wait for ChatGPT to finish the latest response so the new chat can remember everything so far.', 7_000);
+          return;
         }
-        const completed = await fillQuestion(job, true);
-        if (completed) await finishIncomingJob();
+        const reservation = reserveBranchWindow();
+        actionNode.disabled = true;
+        const launchTask = launchBranch(turn, { kind: 'ask', question, autoSend: true, reservation });
+        state.sideLaunchPromise = launchTask;
+        try {
+          const launched = await launchTask;
+          if (launched) closeQuestion(false);
+        } finally {
+          if (state.sideLaunchPromise === launchTask) state.sideLaunchPromise = null;
+          actionNode.disabled = false;
+        }
+      } else if (action === 'close-recovery') {
+        await closeIncomingJob();
+      } else if (action === 'retry-branch') {
+        await retryIncomingJob();
       }
     }
 
@@ -3868,8 +4462,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       if (event.key === 'Escape') {
         if (!element('#cgs-dialog-backdrop').hidden) closeQuestion();
         else if (!element('#cgs-recovery-backdrop').hidden) {
-          closeRecovery();
-          finishIncomingJob();
+          void closeIncomingJob();
         }
         else if (!element('#cgs-handoff-backdrop').hidden) closeHandoff();
         else if (!element('#cgs-settings-backdrop').hidden) closeSettings();
@@ -3992,6 +4585,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     getAssistantTurns,
     isTurnStreaming,
     getCompletedAssistantTurns,
+    getLatestCompletedAssistantTurn,
     hasActiveGeneration,
     getTurnLocator,
     sanitizeLocator,
@@ -4000,10 +4594,13 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     quoteForPrompt,
     buildSelectedQuestion,
     extractAssistantHandoff,
+    assistantTurnFingerprint,
+    conversationContextFingerprint,
     cleanStartWriting,
     restoreStartWriting,
     canonicalPageUrl,
     routeKey,
+    conversationIdentity,
     isReadOnlyChatPage,
     isAllowedChatGPTUrl,
     isValidJobId,
@@ -4022,6 +4619,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     composerTextEquals,
     setComposerText,
     findSendButton,
+    waitForConversationChange,
     waitForStableComposer,
     extractModelLevel,
     extractPickerLevel,

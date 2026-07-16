@@ -64,6 +64,9 @@ test('chat URLs are canonicalized and restricted to exact supported hosts', () =
     'https://chatgpt.com/c/abc?model=auto',
   );
   assert.equal(toolkit.routeKey('https://chatgpt.com/c/abc?model=auto#temporary'), '/c/abc?model=auto');
+  assert.equal(toolkit.conversationIdentity('https://chatgpt.com/c/abc?model=auto#temporary'), 'abc');
+  assert.equal(toolkit.conversationIdentity('https://chatgpt.com/g/g-test/c/project-chat?model=high'), 'project-chat');
+  assert.equal(toolkit.conversationIdentity('https://chatgpt.com/?model=auto'), '');
   assert.equal(toolkit.isAllowedChatGPTUrl('https://chatgpt.com/c/abc'), true);
   assert.equal(toolkit.isAllowedChatGPTUrl('https://chat.openai.com/c/abc'), true);
   assert.equal(toolkit.isAllowedChatGPTUrl('http://chatgpt.com/c/abc'), false);
@@ -162,10 +165,19 @@ test('sanitizeJob returns a bounded, normalized one-shot job', () => {
     createdAt: now - 1_000,
     sourceUrl: 'https://chatgpt.com/c/lab?model=auto',
     sourceRoute: '/c/lab?model=auto',
+    sourceConversation: 'lab',
     kind: 'ask',
     locator: { testId: 'conversation-turn-42', turnIndex: 5, assistantIndex: 2 },
+    targetFingerprint: '',
+    contextFingerprint: '',
     question: '123',
     autoSend: true,
+    branchClickAttempted: false,
+    branchConversation: '',
+    branchReloadFrom: '',
+    questionInserted: false,
+    baselineUserCount: -1,
+    sendAttempted: false,
   });
 });
 
@@ -177,11 +189,17 @@ test('sanitizeJob accepts continue jobs and caps oversized questions', () => {
     kind: 'continue',
     question: 'x'.repeat(30_100),
     autoSend: 'true',
+    branchClickAttempted: true,
+    branchConversation: 'separate-chat',
+    sendAttempted: true,
   }, now);
 
   assert.equal(result.kind, 'continue');
   assert.equal(result.question.length, 30_000);
   assert.equal(result.autoSend, false, 'autoSend must be the boolean true');
+  assert.equal(result.branchClickAttempted, true);
+  assert.equal(result.branchConversation, 'separate-chat');
+  assert.equal(result.sendAttempted, true);
 });
 
 test('sanitizeJob rejects malformed, expired, future, and off-site jobs', () => {

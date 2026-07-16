@@ -4,7 +4,7 @@ A small userscript that adds better conversation tools to ChatGPT.
 
 ## Features
 
-- Ask about a response in a separate native branch.
+- Ask a side question in a separate chat with the whole conversation so far.
 - Continue a laggy conversation in a fresh chat with an automatic handoff.
 - Automatically choose a model/intelligence level for each message.
 - Remove “Start writing.”

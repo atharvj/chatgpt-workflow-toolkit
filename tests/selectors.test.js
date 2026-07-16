@@ -54,7 +54,7 @@ test('composer text reads and writes a contenteditable composer', () => {
   assert.equal(inputCount, 1);
 });
 
-test('branch composer readiness requires replacing the source composer', async () => {
+test('branch composer readiness is strict until a separate conversation is confirmed', async () => {
   const dom = createDom('<main><form><textarea id="prompt-textarea"></textarea></form></main>');
   const { document } = dom.window;
   const sourceComposer = toolkit.findComposer(document);
@@ -74,6 +74,36 @@ test('branch composer readiness requires replacing the source composer', async (
   const branchComposer = await ready;
   assert.ok(branchComposer);
   assert.notEqual(branchComposer, sourceComposer);
+  dom.window.close();
+});
+
+test('confirmed separate conversation may reuse ChatGPT SPA composer node', async () => {
+  const dom = createDom('<main><form><textarea id="prompt-textarea"></textarea></form></main>');
+  const { document } = dom.window;
+  const sourceComposer = toolkit.findComposer(document);
+
+  const branchComposer = await toolkit.waitForStableComposer(
+    document,
+    dom.window,
+    sourceComposer,
+    1_200,
+    { allowReused: true },
+  );
+  assert.equal(branchComposer, sourceComposer);
+  dom.window.close();
+});
+
+test('conversation change ignores query-only navigation and requires a different chat ID', async () => {
+  const dom = createDom('<main></main>');
+  const changed = toolkit.waitForConversationChange(dom.window, 'test', 1_200);
+  dom.window.setTimeout(() => {
+    dom.window.history.pushState({}, '', '/c/test?model=instant');
+  }, 75);
+  dom.window.setTimeout(() => {
+    dom.window.history.pushState({}, '', '/c/separate-chat?model=instant');
+  }, 300);
+
+  assert.equal(await changed, 'separate-chat');
   dom.window.close();
 });
 

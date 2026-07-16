@@ -24,12 +24,11 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Ask ChatGPT for a numbered set of at least five instructions.
 - Click **Ask in new chat** under the response and confirm the question form opens as a side panel without dimming or blocking the original chat.
 - Scroll and read the original answer while typing a question about step 3 in the panel.
-- Confirm a separate popup/tab is created, the URL changes to a new conversation, and the question is filled there for review.
+- Confirm the panel has no context or send checkbox: the whole conversation is always used and sending is automatic.
+- Confirm a separate popup/tab is created, its URL changes to a different conversation ID, and the question sends automatically.
 - Confirm the original tab remains at the same scroll position and has no new message.
 - Ask a second follow-up in the new branch and confirm it understands the earlier conversation.
-- Add another exchange to the original, ask from an older response with **Whole chat so far**, and confirm the new chat contains everything from the beginning through the newest answer.
-- Repeat with **Chat up to this answer** and confirm the new chat contains everything from the beginning through the answer you clicked, but nothing after it.
-- Turn **Send questions right away** off and confirm the next side question is filled but not sent.
+- Add another exchange to the original, click **Ask in new chat** on an older response, and confirm the separate chat still contains everything through the newest completed answer.
 
 ## Selected instruction
 
@@ -76,8 +75,8 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 ## Failure recovery
 
 - Temporarily change `isBranchLabel` locally so it cannot match the menu.
-- Start an aside and confirm the duplicate window highlights the response and displays manual branching instructions.
-- Branch manually, click **I branched — insert question**, and confirm the saved question is inserted/sent according to the setting.
+- Start a side question and confirm the popup preserves the question, offers only **Close** and **Try again**, and never asks you to branch manually.
+- Change only the source URL query string during this failure and confirm Workflow Toolkit does not treat it as a new chat or insert the question.
 - Block popups for `chatgpt.com`; confirm Workflow Toolkit reports the block and the original chat remains untouched.
 
 ## Performance

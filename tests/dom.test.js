@@ -93,6 +93,8 @@ test('extractAssistantHandoff keeps useful response content and omits action lab
     </article>
   `).window;
   const text = toolkit.extractAssistantHandoff(document.querySelector('article'));
+  const fingerprint = toolkit.assistantTurnFingerprint(document.querySelector('article'));
+  const contextFingerprint = toolkit.conversationContextFingerprint(document, document.querySelector('article'));
 
   assert.match(text, /Resume the lab with these items:/u);
   assert.match(text, /- Open results\.csv/u);
@@ -101,6 +103,10 @@ test('extractAssistantHandoff keeps useful response content and omits action lab
   assert.ok(text.includes('```\nif (ready) {\n    npm test -- --runInBand\n}\n```'), 'code indentation is preserved');
   assert.match(text, /reference guide \(https:\/\/example\.com\/reference\)/u);
   assert.doesNotMatch(text, /Copy response|Ask in new chat|Toolkit side question|Good response/u);
+  assert.match(fingerprint, /Resume the lab with these items:/u);
+  document.querySelector('.markdown p').textContent = 'A different answer';
+  assert.notEqual(toolkit.assistantTurnFingerprint(document.querySelector('article')), fingerprint);
+  assert.notEqual(toolkit.conversationContextFingerprint(document, document.querySelector('article')), contextFingerprint);
 });
 
 test('extractAssistantHandoff rejects non-assistant turns', () => {
