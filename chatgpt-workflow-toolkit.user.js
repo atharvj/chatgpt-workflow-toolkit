@@ -3,7 +3,7 @@
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
 // @version      1.4.8
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
-// @author       Atharv Joshi
+// @author       Intellectual07
 // @license      MIT
 // @homepageURL  https://github.com/atharvj/chatgpt-workflow-toolkit
 // @supportURL   https://github.com/atharvj/chatgpt-workflow-toolkit/issues
