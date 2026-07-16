@@ -95,6 +95,9 @@ test('extractPickerLevel separates current Intelligence labels from adjacent ver
   assert.equal(toolkit.extractPickerLevel('Instant5.5'), 'instant');
   assert.equal(toolkit.extractPickerLevel('Medium5.6'), 'medium');
   assert.equal(toolkit.extractPickerLevel('High5.6'), 'high');
+  assert.equal(toolkit.extractPickerLevel('4.5 Instant'), 'instant');
+  assert.equal(toolkit.extractPickerLevel('o3 Medium'), 'medium');
+  assert.equal(toolkit.extractPickerLevel('5.5 High'), 'high');
 });
 
 test('parseRouteOverride accepts an anchored hard override and ignores ordinary mentions', () => {

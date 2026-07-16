@@ -218,10 +218,16 @@ test('current intelligence-level popover switches High to Instant', async (t) =>
 });
 
 test('current pointerdown Radix picker switches High5.6 to Instant5.5', async (t) => {
-  const dom = new JSDOM(`<!doctype html><html><body><main>
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div id="unrelated-intelligence-menu" role="menu" data-state="open">
+      <div data-testid="composer-intelligence-picker-content" role="group">
+        <div id="unrelated-instant" role="menuitemradio" data-radix-collection-item>Instant</div>
+      </div>
+    </div>
+    <main>
     <div data-composer-surface="true"><form>
       <textarea id="prompt-textarea">what is 2+2</textarea>
-      <button type="button" class="__composer-pill" aria-haspopup="menu" data-state="closed"><span>High</span><span>5.6</span></button>
+      <button type="button" class="__composer-pill" id="radix-current-trigger" aria-controls="current-intelligence-menu" aria-haspopup="menu" data-state="closed"><span>High</span><span>5.6</span></button>
       <button type="button" data-testid="send-button">Send</button>
     </form></div>
   </main></body></html>`, {
@@ -236,6 +242,9 @@ test('current pointerdown Radix picker switches High5.6 to Instant5.5', async (t
   let optionPointerDowns = 0;
   let pointerDowns = 0;
   let triggerClicks = 0;
+  let nestedDecoyClicks = 0;
+  let unrelatedDecoyClicks = 0;
+  document.querySelector('#unrelated-instant').addEventListener('click', () => { unrelatedDecoyClicks += 1; });
 
   // Radix DropdownMenu.Trigger opens on pointerdown. A bare
   // HTMLElement.click() intentionally does nothing in this fixture.
@@ -249,15 +258,28 @@ test('current pointerdown Radix picker switches High5.6 to Instant5.5', async (t
       return;
     }
     const portal = document.createElement('div');
+    portal.id = 'current-intelligence-menu';
     portal.setAttribute('role', 'menu');
+    portal.setAttribute('aria-labelledby', picker.id);
     portal.dataset.state = 'open';
     portal.setAttribute('data-radix-menu-content', '');
     const content = document.createElement('div');
     content.dataset.testid = 'composer-intelligence-picker-content';
+    content.setAttribute('role', 'group');
+    const nestedGroup = document.createElement('div');
+    nestedGroup.setAttribute('role', 'group');
+    const nestedDecoy = document.createElement('div');
+    nestedDecoy.setAttribute('role', 'menuitemradio');
+    nestedDecoy.setAttribute('data-radix-collection-item', '');
+    nestedDecoy.textContent = 'Instant';
+    nestedDecoy.addEventListener('click', () => { nestedDecoyClicks += 1; });
+    nestedGroup.append(nestedDecoy);
+    content.append(nestedGroup);
     for (const [level, version] of [['Instant', '5.5'], ['Medium', '5.6'], ['High', '5.6']]) {
       const option = document.createElement('div');
       option.setAttribute('role', 'menuitemradio');
       option.setAttribute('data-radix-collection-item', '');
+      option.title = 'Choose intelligence level';
       option.innerHTML = `<span>${level}</span><span>${version}</span>`;
       option.addEventListener('pointerdown', () => { optionPointerDowns += 1; });
       option.addEventListener('click', () => {
@@ -291,11 +313,91 @@ test('current pointerdown Radix picker switches High5.6 to Instant5.5', async (t
   assert.equal(pointerDowns, 1, 'the current Radix trigger must receive primary pointerdown');
   assert.equal(triggerClicks, 0, 'a successful pointerdown toggle must not be undone by a fallback click');
   assert.equal(optionPointerDowns, 0, 'current Radix menu items should use their normal click selection path');
+  assert.equal(unrelatedDecoyClicks, 0, 'an unassociated Intelligence root must not receive the selection');
+  assert.equal(nestedDecoyClicks, 0, 'nested radio groups must not override the direct Intelligence choices');
   assert.equal(optionClicks, 1);
   assert.equal(sends, 1);
   assert.equal(app.state.lastRouteDecision.target, 'instant');
   assert.equal(app.state.lastRouteDecision.level, 'instant');
   assert.doesNotMatch(document.querySelector('#cgs-toast').textContent, /no compatible auto level/iu);
+});
+
+test('current Intelligence picker reopens and retries an unreflected first selection', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body><main><form>
+    <textarea id="prompt-textarea">what is 2+2</textarea>
+    <button type="button" class="__composer-pill" aria-haspopup="menu" data-state="closed"><span>High</span><span>5.6</span></button>
+    <button type="button" data-testid="send-button">Send</button>
+  </form></main></body></html>`, {
+    url: 'https://chatgpt.com/c/retry-current-intelligence-picker',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const picker = document.querySelector('button.__composer-pill');
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  let menuOpens = 0;
+  let instantClicks = 0;
+  let sends = 0;
+
+  picker.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    const existing = document.querySelector('[data-radix-menu-content]');
+    if (existing) {
+      existing.remove();
+      picker.dataset.state = 'closed';
+      return;
+    }
+    menuOpens += 1;
+    const menu = document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('data-radix-menu-content', '');
+    menu.dataset.state = 'open';
+    const content = document.createElement('div');
+    content.dataset.testid = 'composer-intelligence-picker-content';
+    content.setAttribute('role', 'group');
+    for (const [level, version] of [['Instant', '5.5'], ['Medium', '5.6'], ['High', '5.6']]) {
+      const option = document.createElement('div');
+      option.setAttribute('role', 'menuitemradio');
+      option.setAttribute('data-radix-collection-item', '');
+      option.setAttribute('aria-checked', String(picker.textContent.startsWith(level)));
+      option.dataset.state = picker.textContent.startsWith(level) ? 'checked' : 'unchecked';
+      option.innerHTML = `<span>${level}</span><span>${version}</span>`;
+      option.addEventListener('click', () => {
+        if (level === 'Instant') instantClicks += 1;
+        if (level === 'Instant' && instantClicks > 1) {
+          picker.innerHTML = `<span>${level}</span><span>${version}</span>`;
+          return;
+        }
+        if (level !== 'Instant') picker.innerHTML = `<span>${level}</span><span>${version}</span>`;
+        picker.dataset.state = 'closed';
+        menu.remove();
+      });
+      content.append(option);
+    }
+    menu.append(content);
+    document.body.append(menu);
+    picker.dataset.state = 'open';
+  });
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window);
+  await app.start();
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+
+  assert.equal(menuOpens, 2, 'an unreflected first click should be verified in a newly opened menu');
+  assert.equal(instantClicks, 2, 'the still-unchecked exact Instant row should be retried once');
+  assert.equal(picker.textContent, 'Instant5.5');
+  assert.equal(picker.dataset.state, 'closed');
+  assert.equal(document.querySelector('[data-radix-menu-content]'), null, 'verification menu should close after retry success');
+  assert.equal(sends, 1);
+  assert.equal(app.state.lastRouteDecision.target, 'instant');
+  assert.equal(app.state.lastRouteDecision.level, 'instant');
+  assert.equal(document.querySelector('[data-cgs-auto-badge]').textContent, 'Auto → Instant');
 });
 
 test('generic Tools pill is never opened while simple math switches High to Instant', async (t) => {
@@ -1023,6 +1125,7 @@ test('ordinary unconfirmed switch sends with the reflected current level', async
   assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
   assert.equal(harness.app.state.lastRouteDecision.level, 'high');
   assert.match(harness.app.state.lastRouteDecision.reason, /switch unconfirmed.*used current/iu);
+  assert.equal(harness.document.querySelector('[data-cgs-auto-badge]').textContent, 'Auto wanted Instant · used High');
 });
 
 test('explicit unconfirmed switch stays unsent', async (t) => {

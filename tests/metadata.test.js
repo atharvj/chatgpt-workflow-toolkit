@@ -64,6 +64,9 @@ test('metadata declares only the storage, style, and menu grants it uses', () =>
 
 test('metadata advertises the canonical project and support URLs', () => {
   const metadata = parseMetadata(source);
+  const rawUserscript = 'https://raw.githubusercontent.com/atharvj/chatgpt-workflow-toolkit/main/chatgpt-workflow-toolkit.user.js';
   assert.deepEqual(metadata.get('homepageURL'), ['https://github.com/atharvj/chatgpt-workflow-toolkit']);
   assert.deepEqual(metadata.get('supportURL'), ['https://github.com/atharvj/chatgpt-workflow-toolkit/issues']);
+  assert.deepEqual(metadata.get('downloadURL'), [rawUserscript]);
+  assert.deepEqual(metadata.get('updateURL'), [rawUserscript]);
 });

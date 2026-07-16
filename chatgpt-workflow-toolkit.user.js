@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.2
+// @version      1.4.3
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Atharv Joshi
 // @license      MIT
 // @homepageURL  https://github.com/atharvj/chatgpt-workflow-toolkit
 // @supportURL   https://github.com/atharvj/chatgpt-workflow-toolkit/issues
+// @downloadURL  https://raw.githubusercontent.com/atharvj/chatgpt-workflow-toolkit/main/chatgpt-workflow-toolkit.user.js
+// @updateURL    https://raw.githubusercontent.com/atharvj/chatgpt-workflow-toolkit/main/chatgpt-workflow-toolkit.user.js
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @run-at       document-idle
@@ -42,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.2';
+  const VERSION = '1.4.3';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1037,7 +1039,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       if (/^extended(?:\s+extended)?(?:\s+reasoning)?$/iu.test(text)) return 'high';
       if (/^heavy(?:\s+heavy)?(?:\s+reasoning)?$/iu.test(text)) return 'extra-high';
     }
-    const prefixedEffort = text.match(/^(?:model|reasoning effort|thinking time|intelligence level)\s*:?\s*(instant|fast|auto|standard|medium|extended|high|heavy|extra\s*-?\s*high|ultra)\b/iu);
+    const prefixedEffort = text.match(/^(?:(?:model|reasoning effort|thinking time|intelligence level)\s*:?\s*|(?:(?:gpt[-\s]?)?\d+(?:\.\d+)+|o\d+(?:[-.][\w]+)*)\s+)(instant|fast|auto|standard|medium|extended|high|heavy|extra\s*-?\s*high|ultra)\b/iu);
     if (prefixedEffort) {
       const effort = lowerText(prefixedEffort[1]).replace(/\s*-?\s+/gu, '-');
       if (effort === 'instant' || effort === 'fast') return 'instant';
@@ -1269,12 +1271,37 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return Number.POSITIVE_INFINITY;
   }
 
+  function elementPickerLevel(element, options = {}) {
+    if (!element || typeof element !== 'object') return '';
+    const visibleFirst = options.trigger === true
+      ? [
+        element.getAttribute && element.getAttribute('aria-label'),
+        element.innerText,
+        element.textContent,
+        element.getAttribute && element.getAttribute('title'),
+      ]
+      : [
+        element.innerText,
+        element.textContent,
+        element.getAttribute && element.getAttribute('aria-label'),
+        element.getAttribute && element.getAttribute('title'),
+      ];
+    const signals = [...new Set(visibleFirst.map(normalizeText).filter(Boolean))];
+    for (const signal of signals) {
+      const level = extractPickerLevel(signal, { allowBareEffort: options.allowBareEffort === true });
+      if (level) return level;
+    }
+    return extractPickerLevel(accessibleText(element), { allowBareEffort: options.allowBareEffort === true });
+  }
+
   function optionLevel(option) {
     if (typeof option === 'string') return extractPickerLevel(option, { allowBareEffort: true });
     if (!option || typeof option !== 'object') return '';
     return option.level
       ? extractModelLevel(option.level)
-      : extractPickerLevel(option.label || option.text || accessibleText(option), { allowBareEffort: true });
+      : option.nodeType === 1
+        ? elementPickerLevel(option, { allowBareEffort: true })
+        : extractPickerLevel(option.label || option.text || '', { allowBareEffort: true });
   }
 
   function chooseModelOption(options, target, maxSetting = 'highest') {
@@ -1319,7 +1346,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     if (!button || !isProbablyVisible(button) || button.closest(`#${UI_ROOT_ID}`)) return false;
     const testId = lowerText(button.getAttribute('data-testid'));
     if (/\b(?:model-(?:picker|switcher)|intelligence|reasoning|thinking-time)\b/iu.test(testId)) return true;
-    if (extractPickerLevel(accessibleText(button))) return true;
+    if (elementPickerLevel(button, { trigger: true })) return true;
     return allowGenericPopup && (button.hasAttribute('aria-controls') || button.hasAttribute('aria-expanded') || button.hasAttribute('aria-haspopup'));
   }
 
@@ -1358,7 +1385,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     for (const scope of localScopes) {
       const fallback = [...scope.querySelectorAll('button')].find((button) => {
         if (!isProbablyVisible(button) || button.closest(`#${UI_ROOT_ID}`)) return false;
-        return Boolean(extractPickerLevel(accessibleText(button)));
+        return Boolean(elementPickerLevel(button, { trigger: true }));
       });
       if (fallback) return fallback;
     }
@@ -1398,7 +1425,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           const candidates = [...scope.querySelectorAll(selector)].filter((button) =>
             button !== primary && isPlausiblePickerButton(button, allowGenericPopup));
           const candidate = requireLevel
-            ? candidates.find((button) => Boolean(extractPickerLevel(accessibleText(button))))
+            ? candidates.find((button) => Boolean(elementPickerLevel(button, { trigger: true })))
             : candidates[0];
           if (candidate) return candidate;
         }
@@ -1414,7 +1441,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     for (const scope of localScopes) {
       const candidate = [...scope.querySelectorAll('button')].find((button) => {
         if (button === primary || !isProbablyVisible(button) || button.closest(`#${UI_ROOT_ID}`)) return false;
-        return Boolean(extractPickerLevel(accessibleText(button)));
+        return Boolean(elementPickerLevel(button, { trigger: true }));
       });
       if (candidate) return candidate;
     }
@@ -1433,8 +1460,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       const outerOption = candidate.closest(MODEL_OPTION_CONTAINER_SELECTOR);
       if (outerOption && isModelUpsellLabel(accessibleText(outerOption))) return false;
       if (outerOption && outerOption !== candidate &&
-        extractPickerLevel(accessibleText(outerOption), { allowBareEffort }) === extractPickerLevel(accessibleText(candidate), { allowBareEffort })) return false;
-      return !isModelUpsellLabel(accessibleText(candidate)) && Boolean(extractPickerLevel(accessibleText(candidate), { allowBareEffort }));
+        elementPickerLevel(outerOption, { allowBareEffort }) === elementPickerLevel(candidate, { allowBareEffort })) return false;
+      return !isModelUpsellLabel(accessibleText(candidate)) && Boolean(elementPickerLevel(candidate, { allowBareEffort }));
     };
     const recognized = candidates.filter(isCandidate);
     if (recognized.length || root.nodeType !== 1 || root.matches('html, body, main')) return recognized;
@@ -1444,17 +1471,60 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     // is intentionally limited to the already-scoped, newly changed menu root.
     const textRows = uniqueElements([...root.querySelectorAll('div, span, p, strong')].slice(0, 500).filter((candidate) => {
       if (!isCandidate(candidate)) return false;
-      const level = extractPickerLevel(accessibleText(candidate), { allowBareEffort });
+      const level = elementPickerLevel(candidate, { allowBareEffort });
       return ![...candidate.children].some((child) =>
-        extractPickerLevel(accessibleText(child), { allowBareEffort }) === level);
+        elementPickerLevel(child, { allowBareEffort }) === level);
     }));
     const distinctLevels = new Set(textRows.map(optionLevel).filter(Boolean));
     return distinctLevels.size >= 2 ? textRows : [];
   }
 
+  function currentIntelligenceOptions(doc, picker = null) {
+    if (!doc) return [];
+    const controlledIds = new Set(normalizeText(picker && picker.getAttribute('aria-controls')).split(/\s+/u).filter(Boolean));
+    const pickerId = normalizeText(picker && picker.id);
+    const roots = [...doc.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')]
+      .filter((root) => isProbablyVisible(root) && !root.closest('[data-state="closed"], [aria-hidden="true"], [hidden]'))
+      .map((root) => {
+        const menu = root.closest('[data-radix-menu-content][role="menu"], [role="menu"], [role="listbox"]');
+        let score = 0;
+        if (menu && controlledIds.has(normalizeText(menu.id))) score += 100;
+        if (menu && pickerId && normalizeText(menu.getAttribute('aria-labelledby')).split(/\s+/u).includes(pickerId)) score += 100;
+        if (menu && menu.getAttribute('data-state') === 'open') score += 20;
+        return { root, score };
+      })
+      .sort((left, right) => right.score - left.score);
+
+    for (const { root } of roots) {
+      const allRows = [...root.querySelectorAll('[role="menuitemradio"][data-radix-collection-item]')].filter((row) =>
+        isProbablyVisible(row) && !row.closest('[data-state="closed"], [aria-hidden="true"], [hidden]') &&
+        !row.closest(`#${UI_ROOT_ID}`) && !row.matches('[aria-disabled="true"], [data-disabled], :disabled') &&
+        !isModelUpsellLabel(accessibleText(row)) && Boolean(elementPickerLevel(row, { allowBareEffort: true })));
+      const topGroups = root.matches('[role="group"]')
+        ? [root]
+        : [...root.querySelectorAll('[role="group"]')].filter((group) => {
+          const parentGroup = group.parentElement && group.parentElement.closest('[role="group"]');
+          return group.closest('[data-testid="composer-intelligence-picker-content"]') === root &&
+            (!parentGroup || !root.contains(parentGroup));
+        });
+      if (topGroups.length) {
+        const groupedRows = topGroups.map((group) => {
+          const rows = allRows.filter((row) => row.closest('[role="group"]') === group);
+          return { rows, distinct: new Set(rows.map(optionLevel).filter(Boolean)).size };
+        }).sort((left, right) => right.distinct - left.distinct || right.rows.length - left.rows.length);
+        if (groupedRows[0] && groupedRows[0].rows.length) return groupedRows[0].rows;
+        continue;
+      }
+      if (allRows.length) return allRows;
+      const fallback = findModelOptions(root, picker) || [];
+      if (fallback.length) return fallback;
+    }
+    return [];
+  }
+
   function findInstantOption(root, picker = null, excluded = new Set()) {
     return findModelOptions(root, picker, excluded).find((candidate) => {
-      const level = extractModelLevel(accessibleText(candidate));
+      const level = optionLevel(candidate);
       return level === 'instant' || level === 'auto';
     }) || null;
   }
@@ -2014,8 +2084,15 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           badge.textContent = 'Auto choosing…';
           badge.title = 'Choosing from the model levels available to this account';
         } else if (state.lastRouteDecision && state.lastRouteDecision.level) {
-          badge.textContent = `${state.lastRouteDecision.manual ? 'Manual' : 'Auto'} → ${modelLevelLabel(state.lastRouteDecision.level)}`;
-          badge.title = state.lastRouteDecision.reason || 'Last per-message routing choice';
+          const route = state.lastRouteDecision;
+          const prefix = route.manual ? 'Manual' : 'Auto';
+          const keptDifferentLevel = route.target && route.target !== 'max' &&
+            modelLevelRank(route.target) !== modelLevelRank(route.level) &&
+            /\b(?:unavailable|unconfirmed|used current|could not|no compatible)\b/iu.test(route.reason || '');
+          badge.textContent = keptDifferentLevel
+            ? `${prefix} wanted ${modelLevelLabel(route.target)} · used ${modelLevelLabel(route.level)}`
+            : `${prefix} → ${modelLevelLabel(route.level)}`;
+          badge.title = route.reason || 'Last per-message routing choice';
         } else {
           badge.textContent = 'Adaptive Auto';
           badge.title = 'Each send is classified locally; no extra request or transcript scan is used';
@@ -2515,11 +2592,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         // Prefer the stable root used by ChatGPT's current unified
         // Intelligence picker before considering other concurrently visible
         // menus (Tools, attachments, sidebar actions, and similar portals).
-        for (const root of doc.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')) {
-          if (!isProbablyVisible(root) || root.closest('[data-state="closed"], [aria-hidden="true"], [hidden]')) continue;
-          const found = findModelOptions(root, picker) || [];
-          if (found.length) return found;
-        }
+        const currentOptions = currentIntelligenceOptions(doc, picker);
+        if (currentOptions.length) return currentOptions;
         const controlled = controlledModelMenu(picker);
         const composer = findComposer(doc);
         const roots = uniqueElements([
@@ -2622,6 +2696,59 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           timeout: 500,
           attributes: true,
         }));
+
+        // If the trigger did not reflect the first click, reopen the current
+        // Intelligence menu and check Radix's real checked row. This handles a
+        // rerendered trigger and gives a still-unchecked exact row one retry.
+        if (!selectionConfirmed && !stagedThinkingChoice && validateSendSnapshot(snapshot).ok) {
+          const verificationPicker = currentRoutingPicker();
+          if (verificationPicker) {
+            const alreadyOpen = verificationPicker.getAttribute('aria-expanded') === 'true' ||
+              verificationPicker.getAttribute('data-state') === 'open';
+            if (alreadyOpen || activateModelControl(verificationPicker)) {
+              const verificationOptions = await waitForCondition(() => {
+                const found = currentIntelligenceOptions(doc, verificationPicker);
+                return found.length ? found : null;
+              }, {
+                root: doc.documentElement,
+                win,
+                timeout: 400,
+                attributes: true,
+              });
+              const matchesChoice = (option) => {
+                const level = optionLevel(option);
+                return level === choice.level || choice.level === 'instant' && level === 'auto';
+              };
+              const checkedChoice = (verificationOptions || []).find((option) =>
+                matchesChoice(option) && option.matches('[aria-checked="true"], [data-state="checked"]'));
+              if (checkedChoice) {
+                selectionConfirmed = true;
+                closeModelMenu(verificationPicker);
+              } else {
+                const retryChoice = (verificationOptions || []).find(matchesChoice);
+                if (retryChoice) {
+                  programmaticClick(retryChoice);
+                  await new Promise((resolve) => win.setTimeout(resolve, 100));
+                  selectionConfirmed = Boolean(await waitForCondition(() => {
+                    const updated = currentRoutingPicker(choice.level);
+                    const selected = extractModelLevel(accessibleText(updated));
+                    return selected === choice.level || choice.level === 'instant' && selected === 'auto'
+                      ? updated || doc.documentElement
+                      : null;
+                  }, {
+                    root: doc.documentElement,
+                    win,
+                    timeout: 500,
+                    attributes: true,
+                  }));
+                  closeModelMenu(verificationPicker);
+                } else {
+                  closeModelMenu(verificationPicker);
+                }
+              }
+            }
+          }
+        }
       } else {
         closeModelMenu(picker);
       }
