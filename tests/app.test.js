@@ -16,7 +16,7 @@ async function waitFor(predicate, win, timeout = 1_500) {
   return Boolean(predicate());
 }
 
-test('app smoke: installs simplified controls and prepares a fresh-chat handoff', async () => {
+test('app smoke: installs simplified controls with self-explanatory side-question options', async () => {
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-0"><div data-message-author-role="user">Help with my lab</div></article>
     <article data-testid="conversation-turn-1"><div data-message-author-role="assistant">Follow these steps</div><div><button data-testid="copy-turn-action-button">Copy</button></div></article>
@@ -40,19 +40,63 @@ test('app smoke: installs simplified controls and prepares a fresh-chat handoff'
   assert.doesNotMatch(document.querySelector('#cgs-root').textContent, /Continue lightweight|Ask aside/u);
 
   turnButton.click();
-  assert.equal(document.querySelector('#cgs-dialog-backdrop').hidden, false);
+  const questionBackdrop = document.querySelector('#cgs-dialog-backdrop');
+  const questionDialog = questionBackdrop.querySelector('.cgs-dialog');
+  assert.equal(questionBackdrop.hidden, false);
   assert.equal(document.querySelector('#cgs-context-mode').value, 'clicked');
+
+  const autoSend = document.querySelector('#cgs-dialog-autosend');
+  assert.match(autoSend.closest('label').textContent, /Send this question automatically/u);
+  const questionDialogText = questionDialog.textContent.replace(/\s+/gu, ' ').trim();
+  assert.match(
+    questionDialogText,
+    /checked[^.]*send[^.]*after[^.]*branch[^.]*ready/iu,
+    'the dialog explains what happens when automatic sending is checked',
+  );
+  assert.match(
+    questionDialogText,
+    /unchecked[^.]*leave[^.]*question[^.]*composer[^.]*review/iu,
+    'the dialog explains what happens when automatic sending is unchecked',
+  );
+
+  const contextOptions = [...document.querySelector('#cgs-context-mode').options]
+    .map((option) => ({ value: option.value, label: option.textContent.trim() }));
+  assert.deepEqual(contextOptions, [
+    { value: 'latest', label: 'Through latest response (include later messages)' },
+    { value: 'clicked', label: 'Only through this response (exclude later messages)' },
+  ]);
+  assert.match(
+    questionDialogText,
+    /Only through this response[^.]*clicked response[^.]*excludes? later (?:turns|messages)/iu,
+    'the dialog explains that clicked-response context stops before later messages',
+  );
+  assert.match(
+    questionDialogText,
+    /Through latest response[^.]*includes?[^.]*later (?:turns|messages)/iu,
+    'the dialog explains that latest-response context includes later messages',
+  );
   document.querySelector('[data-cgs-action="cancel-question"]').click();
 
   document.querySelector('[data-cgs-action="open-handoff"]').click();
-  assert.equal(document.querySelector('#cgs-handoff-backdrop').hidden, false);
-  assert.equal(document.querySelector('#cgs-handoff-title').textContent, 'Continue in fresh chat');
-  const fullContextButtons = document.querySelectorAll('[data-cgs-action="full-branch-latest"]');
-  assert.equal(fullContextButtons.length, 1);
-  assert.equal(fullContextButtons[0].textContent, 'Branch with full context');
-  assert.ok(fullContextButtons[0].closest('#cgs-handoff-backdrop'));
-  document.querySelector('[data-cgs-action="prepare-handoff"]').click();
-  assert.match(document.querySelector('#prompt-textarea').value, /^Create a compact, self-contained handoff/u);
+  const handoffBackdrop = document.querySelector('#cgs-handoff-backdrop');
+  const handoffDialog = handoffBackdrop.querySelector('.cgs-dialog');
+  assert.equal(handoffBackdrop.hidden, false);
+  assert.equal(document.querySelector('#cgs-handoff-title').textContent, 'Are you sure you want to continue in fresh chat?');
+  assert.equal(
+    handoffDialog.textContent.replace(/\s+/gu, ' ').trim(),
+    'Are you sure you want to continue in fresh chat? Cancel Yes',
+    'the confirmation contains no workflow instructions beyond the question and its choices',
+  );
+  assert.deepEqual(
+    [...handoffDialog.querySelectorAll('button')].map((button) => button.textContent.trim()),
+    ['Cancel', 'Yes'],
+  );
+  assert.equal(handoffDialog.querySelector('[data-cgs-action="close-handoff"]').textContent.trim(), 'Cancel');
+  assert.equal(handoffDialog.querySelector('[data-cgs-action="confirm-fresh-chat"]').textContent.trim(), 'Yes');
+  assert.equal(handoffDialog.querySelector('[data-cgs-action="prepare-handoff"]'), null);
+  assert.equal(handoffDialog.querySelector('[data-cgs-action="open-fresh-chat"]'), null);
+  assert.equal(handoffDialog.querySelector('[data-cgs-action="full-branch-latest"]'), null);
+  document.querySelector('[data-cgs-action="close-handoff"]').click();
   assert.equal(document.querySelector('#cgs-handoff-backdrop').hidden, true);
 
   app.state.observer.disconnect();

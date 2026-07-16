@@ -137,6 +137,14 @@ test('findModelPicker falls back to a visible button with a model level', () => 
   assert.equal(toolkit.findModelPicker(document), document.querySelector('#picker'));
 });
 
+test('findModelPicker ignores unrelated controls whose label merely mentions model', () => {
+  const dom = createDom(`<main>
+    <button aria-label="Model response feedback" aria-haspopup="menu" aria-expanded="false">Feedback</button>
+    <form><textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></form>
+  </main>`);
+  assert.equal(toolkit.findModelPicker(dom.window.document), null);
+});
+
 test('findReasoningPicker prefers a separate effort control', () => {
   const { document } = createDom(`
     <main><form>

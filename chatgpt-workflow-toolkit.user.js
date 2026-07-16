@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.3.0
+// @version      1.4.0
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Atharv Joshi
 // @license      MIT
@@ -42,7 +42,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -50,7 +50,11 @@
   const JOB_PREFIX = 'chatgptSidecar.job.v1.';
   const JOB_HASH_KEY = 'cwt-job';
   const FRESH_HASH_KEY = 'cwt-fresh';
+  const FRESH_HANDOFF_PREFIX = 'chatgptWorkflowToolkit.freshHandoff.v1.';
+  const FRESH_HANDOFF_INDEX_KEY = 'chatgptWorkflowToolkit.freshHandoffIndex.v1';
   const JOB_MAX_AGE_MS = 5 * 60 * 1000;
+  const FRESH_HANDOFF_MAX_AGE_MS = 10 * 60 * 1000;
+  const FRESH_HANDOFF_MAX_LENGTH = 28_000;
   const QUESTION_MAX_LENGTH = 30_000;
   const SELECTED_QUOTE_MAX_LENGTH = 2_000;
   const UI_ROOT_ID = 'cgs-root';
@@ -66,7 +70,15 @@ Include only the context needed to resume:
 - unresolved issues, errors, or open questions
 - the exact recommended next step
 
-Preserve essential commands, code, formulas, or data exactly where needed. Clearly mark uncertainty. Keep the handoff under 1,000 words.`;
+Preserve essential commands, code, formulas, or data exactly where needed. Clearly mark uncertainty. Keep the handoff under 1,000 words.
+
+Also account for materials that will not automatically carry into a new chat:
+- Identify any files, images, datasets, pasted documents, attachments, or other external artifacts this chat used. Use each exact filename or name when known; do not invent names.
+- Include all important facts already learned from those materials in the handoff itself, so the handoff is still sufficient if the user cannot provide them again.
+- Add an “Optional materials” section for the next assistant. If any such items exist, instruct the next assistant to ask for them once in its first reply, by name, and to request that the user provide or upload them in full if available. Make clear that it is okay if the user cannot provide them and the conversation can continue from the handoff. Say that providing them would give significantly more context.
+- If no such materials exist, say that no additional materials are needed and do not ask the user for any.
+
+The request should sound natural, for example: “Okay, let’s continue here. If you have them, could you provide [exact names] in full? If not, that’s okay—I can continue from this handoff. Providing them would give me significantly more context.”`;
 
   const TURN_SELECTOR = 'article[data-testid^="conversation-turn-"]';
   const ROLE_SELECTOR = '[data-message-author-role]';
@@ -82,7 +94,9 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     'button[aria-label="Send message"]',
     'button[aria-label^="Send"]',
   ];
-  const MODEL_OPTION_SELECTOR = '[role="menuitem"], [role="option"], [data-radix-collection-item], button';
+  const MODEL_OPTION_CONTAINER_SELECTOR = '[role="menuitem"], [role="menuitemradio"], [role="option"], [role="radio"], [data-radix-collection-item], [data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-radio-item"]';
+  const MODEL_OPTION_SELECTOR = `${MODEL_OPTION_CONTAINER_SELECTOR}, button`;
+  const MODEL_MENU_ROOT_SELECTOR = '[role="menu"], [role="listbox"], [role="radiogroup"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-menu-items], [data-slot="dropdown-menu-content"], [data-slot="popover-content"], [data-state="open"][role="dialog"], [data-testid*="model-menu"], [data-testid*="model-picker-menu"], [data-testid*="intelligence-menu"]';
   const ROUTE_LEVEL_RANK = Object.freeze({
     instant: 0,
     auto: 0,
@@ -292,6 +306,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       background: var(--main-surface-primary, #fff);
       font: inherit;
     }
+    .cgs-dialog-help { margin-top: 8px !important; line-height: 1.45; }
     .cgs-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
     .cgs-primary, .cgs-secondary { min-height: 36px; padding: 8px 12px; border-radius: 9px; font-weight: 700; }
     .cgs-primary { color: #fff; background: #10a37f; }
@@ -540,6 +555,65 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     return `I have a question about this specific part of the response:\n\n${quote}\n\nMy question:\n`;
   }
 
+  function readableNodeText(root) {
+    if (!root) return '';
+    const blockTags = new Set([
+      'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DIV', 'DL', 'DT', 'DD', 'FIGCAPTION', 'FIGURE',
+      'FOOTER', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER', 'HR', 'MAIN', 'NAV', 'OL', 'P',
+      'SECTION', 'TABLE', 'TBODY', 'TD', 'TFOOT', 'TH', 'THEAD', 'TR', 'UL',
+    ]);
+    const ignoredSelector = [
+      `#${UI_ROOT_ID}`, `.${TURN_BUTTON_CLASS}`, '.cgs-turn-fallback-row',
+      'button', 'input', 'textarea', 'select', 'option', 'script', 'style', 'svg', 'canvas', 'noscript',
+      '[aria-hidden="true"]', '[data-testid*="turn-action"]', '[data-testid*="message-actions"]',
+      '[data-testid*="feedback"]', '[data-cgs-injected]',
+    ].join(', ');
+
+    const codeBlocks = [];
+    const visit = (node) => {
+      if (!node) return '';
+      if (node.nodeType === 3) return String(node.nodeValue || '');
+      if (node.nodeType !== 1 || node.matches(ignoredSelector)) return '';
+      const tag = node.tagName;
+      if (tag === 'BR') return '\n';
+      if (tag === 'PRE') {
+        const index = codeBlocks.push(String(node.textContent || '').replace(/\r\n?/gu, '\n')) - 1;
+        return `\n\uE000${index}\uE001\n`;
+      }
+      let content = [...node.childNodes].map(visit).join('');
+      if (tag === 'A') {
+        const href = String(node.getAttribute('href') || '').trim();
+        if (/^https?:\/\//iu.test(href) && !content.includes(href)) content = `${content} (${href})`;
+      }
+      if (tag === 'LI') return `\n- ${content.trim()}\n`;
+      return blockTags.has(tag) ? `\n${content}\n` : content;
+    };
+
+    let text = visit(root)
+      .replace(/[ \t]+\n/gu, '\n')
+      .replace(/\n[ \t]+/gu, '\n')
+      .replace(/[ \t]{2,}/gu, ' ')
+      .replace(/\n{3,}/gu, '\n\n')
+      .trim();
+    codeBlocks.forEach((code, index) => {
+      text = text.replace(`\uE000${index}\uE001`, `\`\`\`\n${code}\n\`\`\``);
+    });
+    return text;
+  }
+
+  function extractAssistantHandoff(turn) {
+    if (!turn) return '';
+    const roleNode = turn.matches && turn.matches('[data-message-author-role="assistant"]')
+      ? turn
+      : turn.querySelector && turn.querySelector('[data-message-author-role="assistant"]');
+    if (!roleNode) return '';
+    const preferred = [...roleNode.querySelectorAll('[data-message-content], .markdown, [class~="prose"]')]
+      .filter((node) => !node.parentElement || !node.parentElement.closest('[data-message-content], .markdown, [class~="prose"]'));
+    const candidates = preferred.length ? preferred : [roleNode];
+    const text = candidates.map(readableNodeText).sort((a, b) => b.length - a.length)[0] || '';
+    return text.slice(0, FRESH_HANDOFF_MAX_LENGTH).trim();
+  }
+
   function isEditableElement(element) {
     if (!element || element.nodeType !== 1) return false;
     const tag = element.tagName.toLowerCase();
@@ -638,6 +712,10 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     return /^[a-z0-9_-]{8,80}$/iu.test(String(value || ''));
   }
 
+  function freshHandoffStorageKey(jobId) {
+    return isValidJobId(jobId) ? `${FRESH_HANDOFF_PREFIX}${jobId}` : '';
+  }
+
   function urlWithJob(value, jobId) {
     if (!isValidJobId(jobId)) return '';
     try {
@@ -660,25 +738,50 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     }
   }
 
-  function urlWithFreshLaunch(value) {
+  function urlWithFreshLaunch(value, jobId) {
+    if (!isValidJobId(jobId)) return '';
     try {
       const source = new URL(String(value));
       const url = new URL('/', source.origin);
-      url.hash = `${FRESH_HASH_KEY}=1`;
+      url.hash = `${FRESH_HASH_KEY}=${encodeURIComponent(jobId)}`;
       return url.toString();
     } catch (_error) {
       return '';
     }
   }
 
-  function isFreshLaunch(value) {
+  function parseFreshJobId(value) {
     try {
       const url = new URL(String(value));
       const params = new URLSearchParams(url.hash.replace(/^#/u, ''));
-      return params.get(FRESH_HASH_KEY) === '1';
+      const id = params.get(FRESH_HASH_KEY) || '';
+      return isValidJobId(id) ? id : '';
     } catch (_error) {
-      return false;
+      return '';
     }
+  }
+
+  function isFreshLaunch(value) {
+    return Boolean(parseFreshJobId(value));
+  }
+
+  function sanitizeFreshHandoff(raw, now = Date.now(), expectedId = '') {
+    if (!raw || typeof raw !== 'object') return null;
+    const id = String(raw.id || '');
+    const createdAt = Number(raw.createdAt);
+    const handoff = String(raw.handoff == null ? '' : raw.handoff)
+      .replace(/\r\n?/gu, '\n')
+      .slice(0, FRESH_HANDOFF_MAX_LENGTH)
+      .trim();
+    if (!isValidJobId(id) || expectedId && id !== expectedId || !handoff) return null;
+    if (!Number.isFinite(createdAt) || createdAt > now + 60_000 || now - createdAt > FRESH_HANDOFF_MAX_AGE_MS) return null;
+    return { version: 1, id, createdAt, handoff };
+  }
+
+  function buildFreshContinuationPrompt(value) {
+    const handoff = String(value == null ? '' : value).replace(/\r\n?/gu, '\n').trim();
+    if (!handoff) return '';
+    return `Continue the previous conversation from the handoff below. Treat it as context, follow its recommended next step, and follow any “Optional materials” instruction in your first response. Do not require materials that the handoff says are optional.\n\n--- HANDOFF ---\n${handoff}`;
   }
 
   function sanitizeJob(raw, now = Date.now()) {
@@ -893,9 +996,11 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       if (/^extended(?:\s+extended)?(?:\s+reasoning)?$/iu.test(text)) return 'high';
       if (/^heavy(?:\s+heavy)?(?:\s+reasoning)?$/iu.test(text)) return 'extra-high';
     }
-    const prefixedEffort = text.match(/^(?:reasoning effort|thinking time|intelligence level)\s*:?\s*(standard|medium|extended|high|heavy|extra\s*-?\s*high|ultra)\b/iu);
+    const prefixedEffort = text.match(/^(?:model|reasoning effort|thinking time|intelligence level)\s*:?\s*(instant|fast|auto|standard|medium|extended|high|heavy|extra\s*-?\s*high|ultra)\b/iu);
     if (prefixedEffort) {
       const effort = lowerText(prefixedEffort[1]).replace(/\s*-?\s+/gu, '-');
+      if (effort === 'instant' || effort === 'fast') return 'instant';
+      if (effort === 'auto') return 'auto';
       if (effort === 'standard' || effort === 'medium') return 'medium';
       if (effort === 'extended' || effort === 'high') return 'high';
       if (effort === 'heavy' || effort === 'extra-high') return 'extra-high';
@@ -1169,6 +1274,14 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     };
   }
 
+  function isPlausiblePickerButton(button, allowGenericPopup = false) {
+    if (!button || !isProbablyVisible(button) || button.closest(`#${UI_ROOT_ID}`)) return false;
+    const testId = lowerText(button.getAttribute('data-testid'));
+    if (/\b(?:model-(?:picker|switcher)|intelligence|reasoning|thinking-time)\b/iu.test(testId)) return true;
+    if (extractPickerLevel(accessibleText(button))) return true;
+    return allowGenericPopup && (button.hasAttribute('aria-controls') || button.hasAttribute('aria-expanded') || button.hasAttribute('aria-haspopup'));
+  }
+
   function findModelPicker(doc, composer = findComposer(doc)) {
     if (!doc || !composer) return null;
     const form = composer.closest && composer.closest('form');
@@ -1189,9 +1302,15 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       'button[aria-label*="model" i]',
       'button[aria-label*="reasoning" i]',
     ];
+    const localPreferred = [
+      'button[data-testid*="intelligence"]',
+      'button[aria-label*="intelligence" i]',
+      ...preferred,
+    ];
     for (const scope of scopes) {
-      for (const selector of preferred) {
-        const candidate = [...scope.querySelectorAll(selector)].find((button) => isProbablyVisible(button) && !button.closest(`#${UI_ROOT_ID}`));
+      const isLocal = localScopes.includes(scope);
+      for (const selector of localScopes.includes(scope) ? localPreferred : preferred) {
+        const candidate = [...scope.querySelectorAll(selector)].find((button) => isPlausiblePickerButton(button, isLocal));
         if (candidate) return candidate;
       }
     }
@@ -1222,24 +1341,22 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     const preferred = [
       'button[data-testid*="reasoning"]',
       'button[data-testid*="thinking-time"]',
+      'button[data-testid*="intelligence"]',
       'button[aria-label*="reasoning effort" i]',
       'button[aria-label*="thinking time" i]',
       'button[aria-label*="intelligence level" i]',
     ];
     for (const scope of localScopes) {
       for (const selector of preferred) {
-        const candidate = [...scope.querySelectorAll(selector)].find((button) => isProbablyVisible(button) && !button.closest(`#${UI_ROOT_ID}`));
+        const candidate = [...scope.querySelectorAll(selector)].find((button) => isPlausiblePickerButton(button, true));
         if (candidate) return candidate;
       }
     }
     const primary = findModelPicker(doc, composer);
-    const primaryIsLocal = Boolean(primary && localScopes.some((scope) => scope === primary || scope.contains(primary)));
-    if (!primaryIsLocal) {
-      for (const scope of scopes.filter((scope) => !localScopes.includes(scope))) {
-        for (const selector of preferred) {
-          const candidate = [...scope.querySelectorAll(selector)].find((button) => isProbablyVisible(button) && !button.closest(`#${UI_ROOT_ID}`));
-          if (candidate) return candidate;
-        }
+    for (const scope of scopes.filter((scope) => !localScopes.includes(scope))) {
+      for (const selector of preferred) {
+        const candidate = [...scope.querySelectorAll(selector)].find((button) => isPlausiblePickerButton(button, false));
+        if (candidate) return candidate;
       }
     }
     for (const scope of localScopes) {
@@ -1258,9 +1375,10 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     const allowBareEffort = /\b(?:reasoning|thinking time|intelligence level|effort)\b/iu.test(contextText);
     const candidates = [...root.querySelectorAll(MODEL_OPTION_SELECTOR)];
     return candidates.filter((candidate) => {
-      if (excluded.has(candidate) || candidate === picker || candidate.contains(picker) || !isProbablyVisible(candidate) || candidate.closest(`#${UI_ROOT_ID}`)) return false;
+      if (excluded.has(candidate) || candidate === picker || candidate.contains(picker) || !isProbablyVisible(candidate) ||
+        candidate.closest('[data-state="closed"], [aria-hidden="true"], [hidden]') || candidate.closest(`#${UI_ROOT_ID}`)) return false;
       if (candidate.disabled || candidate.closest('[aria-disabled="true"], [data-disabled="true"], :disabled')) return false;
-      const outerOption = candidate.closest('[role="menuitem"], [role="option"], [data-radix-collection-item]');
+      const outerOption = candidate.closest(MODEL_OPTION_CONTAINER_SELECTOR);
       if (outerOption && isModelUpsellLabel(accessibleText(outerOption))) return false;
       if (outerOption && outerOption !== candidate &&
         extractPickerLevel(accessibleText(outerOption), { allowBareEffort }) === extractPickerLevel(accessibleText(candidate), { allowBareEffort })) return false;
@@ -1611,8 +1729,8 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
             <select data-cgs-setting="autoMaxLevel" aria-label="Maximum Adaptive Auto level"><option value="high">High</option><option value="extra-high">Extra High</option><option value="highest">Highest available</option></select>
           </label>
           <label class="cgs-setting">
-            <span><strong>Open branches in</strong><small>A side window keeps the original instructions visible. Small screens use a tab.</small></span>
-            <select data-cgs-setting="openMode" aria-label="Open branches in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
+            <span><strong>Open side-question branches in</strong><small>A side window keeps the original instructions visible. Small screens use a tab. Fresh-chat continuation always switches this tab.</small></span>
+            <select data-cgs-setting="openMode" aria-label="Open side-question branches in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
           </label>
           <label class="cgs-setting">
             <span><strong>Send side questions automatically</strong><small>The question is sent only after ChatGPT finishes creating the native branch.</small></span>
@@ -1632,19 +1750,10 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
 
       <div id="cgs-handoff-backdrop" hidden>
         <section class="cgs-dialog" role="dialog" aria-modal="true" aria-labelledby="cgs-handoff-title">
-          <h2 id="cgs-handoff-title">Continue in fresh chat</h2>
-          <p>A full branch keeps every old turn and can remain heavy. This two-step handoff creates a genuinely fresh chat without Workflow Toolkit reading the transcript or clipboard.</p>
-          <div class="cgs-setting">
-            <span><strong>1. Ask for a compact handoff</strong><small>Workflow Toolkit puts a handoff request in the current composer for you to review and send. When ChatGPT answers, use its normal Copy button.</small></span>
-            <button class="cgs-secondary" type="button" data-cgs-action="prepare-handoff">Prepare</button>
-          </div>
-          <div class="cgs-setting">
-            <span><strong>2. Open a fresh side chat</strong><small>After copying the handoff, open the fresh chat, paste it, add your next request, and send.</small></span>
-            <button class="cgs-primary" type="button" data-cgs-action="open-fresh-chat">Open fresh</button>
-          </div>
+          <h2 id="cgs-handoff-title">Are you sure you want to continue in fresh chat?</h2>
           <div class="cgs-dialog-actions">
-            <button class="cgs-secondary" type="button" data-cgs-action="full-branch-latest">Branch with full context</button>
-            <button class="cgs-secondary" type="button" data-cgs-action="close-handoff">Close</button>
+            <button class="cgs-secondary" type="button" data-cgs-action="close-handoff">Cancel</button>
+            <button class="cgs-primary" type="button" data-cgs-action="confirm-fresh-chat">Yes</button>
           </div>
         </section>
       </div>
@@ -1655,9 +1764,10 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
           <p>The new chat uses ChatGPT’s native branch, so it keeps context while this page stays put.</p>
           <textarea id="cgs-question" aria-label="Side question" placeholder="What are you stuck on?"></textarea>
           <div class="cgs-dialog-options">
-            <label><input id="cgs-dialog-autosend" type="checkbox"> Send automatically</label>
-            <label>Context <select id="cgs-context-mode" aria-label="Side chat context"><option value="latest">Through latest response</option><option value="clicked">Only through this response</option></select></label>
+            <label><input id="cgs-dialog-autosend" type="checkbox"> Send this question automatically</label>
+            <label>Context <select id="cgs-context-mode" aria-label="Side chat context"><option value="latest">Through latest response (include later messages)</option><option value="clicked">Only through this response (exclude later messages)</option></select></label>
           </div>
+          <p class="cgs-dialog-help">When checked, this sends the question after the new branch is ready. When unchecked, it leaves the question in the composer for review. “Only through this response” stops at the clicked response and excludes later messages. “Through latest response” includes those later messages.</p>
           <div class="cgs-dialog-actions">
             <button class="cgs-secondary" type="button" data-cgs-action="cancel-question">Cancel</button>
             <button class="cgs-primary" type="button" data-cgs-action="submit-question">Open side chat</button>
@@ -1725,6 +1835,17 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     const injectedMenuRegister = typeof options.registerMenuCommand === 'function'
       ? options.registerMenuCommand
       : null;
+    const freshStorageGet = typeof options.storageGet === 'function' ? options.storageGet : storageGet;
+    const freshStorageSet = typeof options.storageSet === 'function' ? options.storageSet : storageSet;
+    const freshStorageDelete = typeof options.storageDelete === 'function' ? options.storageDelete : storageDelete;
+    const navigateCurrent = typeof options.navigateTo === 'function'
+      ? options.navigateTo
+      : (url) => {
+        win.location.assign(url);
+        return true;
+      };
+    const freshResponseTimeout = clampInteger(options.freshResponseTimeout, 5 * 60 * 1000, 500, 10 * 60 * 1000);
+    const freshStabilityMs = clampInteger(options.freshStabilityMs, 650, 20, 5_000);
     const state = {
       settings: { ...DEFAULT_SETTINGS },
       root: null,
@@ -1743,20 +1864,64 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       adaptiveSendPromise: null,
       replayingSend: false,
       submitReplayPermit: null,
-      programmaticPickerClick: false,
-      modelMenuOpenedUntil: 0,
-      userOpenedPicker: null,
-      manualNextLevel: '',
       composingComposer: null,
       lastRouteDecision: null,
       adaptiveCancelled: false,
       dockUpdateTimer: null,
+      freshContinuationPromise: null,
+      freshTransferPromise: null,
       initialJobId: isValidJobId(options.initialJobId) ? options.initialJobId : '',
-      initialFreshLaunch: options.initialFreshLaunch === true,
+      initialFreshJobId: isValidJobId(options.initialFreshJobId) ? options.initialFreshJobId : '',
     };
 
     function element(selector) {
       return state.root && state.root.querySelector(selector);
+    }
+
+    function freshIndexEntries(raw) {
+      if (!Array.isArray(raw)) return [];
+      const seen = new Set();
+      return raw.flatMap((entry) => {
+        const id = String(entry && entry.id || '');
+        const createdAt = Number(entry && entry.createdAt);
+        if (!isValidJobId(id) || !Number.isFinite(createdAt) || seen.has(id)) return [];
+        seen.add(id);
+        return [{ id, createdAt }];
+      }).slice(-30);
+    }
+
+    async function trackFreshJob(job) {
+      const raw = await Promise.resolve(freshStorageGet(FRESH_HANDOFF_INDEX_KEY, null));
+      const entries = freshIndexEntries(raw).filter((entry) => entry.id !== job.id);
+      entries.push({ id: job.id, createdAt: job.createdAt });
+      return Promise.resolve(freshStorageSet(FRESH_HANDOFF_INDEX_KEY, entries.slice(-30)));
+    }
+
+    async function deleteFreshJob(id) {
+      const storageKey = freshHandoffStorageKey(id);
+      if (storageKey) await Promise.resolve(freshStorageDelete(storageKey));
+      const raw = await Promise.resolve(freshStorageGet(FRESH_HANDOFF_INDEX_KEY, null));
+      if (!Array.isArray(raw)) return;
+      const keep = freshIndexEntries(raw).filter((entry) => entry.id !== id);
+      if (keep.length) await Promise.resolve(freshStorageSet(FRESH_HANDOFF_INDEX_KEY, keep));
+      else await Promise.resolve(freshStorageDelete(FRESH_HANDOFF_INDEX_KEY));
+    }
+
+    async function cleanupFreshJobs(now = Date.now()) {
+      const raw = await Promise.resolve(freshStorageGet(FRESH_HANDOFF_INDEX_KEY, null));
+      if (!Array.isArray(raw)) return;
+      const keep = [];
+      for (const entry of freshIndexEntries(raw)) {
+        const job = sanitizeFreshHandoff(
+          await Promise.resolve(freshStorageGet(freshHandoffStorageKey(entry.id), null)),
+          now,
+          entry.id,
+        );
+        if (job) keep.push(entry);
+        else await Promise.resolve(freshStorageDelete(freshHandoffStorageKey(entry.id)));
+      }
+      if (keep.length) await Promise.resolve(freshStorageSet(FRESH_HANDOFF_INDEX_KEY, keep));
+      else await Promise.resolve(freshStorageDelete(FRESH_HANDOFF_INDEX_KEY));
     }
 
     async function saveSettings() {
@@ -1780,9 +1945,6 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
         } else if (state.adaptiveSendPromise) {
           badge.textContent = 'Auto choosing…';
           badge.title = 'Choosing from the model levels available to this account';
-        } else if (state.manualNextLevel) {
-          badge.textContent = `Manual → ${modelLevelLabel(state.manualNextLevel)}`;
-          badge.title = 'Your manual picker choice will be kept for the next message; Adaptive Auto resumes after it sends';
         } else if (state.lastRouteDecision && state.lastRouteDecision.level) {
           badge.textContent = `${state.lastRouteDecision.manual ? 'Manual' : 'Auto'} → ${modelLevelLabel(state.lastRouteDecision.level)}`;
           badge.title = state.lastRouteDecision.reason || 'Last per-message routing choice';
@@ -1855,7 +2017,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       const generating = hasActiveGeneration(doc);
       dock.hidden = !hasComposer && !hasCompletedResponse;
       const continueButton = dock.querySelector('[data-cgs-action="open-handoff"]');
-      if (continueButton) continueButton.hidden = !hasCompletedResponse || generating;
+      if (continueButton) continueButton.hidden = !hasCompletedResponse || generating || Boolean(state.freshContinuationPromise);
     }
 
     async function ensureInstant(options = {}) {
@@ -1864,7 +2026,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
 
       state.autoEnsurePromise = (async () => {
         const composer = findComposer(doc);
-        const picker = findModelPicker(doc, composer);
+        const picker = findReasoningPicker(doc, composer) || findModelPicker(doc, composer);
         if (!picker) {
           if (userInitiated) toast('Could not find the model control. Your plan may already use ChatGPT’s default Auto routing.');
           return { ok: false, reason: 'picker-not-found' };
@@ -1877,7 +2039,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
         }
 
         const preexistingOptions = new Set(
-          [...doc.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-collection-item], button')]
+          [...doc.querySelectorAll(MODEL_OPTION_SELECTOR)]
             .filter((candidate) => isProbablyVisible(candidate) && lowerText(accessibleText(candidate)).startsWith('instant')),
         );
         picker.click();
@@ -2014,7 +2176,6 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
         reason: reason || `${decision.reasons && decision.reasons.slice(0, 2).join(' + ') || 'prompt complexity'}; score ${decision.score}`,
       };
       state.lastRouteDecision = record;
-      if (manual) state.manualNextLevel = '';
       syncSettingsUI();
       win.setTimeout(() => {
         if (state.lastRouteDecision === record) record.path = conversationPath();
@@ -2087,27 +2248,27 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
 
     function programmaticClick(node) {
       if (!node || typeof node.click !== 'function') return false;
-      state.programmaticPickerClick = true;
-      try { node.click(); } finally { state.programmaticPickerClick = false; }
+      node.click();
       return true;
     }
 
     function controlledModelMenu(picker) {
       const ids = normalizeText(picker && picker.getAttribute('aria-controls')).split(/\s+/u).filter(Boolean);
-      return ids.map((id) => doc.getElementById(id)).find((node) => node && node.isConnected && isProbablyVisible(node)) || null;
+      return ids.map((id) => doc.getElementById(id)).find((node) => node && node.isConnected && isProbablyVisible(node) &&
+        !node.matches('[data-state="closed"], [aria-hidden="true"], [hidden]')) || null;
     }
 
     function visibleModelMenuRoots(picker) {
       const roots = [];
       const controlled = controlledModelMenu(picker);
       if (controlled) roots.push(controlled);
-      const rootSelector = '[role="menu"], [role="listbox"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-menu-items], [data-testid*="model-menu"], [data-testid*="model-picker-menu"]';
-      for (const candidate of doc.querySelectorAll(rootSelector)) {
-        if (isProbablyVisible(candidate) && !candidate.closest(`#${UI_ROOT_ID}`)) roots.push(candidate);
+      for (const candidate of doc.querySelectorAll(MODEL_MENU_ROOT_SELECTOR)) {
+        if (isProbablyVisible(candidate) && !candidate.matches('[data-state="closed"], [aria-hidden="true"], [hidden]') &&
+          !candidate.closest('[data-state="closed"]') && !candidate.closest(`#${UI_ROOT_ID}`)) roots.push(candidate);
       }
-      for (const item of doc.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-collection-item]')) {
-        if (!isProbablyVisible(item) || item.closest(`#${UI_ROOT_ID}`)) continue;
-        roots.push(item.closest(rootSelector) || item.parentElement);
+      for (const item of doc.querySelectorAll(MODEL_OPTION_CONTAINER_SELECTOR)) {
+        if (!isProbablyVisible(item) || item.closest('[data-state="closed"], [aria-hidden="true"], [hidden]') || item.closest(`#${UI_ROOT_ID}`)) continue;
+        roots.push(item.closest(MODEL_MENU_ROOT_SELECTOR) || item.parentElement);
       }
       return uniqueElements(roots);
     }
@@ -2120,9 +2281,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     async function routeAndReplay(snapshot, decision, manual = false, silent = false, routingStage = 0) {
       const target = manual ? decision.target : cappedTarget(decision.target);
       const targetRank = modelLevelRank(target);
-      const currentRoutingPicker = () => targetRank >= ROUTE_LEVEL_RANK.medium && targetRank <= ROUTE_LEVEL_RANK.ultra
-        ? findReasoningPicker(doc) || findModelPicker(doc)
-        : findModelPicker(doc);
+      const currentRoutingPicker = () => findReasoningPicker(doc) || findModelPicker(doc);
       const picker = currentRoutingPicker();
       const current = extractModelLevel(accessibleText(picker));
 
@@ -2152,15 +2311,27 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       const options = await waitForCondition(() => {
         const controlled = controlledModelMenu(picker);
         const roots = visibleModelMenuRoots(picker).filter((root) => root === controlled || !preexistingMenuRoots.has(root));
+        const candidates = [];
         for (const root of roots) {
           const found = findModelOptions(root, picker) || [];
-          if (found.length) return found;
+          if (!found.length) continue;
+          const levels = new Set(found.map(optionLevel).filter(Boolean));
+          const context = lowerText(`${root.getAttribute && root.getAttribute('aria-label')} ${root.getAttribute && root.getAttribute('data-testid')}`);
+          let score = root === controlled ? 100 : 0;
+          if (/\b(?:model|reasoning|thinking|intelligence|effort)\b/iu.test(context)) score += 40;
+          if (root.matches('[data-slot*="menu"], [data-slot*="popover"], [data-radix-menu-content], [data-radix-popper-content-wrapper]') ||
+            root.querySelector('[data-slot*="menu"], [data-slot*="popover"], [data-radix-menu-content]')) score += 30;
+          score += levels.size * 5;
+          if (current && levels.has(current)) score += 25;
+          if (found.some((option) => option.matches('[aria-checked="true"], [aria-selected="true"], [data-state="checked"]') && optionLevel(option) === current)) score += 25;
+          candidates.push({ found, score });
         }
-        return null;
+        candidates.sort((left, right) => right.score - left.score);
+        return candidates[0] && candidates[0].found || null;
       }, {
         root: doc.documentElement,
         win,
-        timeout: 1_800,
+        timeout: 2_500,
         attributes: true,
       });
 
@@ -2276,14 +2447,11 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
           previousLevel: previousRouteLevel(),
           attachmentCount: snapshot.attachmentCount,
         });
-        const manualLevel = !explicitDecision.explicit && state.manualNextLevel ? state.manualNextLevel : '';
-        const decision = manualLevel
-          ? { target: manualLevel, score: 0, confidence: 1, explicit: false, reasons: ['manual one-message choice'] }
-          : explicitDecision;
-        if (!state.settings.adaptiveRouting && !manualLevel && !explicitDecision.explicit) {
+        const decision = explicitDecision;
+        if (!state.settings.adaptiveRouting && !explicitDecision.explicit) {
           return replayNativeSend(snapshot, decision, extractModelLevel(accessibleText(findModelPicker(doc))) || 'unknown', false, 'Adaptive Auto disabled');
         }
-        return routeAndReplay(snapshot, decision, Boolean(manualLevel), options.silent === true);
+        return routeAndReplay(snapshot, decision, false, options.silent === true);
       });
       state.adaptiveSendPromise = task;
       syncSettingsUI();
@@ -2364,9 +2532,13 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
         toast('Continue in fresh chat becomes available after ChatGPT completes a response.');
         return;
       }
+      if (state.freshContinuationPromise) {
+        toast('The fresh-chat handoff is already being prepared.');
+        return;
+      }
       state.focusReturn = doc.activeElement;
       element('#cgs-handoff-backdrop').hidden = false;
-      win.setTimeout(() => element('[data-cgs-action="prepare-handoff"]').focus(), 0);
+      win.setTimeout(() => element('[data-cgs-action="confirm-fresh-chat"]').focus(), 0);
     }
 
     function closeHandoff(restoreFocus = true) {
@@ -2375,53 +2547,273 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       state.focusReturn = null;
     }
 
-    function prepareHandoff() {
-      if (hasActiveGeneration(doc)) {
-        toast('Wait for ChatGPT to finish before replacing the composer with a handoff request.');
+    function sendComposerDirectly(composer) {
+      const sendButton = findSendButton(doc, composer);
+      if (!sendButton || sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') return false;
+      armSubmitReplayPermit(composer, 'fresh-handoff');
+      state.replayingSend = true;
+      try {
+        sendButton.click();
+        return true;
+      } finally {
+        state.replayingSend = false;
+      }
+    }
+
+    function isHandoffRequestTurn(turn) {
+      const signature = 'Create a compact, self-contained handoff for continuing this conversation in a brand-new chat.';
+      return roleOfTurn(turn) === 'user' && normalizeText(accessibleText(turn)).startsWith(signature);
+    }
+
+    function waitForFreshAssistant(sourceRoute, baselineUserCount, baselineRequestCount) {
+      return new Promise((resolve) => {
+        const startedAt = Date.now();
+        let observer = null;
+        let checkTimer = null;
+        let timeoutTimer = null;
+        let candidate = null;
+        let candidateText = '';
+        let stableSince = 0;
+        let settled = false;
+        const finish = (value) => {
+          if (settled) return;
+          settled = true;
+          if (observer) observer.disconnect();
+          if (checkTimer) win.clearTimeout(checkTimer);
+          if (timeoutTimer) win.clearTimeout(timeoutTimer);
+          resolve(value);
+        };
+        const scheduleCheck = (delay = 180) => {
+          if (settled || checkTimer) return;
+          checkTimer = win.setTimeout(() => {
+            checkTimer = null;
+            check();
+          }, delay);
+        };
+        const check = () => {
+          if (routeKey(win.location.href) !== sourceRoute) {
+            finish({ error: 'The conversation changed before the handoff finished.' });
+            return;
+          }
+          const turns = getTurns(doc);
+          const users = turns.filter((turn) => roleOfTurn(turn) === 'user');
+          const userCount = users.length;
+          if (userCount > baselineUserCount + 1) {
+            finish({ error: 'Another message was sent before the handoff finished.' });
+            return;
+          }
+          const requests = users.filter(isHandoffRequestTurn);
+          if (userCount > baselineUserCount && requests.length <= baselineRequestCount) {
+            finish({ error: 'ChatGPT did not post the expected handoff request.' });
+            return;
+          }
+          const request = requests.length > baselineRequestCount ? requests[requests.length - 1] : null;
+          const requestIndex = request ? turns.indexOf(request) : -1;
+          const laterTurns = requestIndex >= 0 ? turns.slice(requestIndex + 1) : [];
+          if (laterTurns.some((turn) => roleOfTurn(turn) === 'user')) {
+            finish({ error: 'Another message was sent before the handoff finished.' });
+            return;
+          }
+          const next = laterTurns.find((turn) => roleOfTurn(turn) === 'assistant') || null;
+          const text = next && !hasActiveGeneration(doc) ? extractAssistantHandoff(next) : '';
+          if (next && text) {
+            if (candidate === next && candidateText === text) {
+              if (Date.now() - stableSince >= freshStabilityMs) finish({ turn: next, text });
+              else scheduleCheck(Math.max(20, freshStabilityMs - (Date.now() - stableSince)));
+            } else {
+              candidate = next;
+              candidateText = text;
+              stableSince = Date.now();
+              scheduleCheck(freshStabilityMs);
+            }
+          } else {
+            candidate = null;
+            candidateText = '';
+            stableSince = 0;
+          }
+        };
+        if (win.MutationObserver) {
+          observer = new win.MutationObserver(() => scheduleCheck());
+          observer.observe(doc.querySelector('main') || doc.body || doc.documentElement, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: ['data-is-streaming', 'data-streaming', 'data-message-author-role', 'data-testid', 'aria-label'],
+          });
+        }
+        timeoutTimer = win.setTimeout(() => {
+          finish({ error: 'ChatGPT did not finish the handoff in time.' });
+        }, Math.max(1, freshResponseTimeout - (Date.now() - startedAt)));
+        check();
+      });
+    }
+
+    async function continueInFreshChat() {
+      if (state.freshContinuationPromise) return state.freshContinuationPromise;
+      const task = (async () => {
+        closeHandoff(false);
+        if (isReadOnlyChatPage(win.location.href)) {
+          toast('Fresh-chat continuation requires a signed-in, editable conversation.');
+          return false;
+        }
+        if (hasActiveGeneration(doc)) {
+          toast('Wait for ChatGPT to finish its current response, then try again.');
+          return false;
+        }
+        const baselineTurns = getCompletedAssistantTurns(doc);
+        if (!baselineTurns.length) {
+          toast('A completed ChatGPT response is required before continuing in a fresh chat.');
+          return false;
+        }
+        const composer = findComposer(doc);
+        if (!composer) {
+          toast('Could not find ChatGPT’s message box. Open a normal chat and try again.');
+          return false;
+        }
+        if (getComposerText(composer).trim()) {
+          toast('Your message box already has a draft. Send, save, or clear it before continuing in a fresh chat.', 8_000);
+          composer.focus();
+          return false;
+        }
+        if (attachmentState(composer).count) {
+          toast('Remove or send the staged attachment before continuing in a fresh chat.', 8_000);
+          composer.focus();
+          return false;
+        }
+        const sourceRoute = routeKey(win.location.href);
+        const sourceTurns = getTurns(doc);
+        const baselineUserCount = sourceTurns.filter((turn) => roleOfTurn(turn) === 'user').length;
+        const baselineRequestCount = sourceTurns.filter(isHandoffRequestTurn).length;
+        if (!setComposerText(composer, HANDOFF_PROMPT, win) || !composerTextEquals(composer, HANDOFF_PROMPT)) {
+          toast('ChatGPT did not accept the handoff request. Nothing was sent.');
+          return false;
+        }
+        const readySend = await waitForCondition(() => {
+          const button = findSendButton(doc, composer);
+          return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
+        }, { root: composerScope(composer) || doc.documentElement, win, timeout: 5_000, attributes: true });
+        if (!readySend || !sendComposerDirectly(composer)) {
+          toast('The handoff request is ready, but ChatGPT’s Send button was unavailable. Press Send or try again.', 8_000);
+          composer.focus();
+          return false;
+        }
+        toast('Creating a compact handoff, then switching this tab…', 10_000);
+        const result = await waitForFreshAssistant(sourceRoute, baselineUserCount, baselineRequestCount);
+        if (!result || !result.text) {
+          toast(result && result.error || 'ChatGPT did not produce a usable handoff. This chat was left open.', 9_000);
+          return false;
+        }
+        const currentComposer = findComposer(doc);
+        if (!currentComposer || getComposerText(currentComposer).trim() || attachmentState(currentComposer).count) {
+          toast('A new draft or attachment appeared while the handoff was being created, so this chat was left open.', 9_000);
+          if (currentComposer) currentComposer.focus();
+          return false;
+        }
+        const id = createJobId();
+        const job = sanitizeFreshHandoff({ version: 1, id, createdAt: Date.now(), handoff: result.text }, Date.now(), id);
+        const targetUrl = urlWithFreshLaunch(win.location.href, id);
+        const storageKey = freshHandoffStorageKey(id);
+        if (!job || !targetUrl || !storageKey || !await Promise.resolve(freshStorageSet(storageKey, job))) {
+          toast('Workflow Toolkit could not save the one-time handoff. This chat was left open.', 9_000);
+          return false;
+        }
+        try { await trackFreshJob(job); } catch (_error) { /* The transfer can proceed without the expiry index. */ }
+        const navigationComposer = findComposer(doc);
+        if (routeKey(win.location.href) !== sourceRoute || !navigationComposer || getComposerText(navigationComposer).trim() ||
+          attachmentState(navigationComposer).count) {
+          await deleteFreshJob(id);
+          toast('The conversation, draft, or attachments changed before the new chat opened, so this chat was left open.', 9_000);
+          if (navigationComposer) navigationComposer.focus();
+          return false;
+        }
+        try {
+          const navigated = await Promise.resolve(navigateCurrent(targetUrl));
+          if (navigated === false) throw new Error('navigation rejected');
+        } catch (_error) {
+          await deleteFreshJob(id);
+          toast('The new chat could not be opened. This chat was left open.', 9_000);
+          return false;
+        }
+        return true;
+      })().catch((error) => {
+        if (win.console && typeof win.console.error === 'function') {
+          win.console.error('[ChatGPT Workflow Toolkit] Fresh-chat continuation failed:', error);
+        }
+        toast('The fresh-chat handoff stopped unexpectedly. This chat was left open.', 9_000);
+        return false;
+      });
+      state.freshContinuationPromise = task;
+      state.freshTransferPromise = task;
+      scheduleDockAvailability();
+      try {
+        return await task;
+      } finally {
+        if (state.freshContinuationPromise === task) state.freshContinuationPromise = null;
+        scheduleDockAvailability();
+      }
+    }
+
+    async function consumeFreshLaunch(capturedJobId = '') {
+      const id = isValidJobId(capturedJobId) ? capturedJobId : parseFreshJobId(win.location.href);
+      if (!id) return false;
+      const storageKey = freshHandoffStorageKey(id);
+      const raw = await Promise.resolve(freshStorageGet(storageKey, null));
+      const job = sanitizeFreshHandoff(raw, Date.now(), id);
+      if (!job) {
+        await deleteFreshJob(id);
+        try { win.history.replaceState(win.history.state, '', canonicalPageUrl(win.location.href)); } catch (_error) { /* Random ID only. */ }
+        toast('This fresh-chat handoff expired. Return to the original chat and try again.', 8_000);
         return false;
       }
-      const composer = findComposer(doc);
+      const prompt = buildFreshContinuationPrompt(job.handoff);
+      const composer = await waitForCondition(() => findComposer(doc), {
+        root: doc.documentElement,
+        win,
+        timeout: 20_000,
+        attributes: true,
+      });
       if (!composer) {
-        toast('Could not find ChatGPT’s message box. Open a normal chat and try again.');
+        toast('The fresh chat opened, but its message box was not available.', 8_000);
         return false;
       }
       const existing = getComposerText(composer).trim();
-      if (existing && existing !== HANDOFF_PROMPT) {
-        toast('Your composer already has a draft. Save or clear it before preparing the handoff.', 7_000);
+      if (existing && existing !== prompt) {
+        toast('The fresh chat already has a draft, so Workflow Toolkit did not replace it.', 8_000);
         composer.focus();
         return false;
       }
-      if (!setComposerText(composer, HANDOFF_PROMPT, win)) {
-        toast('ChatGPT did not accept the handoff request automatically.');
+      if (!setComposerText(composer, prompt, win) || !composerTextEquals(composer, prompt)) {
+        toast('ChatGPT did not keep the handoff in its message box.', 8_000);
         return false;
       }
-      closeHandoff(false);
-      composer.focus();
-      toast('Handoff request ready — review and send it. Then copy ChatGPT’s summary and open a fresh side chat.', 9_000);
-      return true;
-    }
-
-    function openFreshChat() {
-      const targetUrl = urlWithFreshLaunch(win.location.href);
-      const launchId = createJobId();
-      const child = openChildWindow(targetUrl, state.settings.openMode, `fresh-${launchId}`);
-      if (!child) {
-        toast('The browser blocked the fresh side window. Allow popups for chatgpt.com or choose New tab in Workflow Toolkit settings.', 7_000);
+      const sendButton = await waitForCondition(() => {
+        const button = findSendButton(doc, composer);
+        return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
+      }, { root: composerScope(composer) || doc.documentElement, win, timeout: 10_000, attributes: true });
+      const baselineUserCount = getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user').length;
+      if (!sendButton || !sendComposerDirectly(composer)) {
+        toast('The handoff is ready. ChatGPT’s Send button was unavailable, so press Send once it is ready.', 9_000);
+        composer.focus();
         return false;
       }
-      closeHandoff(false);
-      toast('Fresh chat opened — paste the handoff, add your next request, and send.');
-      return true;
-    }
-
-    function consumeFreshLaunch(force = false) {
-      if (!force && !isFreshLaunch(win.location.href)) return false;
-      try {
-        win.history.replaceState(win.history.state, '', canonicalPageUrl(win.location.href));
-      } catch (_error) {
-        // The fragment contains only a fixed marker and no conversation content.
+      const acknowledged = await waitForCondition(() => {
+        const current = findComposer(doc);
+        if (current && !getComposerText(current).trim()) return current;
+        const users = getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user');
+        const latest = users.length > baselineUserCount ? users[users.length - 1] : null;
+        return latest && normalizeText(accessibleText(latest)).startsWith('Continue the previous conversation from the handoff below.')
+          ? latest
+          : null;
+      }, { root: doc.documentElement, win, timeout: 8_000, attributes: true });
+      if (!acknowledged) {
+        toast('The handoff is still in the message box because ChatGPT did not confirm Send. Press Send once when ready.', 9_000);
+        composer.focus();
+        return false;
       }
-      toast('Paste the copied handoff here, add what you want to do next, and send.', 10_000);
+      await deleteFreshJob(id);
+      try { win.history.replaceState(win.history.state, '', canonicalPageUrl(win.location.href)); } catch (_error) { /* Random ID only. */ }
+      toast('Continuing in this fresh chat.');
       return true;
     }
 
@@ -2709,7 +3101,6 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       state.settings = sanitizeSettings(next);
       if (key === 'adaptiveRouting' && !state.settings.adaptiveRouting) {
         if (state.adaptiveSendPromise) state.adaptiveCancelled = true;
-        state.manualNextLevel = '';
         state.submitReplayPermit = null;
       }
       await saveSettings();
@@ -2734,7 +3125,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
 
     function adaptiveApplies(composer) {
       if (!composer) return false;
-      return state.settings.adaptiveRouting || Boolean(state.manualNextLevel) || Boolean(parseRouteOverride(getComposerText(composer)));
+      return state.settings.adaptiveRouting || Boolean(parseRouteOverride(getComposerText(composer)));
     }
 
     function composerContainsTarget(composer, target) {
@@ -2742,54 +3133,10 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       return Boolean(composer && node && (node === composer || composer.contains(node)));
     }
 
-    function trackManualModelClick(event) {
-      if (!state.settings.adaptiveRouting || state.programmaticPickerClick || event.isTrusted !== true) return;
-      const target = event.target && event.target.closest && event.target.closest(MODEL_OPTION_SELECTOR);
-      if (!target || target.closest(`#${UI_ROOT_ID}`)) return;
-      const pickerSelector = 'button[data-testid*="model-picker"], button[data-testid*="model-switcher"], button[data-testid*="reasoning"], button[data-testid*="thinking-time"], button[aria-label*="model" i], button[aria-label*="reasoning" i], button[aria-label*="thinking time" i], button[aria-label*="intelligence level" i]';
-      const isMenuOption = target.matches('[role="menuitem"], [role="option"], [data-radix-collection-item]') ||
-        Boolean(target.closest('[role="menu"], [role="listbox"]'));
-      const level = extractPickerLevel(accessibleText(target), { allowBareEffort: isMenuOption });
-      if (!target.matches(pickerSelector) && !level && !isMenuOption) return;
-
-      let pickers = [];
-      let openedPicker = target.matches(pickerSelector) ? target : null;
-      if (!openedPicker && level && !isMenuOption) {
-        pickers = uniqueElements([findReasoningPicker(doc), findModelPicker(doc)]);
-        openedPicker = pickers.find((picker) => target === picker || target.contains(picker));
-      }
-      if (openedPicker) {
-        state.modelMenuOpenedUntil = Date.now() + 6_000;
-        state.userOpenedPicker = openedPicker;
-        return;
-      }
-      if (!level || !isMenuOption) return;
-      if (!pickers.length && Date.now() > state.modelMenuOpenedUntil) {
-        pickers = uniqueElements([findReasoningPicker(doc), findModelPicker(doc)]);
-      }
-      const controlledMenu = controlledModelMenu(state.userOpenedPicker) || pickers.map(controlledModelMenu).find(Boolean) || null;
-      const insideControlledMenu = Boolean(controlledMenu && controlledMenu.contains(target));
-      const expandedState = state.userOpenedPicker && state.userOpenedPicker.getAttribute('aria-expanded');
-      const tokenIsValid = Date.now() <= state.modelMenuOpenedUntil && expandedState !== 'false';
-      if (!insideControlledMenu && !tokenIsValid) return;
-      const outerOption = target.closest('[role="menuitem"], [role="option"], [data-radix-collection-item]');
-      if (target.disabled || target.closest('[aria-disabled="true"], [data-disabled="true"], :disabled') ||
-        isModelUpsellLabel(accessibleText(outerOption || target))) return;
-      state.manualNextLevel = level;
-      state.modelMenuOpenedUntil = 0;
-      state.userOpenedPicker = null;
-      state.lastRouteDecision = null;
-      win.setTimeout(syncSettingsUI, 0);
-    }
-
     function beginAdaptiveSend(event, composer, options = {}) {
       if (state.replayingSend) return false;
       const bypass = options.altKey || event && event.altKey;
       if (bypass) {
-        if (state.manualNextLevel) {
-          state.manualNextLevel = '';
-          syncSettingsUI();
-        }
         if (adaptiveApplies(composer)) armSubmitReplayPermit(composer, 'alt-bypass');
         return false;
       }
@@ -2811,7 +3158,6 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     }
 
     function onAdaptiveClick(event) {
-      trackManualModelClick(event);
       if (state.replayingSend) return;
       const potentialSend = event.target && event.target.closest && event.target.closest(SEND_BUTTON_SELECTORS.join(', '));
       if (!potentialSend) return;
@@ -2880,22 +3226,8 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
         openHandoff();
       } else if (action === 'close-handoff') {
         closeHandoff();
-      } else if (action === 'prepare-handoff') {
-        prepareHandoff();
-      } else if (action === 'open-fresh-chat') {
-        openFreshChat();
-      } else if (action === 'full-branch-latest') {
-        const turns = getCompletedAssistantTurns(doc);
-        const turn = turns[turns.length - 1];
-        if (!turn) return toast('No completed response is available to branch from.');
-        const reservation = reserveBranchWindow();
-        closeHandoff(false);
-        await launchBranch(turn, {
-          kind: 'continue',
-          question: getComposerText(findComposer(doc)),
-          autoSend: false,
-          reservation,
-        });
+      } else if (action === 'confirm-fresh-chat') {
+        await continueInFreshChat();
       } else if (action === 'toggle-settings') {
         openSettings();
       } else if (action === 'close-settings') {
@@ -3028,7 +3360,8 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       scheduleScan(doc.body);
 
       await cleanupExpiredJobs();
-      consumeFreshLaunch(state.initialFreshLaunch);
+      await cleanupFreshJobs();
+      await consumeFreshLaunch(state.initialFreshJobId);
       await consumeIncomingJob(state.initialJobId);
       return state;
     }
@@ -3066,10 +3399,10 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     // canonicalize its SPA URL while the userscript is starting.
     const initialUrl = String(win.location.href);
     const initialJobId = parseJobId(initialUrl);
-    const initialFreshLaunch = isFreshLaunch(initialUrl);
+    const initialFreshJobId = parseFreshJobId(initialUrl);
     await waitForBody(doc, win);
     injectStyles(doc);
-    const app = createApp(doc, win, { initialJobId, initialFreshLaunch });
+    const app = createApp(doc, win, { initialJobId, initialFreshJobId });
     await app.start();
     return app;
   }
@@ -3078,6 +3411,8 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     VERSION,
     DEFAULT_SETTINGS,
     JOB_MAX_AGE_MS,
+    FRESH_HANDOFF_MAX_AGE_MS,
+    FRESH_HANDOFF_MAX_LENGTH,
     SELECTED_QUOTE_MAX_LENGTH,
     normalizeText,
     sanitizeSettings,
@@ -3094,6 +3429,7 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     closestAssistantTurn,
     quoteForPrompt,
     buildSelectedQuestion,
+    extractAssistantHandoff,
     cleanStartWriting,
     restoreStartWriting,
     canonicalPageUrl,
@@ -3101,10 +3437,14 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
     isReadOnlyChatPage,
     isAllowedChatGPTUrl,
     isValidJobId,
+    freshHandoffStorageKey,
     urlWithJob,
     parseJobId,
     urlWithFreshLaunch,
+    parseFreshJobId,
     isFreshLaunch,
+    sanitizeFreshHandoff,
+    buildFreshContinuationPrompt,
     sanitizeJob,
     accessibleText,
     findComposer,

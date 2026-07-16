@@ -39,13 +39,13 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 
 ## Continue in fresh chat
 
-- Click **Continue in fresh chat → Prepare** and confirm the handoff request is filled but not sent.
-- Send it, use ChatGPT's normal Copy action on the result, then choose **Open fresh**.
-- Confirm the new side chat is empty, prompts you to paste, and contains none of the old rendered turns.
-- Paste the handoff and continue normally.
-- Confirm **Prepare** refuses to overwrite an unrelated existing draft.
-- Choose **Branch with full context** and confirm the full native branch path remains available only inside this dialog.
-- Repeat the fresh-chat and branch paths with **New tab** selected in Workflow Toolkit settings.
+- Click **Continue in fresh chat** and confirm the dialog contains only “Are you sure you want to continue in fresh chat?”, **Cancel**, and **Yes**.
+- Choose **Yes** and confirm Workflow Toolkit sends one handoff request, waits for ChatGPT's completed answer, then switches the current tab to a blank new chat.
+- Confirm the handoff is filled and sent automatically in the new chat, with none of the old rendered turns present.
+- In a chat that used named files/images, confirm the new chat asks once for those exact items if available, says it is okay if they are unavailable, and can still continue from the handoff.
+- In a chat with no external materials, confirm the new chat does not ask for any.
+- Put an unrelated draft or staged attachment in the old composer and confirm continuation refuses to overwrite or send it.
+- Confirm the side-question popup/tab setting does not affect fresh continuation: continuation always switches the current tab.
 
 ## Adaptive Auto
 
@@ -56,7 +56,7 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Ask for a production multi-tenant authentication design with a threat model, concurrency risks, migration, rollback, tests, and security tradeoffs; confirm it selects Extra High or Ultra if exposed.
 - Ask for an end-to-end repo-scale implementation with security review, exhaustive tests, benchmarks, and a formal correctness argument; confirm it can select a Pro-class option when the account exposes one.
 - Change **Maximum Auto level** to High and confirm even the hardest prompt does not select above High. Repeat with Extra High.
-- Manually choose a different model level, send one message, and confirm the badge shows **Manual → …** for that message; confirm Adaptive Auto resumes on the following message.
+- Manually choose High, then send `what is 2+2`; confirm Adaptive Auto still changes it to Instant. Hold Alt while sending when you intentionally want to preserve the current manual choice for one message.
 - Start a prompt with `!route:high`, send it, and confirm High is selected. Verify the same words later in ordinary prose do not count as an override.
 - Hold Alt while clicking Send and confirm the current model is used without opening the picker.
 - Press Shift+Enter and use an IME composition flow; confirm neither triggers a send. Confirm plain Enter and Ctrl/Cmd+Enter still route and send once.

@@ -158,6 +158,143 @@ test('simple prompt switches High to Instant and replays Send exactly once', asy
   assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
 });
 
+test('current intelligence-level popover switches High to Instant', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body><main><form>
+    <button type="button" data-testid="intelligence-picker" aria-label="Intelligence level: High" aria-expanded="false">High</button>
+    <textarea id="prompt-textarea">what is 2+2</textarea>
+    <button type="button" data-testid="send-button">Send</button>
+  </form></main></body></html>`, {
+    url: 'https://chatgpt.com/c/current-intelligence-picker',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const picker = document.querySelector('[data-testid="intelligence-picker"]');
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  let sends = 0;
+  let optionClicks = 0;
+
+  picker.addEventListener('click', () => {
+    if (picker.getAttribute('aria-expanded') === 'true') return;
+    const portal = document.createElement('div');
+    portal.dataset.slot = 'popover-content';
+    portal.dataset.state = 'open';
+    const group = document.createElement('div');
+    group.setAttribute('role', 'radiogroup');
+    for (const label of ['Instant', 'Medium', 'High']) {
+      const option = document.createElement('div');
+      option.setAttribute('role', 'radio');
+      option.tabIndex = 0;
+      option.textContent = label;
+      option.addEventListener('click', () => {
+        optionClicks += 1;
+        picker.textContent = label;
+        picker.setAttribute('aria-label', `Intelligence level: ${label}`);
+        picker.setAttribute('aria-expanded', 'false');
+        portal.remove();
+      });
+      group.append(option);
+    }
+    portal.append(group);
+    document.body.append(portal);
+    picker.setAttribute('aria-expanded', 'true');
+  });
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window);
+  await app.start();
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(picker)), 'instant');
+  assert.equal(optionClicks, 1);
+  assert.equal(sends, 1);
+  assert.equal(app.state.lastRouteDecision.target, 'instant');
+  assert.equal(app.state.lastRouteDecision.level, 'instant');
+});
+
+test('simple math uses the local Intelligence control instead of a separate base-model picker', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form>
+      <button type="button" data-testid="model-switcher" aria-label="Model: GPT-5.5" aria-expanded="false">GPT-5.5</button>
+      <textarea id="prompt-textarea">what is 2+2</textarea>
+      <button type="button" data-testid="send-button">Send</button>
+    </form>
+    <button type="button" data-testid="composer-intelligence-level" aria-label="Intelligence level: High" aria-expanded="false">High</button>
+    <div data-radix-popper-content-wrapper data-state="closed">
+      <div data-slot="dropdown-menu-content" data-state="closed" role="menu">
+        <div role="menuitemradio" tabindex="-1">Instant</div>
+        <div role="menuitemradio" tabindex="-1">Medium</div>
+        <div role="menuitemradio" tabindex="-1">High</div>
+      </div>
+    </div>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/separate-intelligence-picker',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const basePicker = document.querySelector('[data-testid="model-switcher"]');
+  const intelligencePicker = document.querySelector('[data-testid="composer-intelligence-level"]');
+  const popper = document.querySelector('[data-radix-popper-content-wrapper]');
+  const menu = document.querySelector('[data-slot="dropdown-menu-content"]');
+  const options = [...menu.querySelectorAll('[role="menuitemradio"]')];
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  let basePickerClicks = 0;
+  let intelligencePickerClicks = 0;
+  let optionClicks = 0;
+  let decoyClicks = 0;
+  let sends = 0;
+
+  basePicker.addEventListener('click', () => { basePickerClicks += 1; });
+  intelligencePicker.addEventListener('click', () => {
+    intelligencePickerClicks += 1;
+    const decoy = document.createElement('div');
+    decoy.setAttribute('role', 'radiogroup');
+    decoy.setAttribute('aria-label', 'Unrelated display setting');
+    decoy.innerHTML = '<div role="radio" id="decoy-instant">Instant</div>';
+    decoy.querySelector('#decoy-instant').addEventListener('click', () => { decoyClicks += 1; });
+    document.body.append(decoy);
+    popper.dataset.state = 'open';
+    menu.dataset.state = 'open';
+    intelligencePicker.setAttribute('aria-expanded', 'true');
+  });
+  for (const option of options) {
+    option.addEventListener('click', () => {
+      optionClicks += 1;
+      const label = option.textContent.trim();
+      intelligencePicker.textContent = label;
+      intelligencePicker.setAttribute('aria-label', `Intelligence level: ${label}`);
+      intelligencePicker.setAttribute('aria-expanded', 'false');
+      menu.dataset.state = 'closed';
+      popper.dataset.state = 'closed';
+    });
+  }
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window);
+  await app.start();
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+
+  assert.equal(basePickerClicks, 0, 'the base-model control must not be used for an Intelligence-level change');
+  assert.equal(intelligencePickerClicks, 1);
+  assert.equal(optionClicks, 1);
+  assert.equal(decoyClicks, 0, 'a concurrently mounted unrelated radio group must not be used as the Intelligence menu');
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(intelligencePicker)), 'instant');
+  assert.equal(sends, 1);
+  assert.equal(app.state.lastRouteDecision.target, 'instant');
+  assert.equal(app.state.lastRouteDecision.level, 'instant');
+});
+
 test('already-correct picker sends without opening the model menu', async (t) => {
   const harness = await createHarness({ prompt: 'Thanks!', pickerLevel: 'Instant' });
   t.after(() => harness.cleanup());
@@ -444,6 +581,24 @@ test('model option selectors accept leading Instant auto text and reject Configu
   try {
     const options = toolkit.findModelOptions(dom.window.document);
     assert.deepEqual(options.map((node) => node.id), ['instant-auto']);
+  } finally {
+    dom.window.close();
+  }
+});
+
+test('model option selectors recognize radio-style intelligence rows', () => {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div data-slot="dropdown-menu-content" data-state="open">
+      <div role="menuitemradio" id="instant">Instant</div>
+      <div role="menuitemradio" id="medium">Medium</div>
+      <div role="menuitemradio" id="high">High</div>
+    </div>
+  </body></html>`, { url: 'https://chatgpt.com/c/radio-options' });
+  try {
+    assert.deepEqual(
+      toolkit.findModelOptions(dom.window.document).map((node) => node.id),
+      ['instant', 'medium', 'high'],
+    );
   } finally {
     dom.window.close();
   }

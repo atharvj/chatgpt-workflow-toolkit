@@ -70,6 +70,50 @@ test('completed turn helpers exclude the actively streaming response', () => {
   assert.equal(toolkit.isTurnStreaming(document.querySelector('[data-testid="conversation-turn-2"]'), document), true);
 });
 
+test('extractAssistantHandoff keeps useful response content and omits action labels', () => {
+  const { document } = createDom(`
+    <article data-testid="conversation-turn-1">
+      <div data-message-author-role="assistant">
+        <div class="markdown">
+          <p>Resume the lab with these items:</p>
+          <ul>
+            <li>Open <strong>results.csv</strong></li>
+            <li>Compare the control group</li>
+          </ul>
+          <pre><code>if (ready) {
+    npm test -- --runInBand
+}</code></pre>
+          <p>Use the <a href="https://example.com/reference">reference guide</a>.</p>
+          <button data-testid="copy-turn-action-button">Copy response</button>
+          <div id="cgs-root"><button>Ask in new chat</button></div>
+          <button class="cgs-turn-action">Toolkit side question</button>
+        </div>
+      </div>
+      <div data-testid="message-actions"><button>Good response</button></div>
+    </article>
+  `).window;
+  const text = toolkit.extractAssistantHandoff(document.querySelector('article'));
+
+  assert.match(text, /Resume the lab with these items:/u);
+  assert.match(text, /- Open results\.csv/u);
+  assert.match(text, /- Compare the control group/u);
+  assert.match(text, /npm test -- --runInBand/u);
+  assert.ok(text.includes('```\nif (ready) {\n    npm test -- --runInBand\n}\n```'), 'code indentation is preserved');
+  assert.match(text, /reference guide \(https:\/\/example\.com\/reference\)/u);
+  assert.doesNotMatch(text, /Copy response|Ask in new chat|Toolkit side question|Good response/u);
+});
+
+test('extractAssistantHandoff rejects non-assistant turns', () => {
+  const { document } = createDom(`
+    <article data-testid="conversation-turn-0">
+      <div data-message-author-role="user"><p class="markdown">Do not extract me</p></div>
+    </article>
+  `).window;
+
+  assert.equal(toolkit.extractAssistantHandoff(document.querySelector('article')), '');
+  assert.equal(toolkit.extractAssistantHandoff(null), '');
+});
+
 test('decorateTurn adds one Ask in new chat control per assistant response', () => {
   const { document } = createDom(`
     <article id="assistant" data-testid="conversation-turn-1" data-turn="assistant">

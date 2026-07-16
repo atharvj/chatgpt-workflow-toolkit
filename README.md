@@ -1,14 +1,13 @@
 # ChatGPT Workflow Toolkit
 
-A lightweight userscript that adds better conversation tools to ChatGPT.
+A small userscript that adds better conversation tools to ChatGPT.
 
 ## Features
 
-- **Ask in new chat** about any response without changing the original conversation.
-- **Continue in fresh chat** with a compact handoff when a conversation becomes laggy.
+- Ask about a response in a separate native branch.
+- Continue a laggy conversation in a fresh chat with an automatic handoff.
 - Automatically choose a model/intelligence level for each message.
-- Remove the “Start writing” prompt.
-- Keep the original conversation open in a side window or tab.
+- Remove “Start writing.”
 
 ## Install
 
@@ -16,15 +15,4 @@ A lightweight userscript that adds better conversation tools to ChatGPT.
 2. Open the [userscript](https://raw.githubusercontent.com/atharvj/chatgpt-workflow-toolkit/main/chatgpt-workflow-toolkit.user.js) and confirm installation.
 3. Reload [ChatGPT](https://chatgpt.com/).
 
-If **ChatGPT Sidecar** is installed, disable or remove it first.
-
-Use the buttons added below ChatGPT responses and the gear button for settings. Adaptive Auto is a local heuristic and only uses models available to your account.
-
-## Development
-
-```sh
-npm install
-npm run check
-```
-
-[MIT License](./LICENSE)
+Use the response buttons and the gear button for settings. Disable the older **ChatGPT Sidecar** userscript first if it is installed.
