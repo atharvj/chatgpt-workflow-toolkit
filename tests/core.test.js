@@ -37,6 +37,17 @@ test('selected text is quoted and clipped safely for a side question', () => {
   );
 });
 
+test('composer payload normalization removes editor artifacts without flattening code layout', () => {
+  assert.equal(
+    toolkit.normalizeComposerPayload('  line one\r\n  indented\u00a0\u200B\r\n'),
+    'line one\n  indented',
+  );
+  assert.notEqual(
+    toolkit.normalizeComposerPayload('if (ready) {\n  send();\n}'),
+    toolkit.normalizeComposerPayload('if (ready) { send(); }'),
+  );
+});
+
 test('locator sanitization rejects unsafe IDs and clamps indexes', () => {
   assert.deepEqual(toolkit.sanitizeLocator({
     testId: ' conversation-turn-abc_123 ',
@@ -157,7 +168,7 @@ test('sanitizeJob returns a bounded, normalized one-shot job', () => {
     kind: 'ask',
     locator: { testId: 'conversation-turn-42', turnIndex: 5.8, assistantIndex: 2 },
     question: 123,
-    autoSend: true,
+    autoSend: false,
   }, now);
 
   assert.deepEqual(result, {

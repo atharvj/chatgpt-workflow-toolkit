@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.7
+// @version      1.4.8
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Atharv Joshi
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.7';
+  const VERSION = '1.4.8';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -362,7 +362,16 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       overflow: auto;
     }
     #cgs-recovery-backdrop .cgs-dialog { width: 100%; padding: 15px; }
-    .cgs-recovery-note { padding: 9px 10px; border-radius: 9px; color: #7c4a03; background: #fff4d6; font-size: 12px; }
+    #cgs-recovery-backdrop .cgs-recovery-note {
+      padding: 9px 10px;
+      border: 1px solid rgba(245, 158, 11, .38);
+      border-color: color-mix(in srgb, #f59e0b 42%, transparent);
+      border-radius: 9px;
+      color: var(--text-primary, #111827);
+      background: var(--main-surface-secondary, #fff4d6);
+      background: color-mix(in srgb, #f59e0b 18%, var(--main-surface-primary, #fff));
+      font-size: 12px;
+    }
     @media (max-width: 1100px) {
       #cgs-dialog-backdrop {
         top: auto;
@@ -967,7 +976,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       targetFingerprint,
       contextFingerprint,
       question,
-      autoSend: raw.autoSend === true,
+      // Ask in new chat is an automatic workflow: a stale or malformed saved
+      // preference must never turn it back into a review-and-send step.
+      autoSend: kind === 'ask' ? true : raw.autoSend === true,
       branchClickAttempted: !fallbackMode && raw.branchClickAttempted === true,
       branchConversation: branchConversation && branchConversation !== sourceConversation ? branchConversation : '',
       branchReloadFrom,
@@ -1061,6 +1072,20 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     const actual = getComposerText(composer).replace(/\r\n?/gu, '\n').replace(/\u00a0/gu, ' ');
     const expected = String(value == null ? '' : value).replace(/\r\n?/gu, '\n').replace(/\u00a0/gu, ' ');
     return actual === expected;
+  }
+
+  function normalizeComposerPayload(value) {
+    return String(value == null ? '' : value)
+      .replace(/\r\n?/gu, '\n')
+      .replace(/[\u2028\u2029]/gu, '\n')
+      .replace(/\u00a0/gu, ' ')
+      .replace(/[\u200B-\u200D\uFEFF]/gu, '')
+      .replace(/[ \t]+$/gmu, '')
+      .trim();
+  }
+
+  function composerTextSemanticallyEquals(composer, value) {
+    return Boolean(composer && normalizeComposerPayload(getComposerText(composer)) === normalizeComposerPayload(value));
   }
 
   function setNativeValue(element, value) {
@@ -2837,27 +2862,47 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     async function replayNativeSend(snapshot, decision, selectedLevel, manual = false, reason = '') {
       let validation = validateSendSnapshot(snapshot);
       if (!validation.ok) {
-        toast(`${validation.reason} Review it and press Send again.`, 7_000);
+        if (!snapshot.silent) toast(`${validation.reason} Review it and press Send again.`, 7_000);
         return false;
       }
       if (state.adaptiveCancelled) {
-        toast('Adaptive send cancelled. Your draft is unchanged.');
+        if (!snapshot.silent) toast('Adaptive send cancelled. Your draft is unchanged.');
         return false;
       }
+      const runBeforeReplay = async (context) => {
+        if (typeof snapshot.beforeReplay !== 'function') return true;
+        const originalSnapshot = snapshot;
+        const ready = await snapshot.beforeReplay(context);
+        if (!ready) return false;
+        if (ready && typeof ready === 'object' && ready.refreshSnapshot === true) {
+          const refreshed = captureSendSnapshot(ready.composer && ready.composer.isConnected
+            ? ready.composer
+            : findComposer(doc));
+          if (!refreshed || refreshed.path !== originalSnapshot.path ||
+            refreshed.attachmentCount !== originalSnapshot.attachmentCount ||
+            refreshed.attachmentSignature !== originalSnapshot.attachmentSignature ||
+            refreshed.toolSignature !== originalSnapshot.toolSignature ||
+            refreshed.specialMode !== originalSnapshot.specialMode) return false;
+          refreshed.beforeReplay = null;
+          refreshed.silent = originalSnapshot.silent;
+          refreshed.fallbackToCurrentModel = originalSnapshot.fallbackToCurrentModel;
+          snapshot = refreshed;
+        }
+        validation = validateSendSnapshot(snapshot);
+        if (!validation.ok) {
+          if (!snapshot.silent) toast(`${validation.reason} Review it and press Send again.`, 7_000);
+          return false;
+        }
+        return true;
+      };
       const sendButton = findSendButton(doc, validation.composer);
       if (sendButton) {
         if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
-          toast('ChatGPT’s Send control is not ready. Your draft was not sent.', 7_000);
+          if (!snapshot.silent) toast('ChatGPT’s Send control is not ready. Your draft was not sent.', 7_000);
           return false;
         }
         if (typeof snapshot.beforeReplay === 'function') {
-          const ready = await snapshot.beforeReplay({ composer: validation.composer, sendButton });
-          if (!ready) return false;
-          validation = validateSendSnapshot(snapshot);
-          if (!validation.ok) {
-            toast(`${validation.reason} Review it and press Send again.`, 7_000);
-            return false;
-          }
+          if (!await runBeforeReplay({ composer: validation.composer, sendButton })) return false;
           const currentSendButton = findSendButton(doc, validation.composer);
           if (!currentSendButton || currentSendButton.disabled || currentSendButton.getAttribute('aria-disabled') === 'true') return false;
           armSubmitReplayPermit(validation.composer, 'adaptive-replay');
@@ -2875,10 +2920,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       const form = validation.composer.closest('form');
       if (form && typeof form.requestSubmit === 'function') {
         if (typeof snapshot.beforeReplay === 'function') {
-          const ready = await snapshot.beforeReplay({ composer: validation.composer, form });
-          if (!ready) return false;
-          validation = validateSendSnapshot(snapshot);
-          if (!validation.ok) return false;
+          if (!await runBeforeReplay({ composer: validation.composer, form })) return false;
         }
         const currentForm = validation.composer.closest('form');
         if (!currentForm || !currentForm.isConnected || typeof currentForm.requestSubmit !== 'function') return false;
@@ -2888,7 +2930,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         rememberRoute(selectedLevel, decision, manual, reason);
         return true;
       }
-      toast('ChatGPT’s Send control changed. Your draft is ready; press Send again.', 7_000);
+      if (!snapshot.silent) toast('ChatGPT’s Send control changed. Your draft is ready; press Send again.', 7_000);
       return false;
     }
 
@@ -3106,6 +3148,20 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       };
       const current = extractModelLevel(accessibleText(picker));
       const hasAlternatePicker = pickerCandidates.length > pickerAttempt + 1;
+      const replayWithCurrentModel = async (reason) => {
+        if (!snapshot.fallbackToCurrentModel || routingIsStrict(decision) || state.adaptiveCancelled) return false;
+        const validation = validateSendSnapshot(snapshot);
+        if (!validation.ok) return false;
+        closeModelMenu(picker);
+        const reflected = extractModelLevel(accessibleText(currentRoutingPicker()));
+        return replayNativeSend(
+          snapshot,
+          decision,
+          reflected || current || 'unknown',
+          manual,
+          `${reason}; used current model`,
+        );
+      };
 
       if (snapshot.specialMode) {
         if (!silent) toast(`Adaptive Auto kept the current model because ${snapshot.specialMode} controls model compatibility.`);
@@ -3120,8 +3176,15 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         return replayNativeSend(snapshot, decision, current || target, manual);
       }
       if (!picker) {
-        if (routingIsStrict(decision) || target === 'instant') {
-          toast(`Adaptive Auto could not find ChatGPT’s model control for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
+        if (routingIsStrict(decision)) {
+          if (!silent) toast(`Adaptive Auto could not find ChatGPT’s model control for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
+          return false;
+        }
+        if (target === 'instant' && snapshot.fallbackToCurrentModel) {
+          return replayWithCurrentModel('model control unavailable');
+        }
+        if (target === 'instant') {
+          if (!silent) toast(`Adaptive Auto could not find ChatGPT’s model control for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
           return false;
         }
         if (!silent) toast('Adaptive Auto could not access this account’s model control, so this message used the current model.', 6_000);
@@ -3156,19 +3219,24 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       if (!await openModelControl(picker, snapshot, activeDiscoveryDeadline)) {
         if (menuMutationObserver) menuMutationObserver.disconnect();
         if (state.adaptiveCancelled) {
-          toast('Adaptive send cancelled. Your draft is unchanged.');
+          if (!silent) toast('Adaptive send cancelled. Your draft is unchanged.');
           return false;
         }
         const activationValidation = validateSendSnapshot(snapshot);
         if (!activationValidation.ok) {
-          toast(`${activationValidation.reason} It was not sent.`, 7_000);
+          if (!silent) toast(`${activationValidation.reason} It was not sent.`, 7_000);
           return false;
         }
         if (hasAlternatePicker) {
           return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
         }
+        if (routingIsStrict(decision)) {
+          if (!silent) toast(`ChatGPT’s model control could not be opened for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
+          return false;
+        }
         if (target === 'instant') {
-          toast('Adaptive Auto chose Instant but could not activate it. Your draft was not sent.', 8_000);
+          if (snapshot.fallbackToCurrentModel) return replayWithCurrentModel('model control could not be opened');
+          if (!silent) toast('Adaptive Auto chose Instant but could not activate it. Your draft was not sent.', 8_000);
           return false;
         }
         return replayNativeSend(snapshot, decision, current || 'unknown', manual, 'model control could not be opened; used current');
@@ -3220,13 +3288,13 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
       if (state.adaptiveCancelled) {
         closeModelMenu(picker);
-        toast('Adaptive send cancelled. Your draft is unchanged.');
+        if (!silent) toast('Adaptive send cancelled. Your draft is unchanged.');
         return false;
       }
       const validation = validateSendSnapshot(snapshot);
       if (!validation.ok) {
         closeModelMenu(picker);
-        toast(`${validation.reason} It was not sent.`, 7_000);
+        if (!silent) toast(`${validation.reason} It was not sent.`, 7_000);
         return false;
       }
 
@@ -3277,7 +3345,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           closeModelMenu(finalPicker || picker);
           const sliderValidation = validateSendSnapshot(snapshot);
           if (!sliderValidation.ok) {
-            toast(`${sliderValidation.reason} It was not sent.`, 7_000);
+            if (!silent) toast(`${sliderValidation.reason} It was not sent.`, 7_000);
             return false;
           }
           const reason = `${decision.reasons && decision.reasons.slice(0, 2).join(' + ') || 'prompt complexity'}; Power slider`;
@@ -3290,8 +3358,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       });
       const exactTargetVisible = target === 'max' || exactTargetOptions.length > 0;
       if (exactTargetOptions.length > 1) {
+        if (snapshot.fallbackToCurrentModel && !routingIsStrict(decision)) {
+          return replayWithCurrentModel('model menu was ambiguous');
+        }
         closeModelMenu(picker);
-        toast(`ChatGPT showed more than one ${modelLevelLabel(target)} control. Your draft was not sent.`, 8_000);
+        if (!silent) toast(`ChatGPT showed more than one ${modelLevelLabel(target)} control. Your draft was not sent.`, 8_000);
         return false;
       }
       if ((!options || !options.length || !exactTargetVisible) && hasAlternatePicker) {
@@ -3299,8 +3370,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
       }
       if (target === 'instant' && !exactTargetVisible) {
+        if (snapshot.fallbackToCurrentModel) return replayWithCurrentModel('Instant was unavailable');
         closeModelMenu(picker);
-        toast('Adaptive Auto chose Instant but could not activate it. Your draft was not sent.', 8_000);
+        if (!silent) toast('Adaptive Auto chose Instant but could not activate it. Your draft was not sent.', 8_000);
         return false;
       }
       const thinkingOption = routingStage === 0 && targetRank >= ROUTE_LEVEL_RANK.medium && targetRank <= ROUTE_LEVEL_RANK.ultra &&
@@ -3314,17 +3386,19 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         : null;
       const choice = stagedThinkingChoice || chooseModelOption(options || [], target, manual ? 'highest' : state.settings.autoMaxLevel);
       if (!choice || !choice.element) {
-        closeModelMenu(picker);
         if (routingIsStrict(decision)) {
-          toast(`The requested ${modelLevelLabel(target)} level is not available in this account’s current model menu. Your draft was not sent.`, 8_000);
+          closeModelMenu(picker);
+          if (!silent) toast(`The requested ${modelLevelLabel(target)} level is not available in this account’s current model menu. Your draft was not sent.`, 8_000);
           return false;
         }
+        if (snapshot.fallbackToCurrentModel) return replayWithCurrentModel('no compatible Auto level was available');
+        closeModelMenu(picker);
         if (!silent) toast('Adaptive Auto could not find a compatible level. Your draft was not sent.', 8_000);
         return false;
       }
       if (!stagedThinkingChoice && decision.explicit && decision.target !== 'max' && choice.level !== target) {
         closeModelMenu(picker);
-        toast(`${modelLevelLabel(target)} is not available as an exact option in the current picker. Your explicit-route draft was not sent.`, 8_000);
+        if (!silent) toast(`${modelLevelLabel(target)} is not available as an exact option in the current picker. Your explicit-route draft was not sent.`, 8_000);
         return false;
       }
 
@@ -3408,22 +3482,25 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
       const after = validateSendSnapshot(snapshot);
       if (!after.ok) {
-        toast(`${after.reason} It was not sent.`, 7_000);
+        if (!silent) toast(`${after.reason} It was not sent.`, 7_000);
         return false;
       }
       const reflected = extractModelLevel(accessibleText(currentRoutingPicker(choice.level)));
       const confirmed = selectionConfirmed || reflected === choice.level || choice.level === 'instant' && reflected === 'auto';
       if (!confirmed) {
-        closeModelMenu(picker);
         if (target === 'instant') {
           if (hasAlternatePicker) {
+            closeModelMenu(picker);
             return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
           }
-          toast(`ChatGPT did not confirm ${modelLevelLabel(target)}. Your draft was not sent.`, 8_000);
+          if (snapshot.fallbackToCurrentModel) return replayWithCurrentModel('Instant selection was not confirmed');
+          closeModelMenu(picker);
+          if (!silent) toast(`ChatGPT did not confirm ${modelLevelLabel(target)}. Your draft was not sent.`, 8_000);
           return false;
         }
+        closeModelMenu(picker);
         if (routingIsStrict(decision)) {
-          toast(`ChatGPT did not confirm ${modelLevelLabel(choice.level)}. Your draft was not sent.`, 8_000);
+          if (!silent) toast(`ChatGPT did not confirm ${modelLevelLabel(choice.level)}. Your draft was not sent.`, 8_000);
           return false;
         }
         if (!silent) toast('ChatGPT did not confirm the Auto switch, so this message used the current model.', 6_000);
@@ -3437,12 +3514,12 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           attributes: true,
         });
         if (state.adaptiveCancelled) {
-          toast('Adaptive send cancelled. Your draft is unchanged.');
+          if (!silent) toast('Adaptive send cancelled. Your draft is unchanged.');
           return false;
         }
         const stagedValidation = validateSendSnapshot(snapshot);
         if (!stagedValidation.ok) {
-          toast(`${stagedValidation.reason} It was not sent.`, 7_000);
+          if (!silent) toast(`${stagedValidation.reason} It was not sent.`, 7_000);
           return false;
         }
         return routeAndReplay(snapshot, decision, manual, silent, routingStage + 1);
@@ -3458,6 +3535,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       const snapshot = captureSendSnapshot(composer);
       if (!snapshot) return false;
       snapshot.beforeReplay = typeof options.beforeReplay === 'function' ? options.beforeReplay : null;
+      snapshot.silent = options.silent === true;
+      snapshot.fallbackToCurrentModel = options.fallbackToCurrentModel === true;
       state.adaptiveCancelled = false;
 
       const task = Promise.resolve().then(async () => {
@@ -3985,19 +4064,52 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         conversationIdentity(win.location.href) === expectedConversation);
     }
 
-    function isBlankFallbackDestination(job) {
+    function fallbackDestinationStatus(job, expectedConversation = '') {
       if (!job || !job.fallbackMode || !job.fallbackTranscript || !job.branchReloadFrom ||
-        job.branchReloadFrom === state.pageInstanceId || conversationIdentity(win.location.href) ||
-        getTurns(doc).length || hasActiveGeneration(doc)) return false;
+        job.branchReloadFrom === state.pageInstanceId || getTurns(doc).length || hasActiveGeneration(doc)) {
+        return { ok: false, conversation: '' };
+      }
       try {
         const current = new URL(String(win.location.href));
         const currentJobId = parseJobId(current.href);
         const launchWasCaptured = state.initialJobId === state.incomingJobId;
         const jobIsBound = currentJobId === state.incomingJobId || !currentJobId && launchWasCaptured;
-        return isAllowedChatGPTUrl(current.href) && current.pathname === '/' && jobIsBound;
+        if (!isAllowedChatGPTUrl(current.href) || !jobIsBound) return { ok: false, conversation: '' };
+        const conversation = conversationIdentity(current.href);
+        const allowedConversation = job.branchConversation || sanitizeConversationIdentity(expectedConversation);
+        if (!conversation) {
+          const isNewChatRoute = current.pathname === '/' || current.pathname === '/new';
+          return { ok: isNewChatRoute && !allowedConversation, conversation: '' };
+        }
+        if (!allowedConversation || conversation === job.sourceConversation || conversation !== allowedConversation) {
+          return { ok: false, conversation };
+        }
+        return { ok: true, conversation };
       } catch (_error) {
+        return { ok: false, conversation: '' };
+      }
+    }
+
+    function isActiveFallbackDestination(job) {
+      return fallbackDestinationStatus(job, job.branchConversation).ok;
+    }
+
+    async function bindFallbackConversation(job, expectedConversation = '') {
+      const status = fallbackDestinationStatus(job, expectedConversation);
+      if (!status.ok) return false;
+      if (!status.conversation) return true;
+      if (job.branchConversation) return job.branchConversation === status.conversation;
+
+      const previousStateConversation = state.branchConversation;
+      job.branchConversation = status.conversation;
+      state.branchConversation = status.conversation;
+      if (!await persistIncomingJob(job)) {
+        job.branchConversation = '';
+        state.branchConversation = previousStateConversation;
         return false;
       }
+      const verified = fallbackDestinationStatus(job, job.branchConversation);
+      return verified.ok && verified.conversation === status.conversation;
     }
 
     async function beginTranscriptFallback(job, turn) {
@@ -4074,13 +4186,13 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       const marker = normalizeText(`[Workflow Toolkit transfer ${state.incomingJobId}]`);
       return waitForCondition(() => {
         const currentConversation = conversationIdentity(win.location.href);
-        if (currentConversation === job.sourceConversation ||
-          job.branchConversation && currentConversation && currentConversation !== job.branchConversation) {
-          return { status: 'drift' };
-        }
+        if (currentConversation === job.sourceConversation) return { status: 'drift' };
         const userTurns = getTurns(doc).filter((candidate) => roleOfTurn(candidate) === 'user');
         const matchingSentTurn = marker && userTurns.slice(baselineUserCount).some((candidate) =>
           normalizeText(readableNodeText(candidate)).includes(marker));
+        // ChatGPT may use a provisional ID for the draft route and replace it
+        // with the final conversation ID when Send is accepted. The unique
+        // transfer marker is stronger evidence than the provisional ID.
         if (currentConversation && currentConversation !== job.sourceConversation && matchingSentTurn) {
           return { status: 'sent', conversation: currentConversation };
         }
@@ -4115,6 +4227,144 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       return true;
     }
 
+    async function stageFallbackPrompt(job, prompt) {
+      const deadline = Date.now() + branchComposerTimeout;
+      let expectedConversation = job.branchConversation || '';
+      let stableComposer = null;
+      let stableDraft = '';
+      let stableRoute = '';
+      let stableSince = 0;
+      let invalidRouteSince = 0;
+      let insertionArmedUntil = 0;
+      let insertionArmedFromPath = '';
+      let emptyComposer = null;
+      let emptySince = 0;
+      let writeAttempts = 0;
+      let nextWriteAt = 0;
+      let trustedInteraction = false;
+      const markTrustedInteraction = (event) => {
+        if (event && event.isTrusted) trustedInteraction = true;
+      };
+      doc.addEventListener('pointerdown', markTrustedInteraction, true);
+      doc.addEventListener('keydown', markTrustedInteraction, true);
+
+      try {
+        while (Date.now() < deadline) {
+          if (trustedInteraction) return { ok: false, reason: 'interaction' };
+          let composer = findComposer(doc);
+          const liveConversation = conversationIdentity(win.location.href);
+          const inputArmedRouteChange = Date.now() <= insertionArmedUntil &&
+            (insertionArmedFromPath === '/' || insertionArmedFromPath === '/new');
+          if (!expectedConversation && liveConversation && inputArmedRouteChange &&
+            (!composer || !getComposerText(composer).trim() || composerTextSemanticallyEquals(composer, prompt))) {
+            expectedConversation = liveConversation;
+          }
+
+          const destination = fallbackDestinationStatus(job, expectedConversation);
+          if (!destination.ok) {
+            if (!invalidRouteSince) invalidRouteSince = Date.now();
+            if (Date.now() - invalidRouteSince >= 750) return { ok: false, reason: 'destination' };
+            await new Promise((resolve) => win.setTimeout(resolve, 100));
+            continue;
+          }
+          invalidRouteSince = 0;
+          if (expectedConversation && !await bindFallbackConversation(job, expectedConversation)) {
+            return { ok: false, reason: 'destination' };
+          }
+
+          composer = findComposer(doc);
+          if (!composer) {
+            await new Promise((resolve) => win.setTimeout(resolve, 100));
+            continue;
+          }
+          if (attachmentState(composer).count) return { ok: false, reason: 'attachment' };
+
+          const existingDraft = getComposerText(composer).trim();
+          if (existingDraft && !composerTextSemanticallyEquals(composer, prompt)) {
+            return { ok: false, reason: 'draft' };
+          }
+          if (!existingDraft) {
+            if (emptyComposer !== composer) {
+              emptyComposer = composer;
+              emptySince = Date.now();
+              stableComposer = null;
+              stableSince = 0;
+            }
+            if (Date.now() - emptySince < 120 || Date.now() < nextWriteAt) {
+              await new Promise((resolve) => win.setTimeout(resolve, 80));
+              continue;
+            }
+            if (writeAttempts >= 4) return { ok: false, reason: 'timeout' };
+
+            const beforeConversation = conversationIdentity(win.location.href);
+            const beforePath = conversationPath();
+            const insertedComposer = composer;
+            const accepted = setComposerText(composer, prompt, win, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
+            writeAttempts += 1;
+            insertionArmedUntil = Date.now() + 1_500;
+            insertionArmedFromPath = beforeConversation ? '' : beforePath;
+            nextWriteAt = Date.now() + Math.min(250 * (2 ** (writeAttempts - 1)), 1_000);
+            const afterConversation = conversationIdentity(win.location.href);
+            const currentComposer = findComposer(doc);
+            const promptSurvived = composerTextSemanticallyEquals(insertedComposer, prompt) ||
+              composerTextSemanticallyEquals(currentComposer, prompt);
+            if (!expectedConversation && !beforeConversation && afterConversation &&
+              afterConversation !== job.sourceConversation && (accepted || promptSurvived)) {
+              expectedConversation = afterConversation;
+            }
+            if (expectedConversation && !await bindFallbackConversation(job, expectedConversation)) {
+              return { ok: false, reason: 'destination' };
+            }
+            emptyComposer = null;
+            emptySince = 0;
+            stableComposer = null;
+            stableSince = 0;
+            await new Promise((resolve) => win.setTimeout(resolve, 80));
+            continue;
+          }
+
+          emptyComposer = null;
+          emptySince = 0;
+          if (expectedConversation && !await bindFallbackConversation(job, expectedConversation)) {
+            return { ok: false, reason: 'destination' };
+          }
+          composer = findComposer(doc);
+          if (!composer || attachmentState(composer).count ||
+            !composerTextSemanticallyEquals(composer, prompt)) {
+            stableComposer = null;
+            stableSince = 0;
+            await new Promise((resolve) => win.setTimeout(resolve, 100));
+            continue;
+          }
+
+          const sendButton = findSendButton(doc, composer);
+          const sendReady = sendButton && !sendButton.disabled && sendButton.getAttribute('aria-disabled') !== 'true';
+          const draft = getComposerText(composer);
+          const route = routeKey(win.location.href);
+          if (sendReady) {
+            if (stableComposer !== composer || stableDraft !== draft || stableRoute !== route) {
+              stableComposer = composer;
+              stableDraft = draft;
+              stableRoute = route;
+              stableSince = Date.now();
+            } else if (Date.now() - stableSince >= 240) {
+              return { ok: true, composer, sendButton, draft };
+            }
+          } else {
+            stableComposer = null;
+            stableDraft = '';
+            stableRoute = '';
+            stableSince = 0;
+          }
+          await new Promise((resolve) => win.setTimeout(resolve, 80));
+        }
+        return { ok: false, reason: 'timeout' };
+      } finally {
+        doc.removeEventListener('pointerdown', markTrustedInteraction, true);
+        doc.removeEventListener('keydown', markTrustedInteraction, true);
+      }
+    }
+
     async function runTranscriptFallbackJob(job) {
       const baselineUserCount = job.baselineUserCount >= 0 ? job.baselineUserCount : 0;
       if (state.sideSendAttempted || job.sendAttempted) {
@@ -4125,7 +4375,10 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         return false;
       }
 
-      let composer = await waitForCondition(() => isBlankFallbackDestination(job) && findComposer(doc), {
+      let composer = await waitForCondition(() => {
+        const destination = fallbackDestinationStatus(job, job.branchConversation);
+        return destination.ok && findComposer(doc);
+      }, {
         root: doc.documentElement,
         win,
         timeout: branchComposerTimeout,
@@ -4133,7 +4386,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         characterData: true,
         pollInterval: 125,
       });
-      if (!composer || !isBlankFallbackDestination(job)) {
+      if (!composer || !fallbackDestinationStatus(job, job.branchConversation).ok) {
         showRecovery(job, 'A blank new chat could not be verified, so nothing was inserted or sent.', null, { canRetry: false });
         return false;
       }
@@ -4142,84 +4395,70 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         showRecovery(job, 'The saved conversation context was unavailable, so nothing was inserted or sent.', null, { canRetry: false });
         return false;
       }
-      if (attachmentState(composer).count) {
-        showRecovery(job, 'The new chat already has an attachment. Workflow Toolkit left it untouched.', null, { canRetry: false });
-        return false;
-      }
-      const existingDraft = getComposerText(composer).trim();
-      if (existingDraft && !composerTextEquals(composer, prompt)) {
-        showRecovery(job, 'The new chat already has a different draft. Workflow Toolkit left it untouched.', null, { canRetry: false });
-        return false;
-      }
-
       if (!job.questionInserted) {
         job.questionInserted = true;
         job.baselineUserCount = baselineUserCount;
-        if (!await persistIncomingJob(job) || !isBlankFallbackDestination(job)) {
+        if (!await persistIncomingJob(job) || !fallbackDestinationStatus(job, job.branchConversation).ok) {
           showRecovery(job, 'The side question could not be staged safely. Nothing was sent.', null, { canRetry: false });
           return false;
         }
       }
-      if (!existingDraft && !setComposerText(composer, prompt, win, SIDE_FALLBACK_PROMPT_MAX_LENGTH)) {
-        showRecovery(job, 'ChatGPT did not accept the transferred conversation and question.', null);
+      const staged = await stageFallbackPrompt(job, prompt);
+      if (!staged.ok) {
+        const reason = staged.reason === 'attachment'
+          ? 'The new chat already has an attachment. Workflow Toolkit left it untouched.'
+          : staged.reason === 'draft'
+            ? 'The new chat already has a different draft. Workflow Toolkit left it untouched.'
+            : staged.reason === 'destination'
+              ? 'The new chat changed before the question could be sent. Nothing was sent.'
+              : 'ChatGPT’s new message box did not stay ready long enough to send the question.';
+        showRecovery(job, reason, null, { canRetry: staged.reason === 'timeout' });
         return false;
       }
-      await new Promise((resolve) => win.setTimeout(resolve, 250));
-      composer = findComposer(doc);
-      if (!isBlankFallbackDestination(job) || !composer || !composerTextEquals(composer, prompt) ||
-        attachmentState(composer).count) {
-        showRecovery(job, 'The new chat changed before the question could be sent. Nothing was sent.', null, { canRetry: false });
-        return false;
-      }
+      composer = staged.composer;
       if (!job.autoSend) {
         composer.focus();
         toast('Separate chat ready — review the transferred context and press Send.');
         return true;
-      }
-      const sendButton = await waitForCondition(() => {
-        if (!isBlankFallbackDestination(job)) return null;
-        const currentComposer = findComposer(doc);
-        const button = currentComposer && composerTextEquals(currentComposer, prompt) && findSendButton(doc, currentComposer);
-        return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
-      }, {
-        root: composerScope(composer) || doc.documentElement,
-        win,
-        timeout: 5_000,
-        attributes: true,
-        pollInterval: 125,
-      });
-      if (!sendButton || !isBlankFallbackDestination(job)) {
-        showRecovery(job, 'The new chat opened, but its Send button did not become ready.', null);
-        return false;
       }
       let sendIntentPersisted = false;
       const sent = await smartRouteAndSend({
         composer,
         silent: true,
         routingText: job.question,
+        fallbackToCurrentModel: true,
         beforeReplay: async () => {
           const currentComposer = findComposer(doc);
           const currentSendButton = currentComposer && findSendButton(doc, currentComposer);
-          if (!isBlankFallbackDestination(job) || !currentComposer || !composerTextEquals(currentComposer, prompt) ||
+          if (!isActiveFallbackDestination(job) || !currentComposer || !composerTextSemanticallyEquals(currentComposer, prompt) ||
             attachmentState(currentComposer).count || !currentSendButton || currentSendButton.disabled ||
             currentSendButton.getAttribute('aria-disabled') === 'true') return false;
+          if (!await bindFallbackConversation(job, job.branchConversation)) return false;
           if (!await markSideSendAttempted(job)) return false;
           sendIntentPersisted = true;
-          return true;
+          const persistedComposer = findComposer(doc);
+          const persistedSendButton = persistedComposer && findSendButton(doc, persistedComposer);
+          if (isActiveFallbackDestination(job) && persistedComposer &&
+            composerTextSemanticallyEquals(persistedComposer, prompt) &&
+            !attachmentState(persistedComposer).count && persistedSendButton &&
+            !persistedSendButton.disabled && persistedSendButton.getAttribute('aria-disabled') !== 'true') return true;
+          const restaged = await stageFallbackPrompt(job, prompt);
+          return restaged.ok ? { refreshSnapshot: true, composer: restaged.composer } : false;
         },
       });
-      if (!sent) {
-        showRecovery(
-          job,
-          sendIntentPersisted
-            ? 'Adaptive Auto could not safely finish after the Send step was saved. To prevent a duplicate, Workflow Toolkit will not retry it.'
-            : 'Adaptive Auto could not prepare this message. Nothing was sent; you can try the automatic step again.',
-          null,
-          { canRetry: !sendIntentPersisted },
-        );
-        return false;
+      if (sent) return finishObservedFallbackSend(job, baselineUserCount);
+      if (sendIntentPersisted && getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user').length > baselineUserCount) {
+        return finishObservedFallbackSend(job, baselineUserCount);
       }
-      return finishObservedFallbackSend(job, baselineUserCount);
+      showRecovery(
+        job,
+        sendIntentPersisted
+          ? 'The verified message changed after the Send step was saved. To prevent a duplicate, Workflow Toolkit stopped.'
+          : 'The automatic model step was interrupted before Send. The question was not sent.',
+        null,
+        { canRetry: !sendIntentPersisted },
+      );
+      return false;
     }
 
     async function waitForSideSendAcknowledgement(job, expectedConversation, baselineUserCount) {
@@ -4265,7 +4504,87 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       return true;
     }
 
-    async function fillQuestion(job, fromRecovery = false, suppliedComposer = null, expectedConversation = state.branchConversation) {
+    async function stageNativeBranchQuestion(job, expectedConversation, baselineUserCount) {
+      const deadline = Date.now() + branchComposerTimeout;
+      let stableComposer = null;
+      let stableDraft = '';
+      let stableSince = 0;
+      let emptyComposer = null;
+      let emptySince = 0;
+      let writeAttempts = 0;
+      let nextWriteAt = 0;
+      let trustedInteraction = false;
+      const markTrustedInteraction = (event) => {
+        if (event && event.isTrusted) trustedInteraction = true;
+      };
+      doc.addEventListener('pointerdown', markTrustedInteraction, true);
+      doc.addEventListener('keydown', markTrustedInteraction, true);
+
+      try {
+        while (Date.now() < deadline) {
+          if (trustedInteraction) return { ok: false, reason: 'interaction' };
+          if (!isExpectedBranchConversation(job, expectedConversation)) return { ok: false, reason: 'destination' };
+          const userCount = getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user').length;
+          if (userCount > baselineUserCount || hasActiveGeneration(doc)) return { ok: false, sent: true };
+
+          const composer = findComposer(doc);
+          if (!composer) {
+            await new Promise((resolve) => win.setTimeout(resolve, 100));
+            continue;
+          }
+          if (attachmentState(composer).count) return { ok: false, reason: 'attachment' };
+          const draft = getComposerText(composer).trim();
+          if (draft && !composerTextEquals(composer, job.question)) return { ok: false, reason: 'draft' };
+
+          if (!draft) {
+            if (emptyComposer !== composer) {
+              emptyComposer = composer;
+              emptySince = Date.now();
+            }
+            if (Date.now() - emptySince < 120 || Date.now() < nextWriteAt) {
+              await new Promise((resolve) => win.setTimeout(resolve, 80));
+              continue;
+            }
+            if (writeAttempts >= 3) return { ok: false, reason: 'timeout' };
+            setComposerText(composer, job.question, win);
+            writeAttempts += 1;
+            nextWriteAt = Date.now() + Math.min(250 * (2 ** (writeAttempts - 1)), 750);
+            emptyComposer = null;
+            emptySince = 0;
+            stableComposer = null;
+            stableSince = 0;
+            await new Promise((resolve) => win.setTimeout(resolve, 80));
+            continue;
+          }
+
+          emptyComposer = null;
+          emptySince = 0;
+          const sendButton = findSendButton(doc, composer);
+          const sendReady = sendButton && !sendButton.disabled && sendButton.getAttribute('aria-disabled') !== 'true';
+          const liveDraft = getComposerText(composer);
+          if (sendReady) {
+            if (stableComposer !== composer || stableDraft !== liveDraft) {
+              stableComposer = composer;
+              stableDraft = liveDraft;
+              stableSince = Date.now();
+            } else if (Date.now() - stableSince >= 240) {
+              return { ok: true, composer, sendButton, draft: liveDraft };
+            }
+          } else {
+            stableComposer = null;
+            stableDraft = '';
+            stableSince = 0;
+          }
+          await new Promise((resolve) => win.setTimeout(resolve, 80));
+        }
+        return { ok: false, reason: 'timeout' };
+      } finally {
+        doc.removeEventListener('pointerdown', markTrustedInteraction, true);
+        doc.removeEventListener('keydown', markTrustedInteraction, true);
+      }
+    }
+
+    async function fillQuestion(job, fromRecovery = false, expectedConversation = state.branchConversation) {
       if (!job.question) {
         if (fromRecovery) closeRecovery();
         toast('Branch ready.');
@@ -4280,37 +4599,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       if (state.sideSendAttempted || job.sendAttempted) {
         return finishObservedSideSend(job, expectedConversation, baselineUserCount);
       }
-      let composer = suppliedComposer || await waitForCondition(() => findComposer(doc), {
-        root: doc.documentElement,
-        win,
-        timeout: 20_000,
-      });
-      if (!isExpectedBranchConversation(job, expectedConversation)) {
-        showRecovery(job, 'The conversation changed while the separate chat was opening. Nothing was sent.', state.recoveryTurn, { canRetry: false });
-        return false;
-      }
-      if (!composer) {
-        showRecovery(job, 'The branch opened, but Workflow Toolkit could not find ChatGPT’s message box.');
-        return false;
-      }
-
-      const existingDraft = getComposerText(composer).trim();
-      const attachments = attachmentState(composer);
-      if (attachments.count) {
-        showRecovery(job, 'The separate chat already has an attachment. Workflow Toolkit left it untouched.', state.recoveryTurn, { canRetry: false });
-        return false;
-      }
-      if (existingDraft && !composerTextEquals(composer, job.question)) {
-        showRecovery(job, 'The separate chat already has a different draft. Workflow Toolkit left it untouched.', state.recoveryTurn, { canRetry: false });
-        return false;
-      }
       if (job.questionInserted && currentUserCount() > baselineUserCount) {
         await markSideSendAttempted(job);
         return finishObservedSideSend(job, expectedConversation, baselineUserCount);
-      }
-      if (job.questionInserted && !existingDraft) {
-        showRecovery(job, 'A previous insertion no longer appears in the message box. To avoid sending the question twice, Workflow Toolkit stopped.', state.recoveryTurn, { canRetry: false });
-        return false;
       }
       if (!job.questionInserted) {
         job.questionInserted = true;
@@ -4320,26 +4611,25 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           return false;
         }
       }
-      if (!existingDraft && !setComposerText(composer, job.question, win)) {
-        showRecovery(job, 'The branch opened, but ChatGPT did not accept the saved question automatically.');
-        return false;
-      }
-
-      await new Promise((resolve) => win.setTimeout(resolve, 250));
-      if (!isExpectedBranchConversation(job, expectedConversation)) {
-        showRecovery(job, 'The conversation changed before the question could be sent. Nothing was sent.', state.recoveryTurn, { canRetry: false });
-        return false;
-      }
-      if (currentUserCount() > baselineUserCount || hasActiveGeneration(doc)) {
+      let staged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount);
+      if (staged.sent) {
         await markSideSendAttempted(job);
         return finishObservedSideSend(job, expectedConversation, baselineUserCount);
       }
-      const currentComposer = findComposer(doc);
-      if (!currentComposer || !composerTextEquals(currentComposer, job.question) || attachmentState(currentComposer).count) {
-        await markSideSendAttempted(job);
-        return finishObservedSideSend(job, expectedConversation, baselineUserCount);
+      if (!staged.ok) {
+        const reason = staged.reason === 'attachment'
+          ? 'The separate chat already has an attachment. Workflow Toolkit left it untouched.'
+          : staged.reason === 'draft'
+            ? 'The separate chat already has a different draft. Workflow Toolkit left it untouched.'
+            : staged.reason === 'destination'
+              ? 'The conversation changed before the question could be sent. Nothing was sent.'
+              : staged.reason === 'interaction'
+                ? 'The automatic step stopped because you interacted with the separate chat. Nothing was sent.'
+                : 'ChatGPT’s message box did not stay ready long enough to send the question.';
+        showRecovery(job, reason, state.recoveryTurn, { canRetry: ['timeout', 'interaction'].includes(staged.reason) });
+        return false;
       }
-      composer = currentComposer;
+      let composer = staged.composer;
 
       if (fromRecovery) closeRecovery();
 
@@ -4348,60 +4638,74 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         composer.focus();
         return true;
       }
+      let sendIntentPersisted = false;
+      const routingToolSignature = activeToolState(composer).signature;
+      for (let routingAttempt = 0; routingAttempt < 2; routingAttempt += 1) {
+        let trustedRoutingInteraction = false;
+        const markTrustedRoutingInteraction = (event) => {
+          if (event && event.isTrusted) trustedRoutingInteraction = true;
+        };
+        doc.addEventListener('pointerdown', markTrustedRoutingInteraction, true);
+        doc.addEventListener('keydown', markTrustedRoutingInteraction, true);
+        let sent;
+        try {
+          sent = await smartRouteAndSend({
+            composer,
+            silent: true,
+            fallbackToCurrentModel: true,
+            beforeReplay: async () => {
+              const currentComposer = findComposer(doc);
+              const currentSendButton = currentComposer && findSendButton(doc, currentComposer);
+              if (!isExpectedBranchConversation(job, expectedConversation) ||
+                currentUserCount() > baselineUserCount || hasActiveGeneration(doc) ||
+                !currentComposer || !composerTextEquals(currentComposer, job.question) ||
+                attachmentState(currentComposer).count || !currentSendButton ||
+                currentSendButton.disabled || currentSendButton.getAttribute('aria-disabled') === 'true') return false;
+              if (!await markSideSendAttempted(job)) return false;
+              sendIntentPersisted = true;
+              const persistedComposer = findComposer(doc);
+              const persistedSendButton = persistedComposer && findSendButton(doc, persistedComposer);
+              if (isExpectedBranchConversation(job, expectedConversation) &&
+                currentUserCount() === baselineUserCount && !hasActiveGeneration(doc) &&
+                persistedComposer && composerTextEquals(persistedComposer, job.question) &&
+                !attachmentState(persistedComposer).count && persistedSendButton &&
+                !persistedSendButton.disabled && persistedSendButton.getAttribute('aria-disabled') !== 'true') return true;
+              const restaged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount);
+              return restaged.ok ? { refreshSnapshot: true, composer: restaged.composer } : false;
+            },
+          });
+        } finally {
+          doc.removeEventListener('pointerdown', markTrustedRoutingInteraction, true);
+          doc.removeEventListener('keydown', markTrustedRoutingInteraction, true);
+        }
+        if (sent) return finishObservedSideSend(job, expectedConversation, baselineUserCount);
+        if (sendIntentPersisted && currentUserCount() > baselineUserCount) {
+          return finishObservedSideSend(job, expectedConversation, baselineUserCount);
+        }
+        if (sendIntentPersisted || routingAttempt || state.adaptiveCancelled || trustedRoutingInteraction ||
+          !isExpectedBranchConversation(job, expectedConversation) ||
+          currentUserCount() > baselineUserCount || hasActiveGeneration(doc)) break;
 
-      const sendButton = await waitForCondition(() => {
-        if (!isExpectedBranchConversation(job, expectedConversation)) return null;
-        const button = findSendButton(doc, composer);
-        return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
-      }, {
-        root: composerScope(composer) || doc.documentElement,
-        win,
-        timeout: 5_000,
-        attributes: true,
-      });
-      if (!isExpectedBranchConversation(job, expectedConversation)) {
-        showRecovery(job, 'The conversation changed before Send became ready. Nothing was sent.', state.recoveryTurn, { canRetry: false });
-        return false;
+        const remountedComposer = findComposer(doc);
+        if (remountedComposer && (getComposerText(remountedComposer).trim() ||
+          activeToolState(remountedComposer).signature !== routingToolSignature)) break;
+        staged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount);
+        if (staged.sent) {
+          await markSideSendAttempted(job);
+          return finishObservedSideSend(job, expectedConversation, baselineUserCount);
+        }
+        if (!staged.ok || activeToolState(staged.composer).signature !== routingToolSignature) break;
+        composer = staged.composer;
       }
-      if (!sendButton) {
-        showRecovery(job, 'The separate chat opened, but ChatGPT’s Send button did not become ready.');
-        return false;
-      }
-      const readyComposer = findComposer(doc);
-      if (currentUserCount() > baselineUserCount || hasActiveGeneration(doc) ||
-        !readyComposer || !composerTextEquals(readyComposer, job.question)) {
-        await markSideSendAttempted(job);
-        return finishObservedSideSend(job, expectedConversation, baselineUserCount);
-      }
-      composer = readyComposer;
-      if (!await markSideSendAttempted(job)) {
-        showRecovery(job, 'Workflow Toolkit could not save the Send step safely, so it did not click Send.', state.recoveryTurn, { canRetry: false });
-        return false;
-      }
-      const persistedComposer = findComposer(doc);
-      const persistedSendButton = persistedComposer && findSendButton(doc, persistedComposer);
-      if (!isExpectedBranchConversation(job, expectedConversation) ||
-        currentUserCount() > baselineUserCount || hasActiveGeneration(doc) ||
-        !persistedComposer || !composerTextEquals(persistedComposer, job.question) ||
-        attachmentState(persistedComposer).count || !persistedSendButton ||
-        persistedSendButton.disabled || persistedSendButton.getAttribute('aria-disabled') === 'true') {
-        return finishObservedSideSend(job, expectedConversation, baselineUserCount);
-      }
-      composer = persistedComposer;
-      const sent = await smartRouteAndSend({ composer, silent: true });
-      if (!sent) {
-        const stillExpected = isExpectedBranchConversation(job, expectedConversation);
-        showRecovery(
-          job,
-          stillExpected
-            ? 'Adaptive Auto could not safely finish. To avoid a duplicate, Workflow Toolkit will not retry this staged question.'
-            : 'The conversation changed while Adaptive Auto was choosing. Nothing was sent.',
-          state.recoveryTurn,
-          { canRetry: false },
-        );
-        return false;
-      }
-      return finishObservedSideSend(job, expectedConversation, baselineUserCount);
+      showRecovery(
+        job,
+        sendIntentPersisted
+          ? 'The verified question changed after the Send step was saved. To avoid a duplicate, Workflow Toolkit stopped.'
+          : 'The automatic model step was interrupted before Send. The question was not sent.',
+        state.recoveryTurn,
+        { canRetry: !sendIntentPersisted },
+      );
+      return false;
     }
 
     function showRecovery(job, reason, turn = state.recoveryTurn, options = {}) {
@@ -4635,7 +4939,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       state.sideAutomationActive = true;
       let completed;
       try {
-        completed = await fillQuestion(job, false, branchComposer, expectedConversation);
+        completed = await fillQuestion(job, false, expectedConversation);
       } finally {
         state.sideAutomationActive = false;
       }
@@ -5190,6 +5494,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     findComposer,
     getComposerText,
     composerTextEquals,
+    normalizeComposerPayload,
     setComposerText,
     findSendButton,
     waitForConversationChange,

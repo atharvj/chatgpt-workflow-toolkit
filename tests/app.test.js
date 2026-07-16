@@ -107,6 +107,9 @@ test('app smoke: installs a single whole-chat, auto-send side-question flow', as
   const styleText = document.querySelector('#cgs-style').textContent;
   assert.match(styleText, /#cgs-dialog-backdrop\s*\{[^}]*pointer-events:\s*none/su);
   assert.match(styleText, /#cgs-dialog-backdrop \.cgs-dialog\s*\{[^}]*pointer-events:\s*auto/su);
+  assert.match(styleText, /#cgs-recovery-backdrop \.cgs-recovery-note\s*\{[^}]*background:\s*var\(--main-surface-secondary, #fff4d6\);/su);
+  assert.match(styleText, /#cgs-recovery-backdrop \.cgs-recovery-note\s*\{[^}]*color:\s*var\(--text-primary,[^}]*background:\s*color-mix\(in srgb, #f59e0b 18%, var\(--main-surface-primary, #fff\)\)/su);
+  assert.doesNotMatch(styleText, /\.cgs-recovery-note\s*\{[^}]*color:\s*#7c4a03[^}]*background:\s*#fff4d6/su);
   assert.match(styleText, /@media \(max-width: 1100px\)[\s\S]*?#cgs-dialog-backdrop\s*\{[^}]*height:\s*min\(48dvh, 420px\)[^}]*overflow:\s*hidden/su);
   assert.match(styleText, /@media \(max-width: 1100px\)[\s\S]*?#cgs-dialog-backdrop \.cgs-dialog\s*\{[^}]*height:\s*100%[^}]*max-height:\s*none/su);
   document.querySelector('[data-cgs-action="cancel-question"]').click();
@@ -465,10 +468,18 @@ test('automatic Branch ignores content links and older response actions with Bra
 test('missing native response actions automatically transfer context to a blank chat and send once', async () => {
   const jobId = 'transcript_fallback_job_1234';
   const stored = new Map();
+  let destinationDom;
+  let sendPersistenceReplacementCount = 0;
   const previousGM = globalThis.GM;
   globalThis.GM = {
     async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
-    async setValue(key, value) { stored.set(key, value); },
+    async setValue(key, value) {
+      stored.set(key, value);
+      if (destinationDom && value && value.sendAttempted && !sendPersistenceReplacementCount) {
+        sendPersistenceReplacementCount += 1;
+        destinationDom.window.document.querySelector('form').innerHTML = '<button type="button" data-testid="model-switcher-dropdown-button" aria-label="Instant">Instant</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
+      }
+    },
     async deleteValue(key) { stored.delete(key); },
   };
 
@@ -502,7 +513,6 @@ test('missing native response actions automatically transfer context to a blank 
     autoSend: true,
   });
 
-  let destinationDom;
   let destinationApp;
   try {
     assert.equal(await sourceApp.runIncomingJob(job), false, 'the source copy stops after navigating its side window');
@@ -528,8 +538,23 @@ test('missing native response actions automatically transfer context to a blank 
     Object.defineProperty(destinationDom.window.navigator, 'locks', { configurable: true, value: locks });
     let sendCount = 0;
     let sentPrompt = '';
-    destinationDocument.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+    let sendSawBoundWriteAhead = false;
+    let composerReplacementCount = 0;
+    const destinationMain = destinationDocument.querySelector('main');
+    destinationMain.addEventListener('input', (event) => {
+      if (!event.target.matches('#prompt-textarea') || composerReplacementCount) return;
+      composerReplacementCount += 1;
+      destinationDom.window.setTimeout(() => {
+        destinationDom.window.history.pushState({}, '', `/c/fallback-side-chat#cwt-job=${jobId}`);
+        destinationDocument.querySelector('form').innerHTML = '<button type="button" data-testid="model-switcher-dropdown-button" aria-label="Instant">Instant</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
+      }, 20);
+    });
+    destinationMain.addEventListener('click', (event) => {
+      if (!event.target.closest('[data-testid="send-button"]')) return;
       sendCount += 1;
+      const savedBeforeSend = stored.get(`chatgptSidecar.job.v1.${jobId}`);
+      sendSawBoundWriteAhead = Boolean(savedBeforeSend && savedBeforeSend.sendAttempted &&
+        savedBeforeSend.branchConversation === 'fallback-side-chat');
       const composer = destinationDocument.querySelector('#prompt-textarea');
       sentPrompt = composer.value;
       composer.value = '';
@@ -540,7 +565,7 @@ test('missing native response actions automatically transfer context to a blank 
       role.textContent = sentPrompt;
       userTurn.append(role);
       destinationDocument.querySelector('main').insertBefore(userTurn, destinationDocument.querySelector('form'));
-      destinationDom.window.history.pushState({}, '', `/c/fallback-side-chat#cwt-job=${jobId}`);
+      destinationDom.window.history.pushState({}, '', `/c/fallback-final-chat#cwt-job=${jobId}`);
     });
     destinationApp = toolkit.createApp(destinationDocument, destinationDom.window, {
       initialJobId: jobId,
@@ -550,11 +575,15 @@ test('missing native response actions automatically transfer context to a blank 
     await destinationApp.start();
 
     assert.equal(sendCount, 1);
+    assert.equal(composerReplacementCount, 1, 'a route transition and composer hydration are absorbed before Send');
+    assert.equal(sendPersistenceReplacementCount, 1, 'a write-ahead persistence remount is restaged before Send');
+    assert.equal(sendSawBoundWriteAhead, true, 'the owned destination and Send intent are persisted before the click');
     assert.equal(destinationApp.state.settings.adaptiveRouting, true, 'the default Adaptive Auto path performs the send');
     assert.match(sentPrompt, /--- PREVIOUS CONVERSATION ---/u);
     assert.match(sentPrompt, /Open results\.csv, then compare both groups\./u);
     assert.match(sentPrompt, /--- SIDE QUESTION ---\nWhy do I need to compare both groups\?$/u);
-    assert.equal(toolkit.conversationIdentity(destinationDom.window.location.href), 'fallback-side-chat');
+    assert.equal(toolkit.conversationIdentity(destinationDom.window.location.href), 'fallback-final-chat');
+    assert.equal(destinationDocument.querySelector('#cgs-recovery-backdrop').hidden, true, 'the final chat ID is accepted after Send');
     assert.equal(stored.has(`chatgptSidecar.job.v1.${jobId}`), false, 'the one-shot transfer is deleted after acknowledgement');
     assert.equal(sourceDocument.querySelector('#prompt-textarea').value, '');
   } finally {
@@ -674,7 +703,126 @@ test('fallback rejects a different live job hash before touching the blank compo
   }
 });
 
-test('fallback routing failure before replay remains retryable and records no Send intent', async () => {
+test('fallback never claims a different empty chat after binding its draft route', async () => {
+  const jobId = 'fallback_unrelated_empty_route_1234';
+  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
+  const stored = new Map([[storageKey, toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: 'Keep this in the owned side chat.',
+    fallbackMode: true,
+    fallbackTranscript: 'USER:\nOriginal context',
+    branchReloadFrom: 'fallback_source_page_1234',
+  })]]);
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: `https://chatgpt.com/#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  const locks = createIfAvailableLockManager();
+  Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
+  let sendCount = 0;
+  const main = dom.window.document.querySelector('main');
+  main.addEventListener('input', (event) => {
+    if (!event.target.matches('#prompt-textarea')) return;
+    dom.window.history.pushState({}, '', `/c/owned-draft-chat#cwt-job=${jobId}`);
+    dom.window.setTimeout(() => {
+      dom.window.history.pushState({}, '', `/c/unrelated-empty-chat#cwt-job=${jobId}`);
+      dom.window.document.querySelector('form').innerHTML = '<textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
+    }, 20);
+  }, { once: true });
+  main.addEventListener('click', (event) => {
+    if (event.target.closest('[data-testid="send-button"]')) sendCount += 1;
+  });
+  const app = toolkit.createApp(dom.window.document, dom.window, {
+    initialJobId: jobId,
+    pageInstanceId: 'fallback_destination_page_1234',
+    branchComposerTimeout: 2_000,
+  });
+
+  try {
+    await app.start();
+    const saved = stored.get(storageKey);
+    assert.equal(sendCount, 0);
+    assert.equal(saved.branchConversation, 'owned-draft-chat');
+    assert.equal(saved.sendAttempted, false);
+    assert.equal(dom.window.document.querySelector('#prompt-textarea').value, '');
+    assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'unrelated-empty-chat');
+    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /new chat changed/iu);
+  } finally {
+    if (app.state.observer) app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
+});
+
+test('fallback caps large-prompt restaging when ChatGPT repeatedly replaces the composer', async () => {
+  const jobId = 'fallback_restage_cap_1234';
+  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
+  const stored = new Map([[storageKey, toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: 'Explain this context.',
+    fallbackMode: true,
+    fallbackTranscript: `USER:\n${'x'.repeat(50_000)}`,
+    branchReloadFrom: 'fallback_source_page_1234',
+  })]]);
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: `https://chatgpt.com/#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  const locks = createIfAvailableLockManager();
+  Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
+  let inputCount = 0;
+  let sendCount = 0;
+  const main = dom.window.document.querySelector('main');
+  main.addEventListener('input', (event) => {
+    if (!event.target.matches('#prompt-textarea')) return;
+    inputCount += 1;
+    dom.window.document.querySelector('form').innerHTML = '<textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
+  });
+  main.addEventListener('click', (event) => {
+    if (event.target.closest('[data-testid="send-button"]')) sendCount += 1;
+  });
+  const app = toolkit.createApp(dom.window.document, dom.window, {
+    initialJobId: jobId,
+    pageInstanceId: 'fallback_destination_page_1234',
+    branchComposerTimeout: 5_000,
+  });
+
+  try {
+    await app.start();
+    assert.equal(inputCount, 4, 'the large handoff is never injected more than four times');
+    assert.equal(sendCount, 0);
+    assert.equal(stored.get(storageKey).sendAttempted, false);
+    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /did not stay ready/iu);
+  } finally {
+    if (app.state.observer) app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
+});
+
+test('fallback routing failure sends once with the current model instead of stranding the question', async () => {
   const jobId = 'fallback_routing_retry_1234';
   const stored = new Map();
   const storageKey = `chatgptSidecar.job.v1.${jobId}`;
@@ -697,6 +845,69 @@ test('fallback routing failure before replay remains retryable and records no Se
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
   </main></body></html>`, {
+    url: `https://chatgpt.com/new#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  const locks = createIfAvailableLockManager();
+  Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
+  let sendCount = 0;
+  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+    sendCount += 1;
+    const composer = dom.window.document.querySelector('#prompt-textarea');
+    const prompt = composer.value;
+    composer.value = '';
+    const userTurn = dom.window.document.createElement('article');
+    userTurn.dataset.testid = 'conversation-turn-0';
+    const role = dom.window.document.createElement('div');
+    role.dataset.messageAuthorRole = 'user';
+    role.textContent = prompt;
+    userTurn.append(role);
+    dom.window.document.querySelector('main').insertBefore(userTurn, dom.window.document.querySelector('form'));
+    dom.window.history.pushState({}, '', `/c/fallback-current-model#cwt-job=${jobId}`);
+  });
+  const app = toolkit.createApp(dom.window.document, dom.window, {
+    initialJobId: jobId,
+    pageInstanceId: 'fallback_destination_page_1234',
+    routingDiscoveryTimeout: 100,
+  });
+
+  try {
+    await app.start();
+    assert.equal(sendCount, 1, 'missing model controls fall back to the current model exactly once');
+    assert.equal(stored.has(storageKey), false, 'the acknowledged one-shot job is cleaned up');
+    assert.equal(dom.window.document.querySelector('#cgs-recovery-backdrop').hidden, true);
+    assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'fallback-current-model');
+    assert.equal(dom.window.document.querySelector('#cgs-toast').textContent, 'Side question sent in the separate chat.');
+  } finally {
+    if (app.state.observer) app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
+});
+
+test('fallback never turns an explicit-route failure into an unintended current-model Send', async () => {
+  const jobId = 'fallback_explicit_route_guard_1234';
+  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
+  const stored = new Map([[storageKey, toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: '!route:pro solve this only with Pro',
+    autoSend: false,
+    fallbackMode: true,
+    fallbackTranscript: 'USER:\nOriginal context',
+    branchReloadFrom: 'fallback_source_page_1234',
+  })]]);
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form><button type="button" data-testid="model-switcher-dropdown-button" aria-label="Instant">Instant</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
     url: `https://chatgpt.com/#cwt-job=${jobId}`,
     pretendToBeVisual: true,
   });
@@ -714,10 +925,62 @@ test('fallback routing failure before replay remains retryable and records no Se
     await app.start();
     const saved = stored.get(storageKey);
     assert.equal(sendCount, 0);
-    assert.equal(saved.questionInserted, true);
-    assert.equal(saved.sendAttempted, false, 'routing failed before the beforeReplay write-ahead hook');
+    assert.equal(saved.autoSend, true, 'Ask jobs remain automatic even when stale state says otherwise');
+    assert.equal(saved.sendAttempted, false, 'an explicit routing failure never persists Send intent');
     assert.equal(dom.window.document.querySelector('[data-cgs-action="retry-branch"]').hidden, false);
-    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /Nothing was sent.*try/isu);
+    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /interrupted before Send/iu);
+  } finally {
+    if (app.state.observer) app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
+});
+
+test('cancelling side-chat model routing never falls through to a current-model Send', async () => {
+  const jobId = 'fallback_cancel_route_guard_1234';
+  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
+  const stored = new Map([[storageKey, toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: 'what is 2+2',
+    fallbackMode: true,
+    fallbackTranscript: 'USER:\nOriginal context',
+    branchReloadFrom: 'fallback_source_page_1234',
+  })]]);
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form><button id="model" type="button" data-testid="model-switcher-dropdown-button" aria-label="High">High</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: `https://chatgpt.com/#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  const locks = createIfAvailableLockManager();
+  Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
+  let sendCount = 0;
+  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sendCount += 1; });
+  dom.window.document.querySelector('#model').addEventListener('pointerdown', () => {
+    dom.window.setTimeout(() => {
+      dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }, 10);
+  }, { once: true });
+  const app = toolkit.createApp(dom.window.document, dom.window, {
+    initialJobId: jobId,
+    pageInstanceId: 'fallback_destination_page_1234',
+    routingDiscoveryTimeout: 300,
+  });
+
+  try {
+    await app.start();
+    assert.equal(sendCount, 0);
+    assert.equal(stored.get(storageKey).sendAttempted, false);
+    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /interrupted before Send/iu);
   } finally {
     if (app.state.observer) app.state.observer.disconnect();
     if (previousGM === undefined) delete globalThis.GM;
@@ -1065,7 +1328,7 @@ test('automatic Branch forces a persisted destination reload before any composer
   }
 });
 
-test('freshly reloaded branch verifies context, inserts the question, and sends once', async () => {
+test('freshly reloaded branch auto-sends once even when its model control is unavailable', async () => {
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-1"><div data-message-author-role="assistant">Latest answer</div></article>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
@@ -1075,43 +1338,73 @@ test('freshly reloaded branch verifies context, inserts the question, and sends 
   });
   const { document } = dom.window;
   const turn = document.querySelector('article');
-  const composer = document.querySelector('#prompt-textarea');
+  const stored = new Map();
+  const previousGM = globalThis.GM;
+  let sendPersistenceReplacementCount = 0;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) {
+      stored.set(key, value);
+      if (value && value.sendAttempted && !sendPersistenceReplacementCount) {
+        sendPersistenceReplacementCount += 1;
+        document.querySelector('form').innerHTML = '<textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
+      }
+    },
+    async deleteValue(key) { stored.delete(key); },
+  };
   let sendCount = 0;
   let sendSawWriteAheadPhase = false;
-  document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+  let composerReplacementCount = 0;
+  const main = document.querySelector('main');
+  main.addEventListener('input', (event) => {
+    if (!event.target.matches('#prompt-textarea') || composerReplacementCount) return;
+    composerReplacementCount += 1;
+    dom.window.setTimeout(() => {
+      document.querySelector('form').innerHTML = '<textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
+    }, 20);
+  });
+  main.addEventListener('click', (event) => {
+    if (!event.target.closest('[data-testid="send-button"]')) return;
     sendCount += 1;
     sendSawWriteAheadPhase = job.sendAttempted;
+    const composer = document.querySelector('#prompt-textarea');
     composer.value = '';
     const userTurn = document.createElement('article');
     userTurn.dataset.testid = 'conversation-turn-2';
-    userTurn.innerHTML = '<div data-message-author-role="user">What does that mean?</div>';
+    userTurn.innerHTML = '<div data-message-author-role="user">what is 2+2</div>';
     document.querySelector('main').insertBefore(userTurn, document.querySelector('form'));
   });
 
   const app = toolkit.createApp(document, dom.window, { pageInstanceId: 'reloaded_page_1234' });
   await app.start();
-  app.state.settings.adaptiveRouting = false;
+  app.state.incomingJobId = 'native_persistence_remount_job_1234';
   const job = toolkit.sanitizeJob({
     createdAt: Date.now(),
     sourceUrl: 'https://chatgpt.com/c/source-chat',
     kind: 'ask',
     locator: toolkit.getTurnLocator(turn, document),
     targetFingerprint: toolkit.assistantTurnFingerprint(turn),
-    question: 'What does that mean?',
+    question: 'what is 2+2',
     autoSend: true,
     branchClickAttempted: true,
     branchConversation: 'separate-side-chat',
     branchReloadFrom: 'source_page_1234',
   });
 
-  assert.equal(await app.runIncomingJob(job), true);
-  assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'separate-side-chat');
-  assert.equal(composer.value, '');
-  assert.equal(sendCount, 1);
-  assert.equal(sendSawWriteAheadPhase, true);
-
-  app.state.observer.disconnect();
-  dom.window.close();
+  try {
+    assert.equal(await app.runIncomingJob(job), true);
+    assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'separate-side-chat');
+    assert.equal(document.querySelector('#prompt-textarea').value, '');
+    assert.equal(sendCount, 1);
+    assert.equal(composerReplacementCount, 1, 'the verified branch restages after a composer hydration');
+    assert.equal(sendPersistenceReplacementCount, 1, 'a write-ahead persistence remount is restaged before Send');
+    assert.equal(sendSawWriteAheadPhase, true);
+  } finally {
+    app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
 });
 
 test('two reloaded pages cannot consume the same incoming job concurrently when Web Locks are available', async () => {
