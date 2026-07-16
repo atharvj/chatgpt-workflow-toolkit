@@ -275,6 +275,8 @@ test('current pointerdown Radix picker switches High5.6 to Instant5.5', async (t
     nestedDecoy.addEventListener('click', () => { nestedDecoyClicks += 1; });
     nestedGroup.append(nestedDecoy);
     content.append(nestedGroup);
+    const productionRadioGroup = document.createElement('div');
+    productionRadioGroup.setAttribute('role', 'group');
     for (const [level, version] of [['Instant', '5.5'], ['Medium', '5.6'], ['High', '5.6']]) {
       const option = document.createElement('div');
       option.setAttribute('role', 'menuitemradio');
@@ -288,8 +290,9 @@ test('current pointerdown Radix picker switches High5.6 to Instant5.5', async (t
         picker.dataset.state = 'closed';
         portal.remove();
       });
-      content.append(option);
+      productionRadioGroup.append(option);
     }
+    content.append(productionRadioGroup);
     portal.append(content);
     document.body.append(portal);
     picker.dataset.state = 'open';
@@ -320,6 +323,125 @@ test('current pointerdown Radix picker switches High5.6 to Instant5.5', async (t
   assert.equal(app.state.lastRouteDecision.target, 'instant');
   assert.equal(app.state.lastRouteDecision.level, 'instant');
   assert.doesNotMatch(document.querySelector('#cgs-toast').textContent, /no compatible auto level/iu);
+});
+
+test('Power slider moves Extra High through High and Medium to Instant before sending', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <button id="stale-power-trigger" aria-controls="stale-power-menu">Other picker</button>
+    <div id="stale-power-menu" role="menu" data-state="open" aria-labelledby="stale-power-trigger">
+      <div data-testid="composer-model-picker-slider-simple-view" data-active="true">
+        <span id="stale-power-status">5.6 Extra High, 4 of 5.</span>
+        <div id="stale-power-control" role="menuitem" aria-label="Power" aria-keyshortcuts="ArrowLeft ArrowRight" aria-describedby="stale-power-status"></div>
+      </div>
+    </div>
+    <main><form>
+    <textarea id="prompt-textarea">what is 2+2</textarea>
+    <button type="button" class="__composer-pill" id="power-trigger" aria-controls="power-menu" aria-haspopup="menu" data-state="closed"><span>Extra High</span><span>5.6</span></button>
+    <button type="button" data-testid="send-button">Send</button>
+  </form></main></body></html>`, {
+    url: 'https://chatgpt.com/c/power-slider-routing',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const picker = document.querySelector('#power-trigger');
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  const presets = [
+    ['Instant', '5.5'],
+    ['Medium', '5.6'],
+    ['High', '5.6'],
+    ['Extra High', '5.6'],
+    ['Pro', '5.6'],
+  ];
+  let index = 3;
+  let sends = 0;
+  let transitionPending = false;
+  let overlappingKeys = 0;
+  let staleSliderKeys = 0;
+  const keys = [];
+  document.querySelector('#stale-power-control').addEventListener('keydown', () => { staleSliderKeys += 1; });
+
+  const renderControl = (simpleView, status, instructions) => {
+    const renderedIndex = index;
+    const control = document.createElement('div');
+    control.setAttribute('role', 'menuitem');
+    control.tabIndex = 0;
+    control.setAttribute('aria-label', 'Power');
+    control.setAttribute('aria-keyshortcuts', 'ArrowLeft ArrowRight');
+    control.setAttribute('aria-describedby', `${status.id} ${instructions.id}`);
+    control.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (transitionPending) overlappingKeys += 1;
+      transitionPending = true;
+      keys.push(event.key);
+      const nextIndex = Math.max(0, Math.min(presets.length - 1, renderedIndex + (event.key === 'ArrowLeft' ? -1 : 1)));
+      control.dataset.keyboardInteractionActive = 'true';
+      control.replaceWith(renderControl(simpleView, status, instructions));
+      dom.window.setTimeout(() => {
+        index = nextIndex;
+        const [level, version] = presets[index];
+        status.textContent = `${version} ${level}, ${index + 1} of ${presets.length}.`;
+        picker.innerHTML = `<span>${level}</span><span>${version}</span>`;
+        transitionPending = false;
+        const liveControl = simpleView.querySelector('[aria-keyshortcuts]');
+        if (liveControl) liveControl.replaceWith(renderControl(simpleView, status, instructions));
+      }, 40);
+    });
+    return control;
+  };
+
+  picker.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    const existing = document.querySelector('#power-menu');
+    if (existing) {
+      existing.remove();
+      picker.dataset.state = 'closed';
+      return;
+    }
+    const menu = document.createElement('div');
+    menu.id = 'power-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('data-radix-menu-content', '');
+    menu.setAttribute('aria-labelledby', picker.id);
+    menu.dataset.state = 'open';
+    const simpleView = document.createElement('div');
+    simpleView.dataset.testid = 'composer-model-picker-slider-simple-view';
+    simpleView.dataset.active = 'true';
+    const status = document.createElement('span');
+    status.id = 'power-status';
+    status.textContent = '5.6 Extra High, 4 of 5.';
+    const instructions = document.createElement('span');
+    instructions.id = 'power-instructions';
+    instructions.textContent = 'Use ArrowLeft and ArrowRight to change power.';
+    simpleView.append(status, instructions, renderControl(simpleView, status, instructions));
+    menu.append(simpleView);
+    document.body.append(menu);
+    picker.dataset.state = 'open';
+  });
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window);
+  await app.start();
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+
+  assert.deepEqual(keys, ['ArrowLeft', 'ArrowLeft', 'ArrowLeft']);
+  assert.equal(overlappingKeys, 0, 'each ArrowLeft must wait for the described level to change');
+  assert.equal(staleSliderKeys, 0, 'an active slider associated with another trigger must remain untouched');
+  assert.equal(picker.textContent, 'Instant5.5');
+  assert.equal(picker.dataset.state, 'closed');
+  assert.equal(document.querySelector('#power-menu'), null, 'the slider menu must close before replaying Send');
+  assert.equal(sends, 1);
+  assert.equal(app.state.lastRouteDecision.target, 'instant');
+  assert.equal(app.state.lastRouteDecision.level, 'instant');
+  assert.equal(document.querySelector('[data-cgs-auto-badge]').textContent, 'Auto → Instant');
+  assert.doesNotMatch(document.querySelector('#cgs-toast').textContent, /no compatible|used the current model/iu);
 });
 
 test('current Intelligence picker reopens and retries an unreflected first selection', async (t) => {
@@ -405,17 +527,24 @@ test('generic Tools pill is never opened while simple math switches High to Inst
     <button type="button" class="__composer-pill" id="radix-model-tools-decoy" data-testid="model-switcher" aria-haspopup="menu" aria-expanded="false">High</button>
     <textarea id="prompt-textarea">what is 2+2</textarea>
     <button type="button" class="__composer-pill" id="radix-tools-decoy" aria-haspopup="menu" aria-expanded="false">Tools</button>
+    <button type="button" class="__composer-pill" id="radix-temporary-decoy" aria-haspopup="menu" aria-expanded="false">Temporary</button>
     <button type="button" data-testid="send-button">Send</button>
-  </form></div></main></body></html>`, {
+  </form></div>
+  <button type="button" id="model-feedback-decoy" aria-label="Model response feedback" aria-haspopup="menu" aria-expanded="false">Feedback</button>
+  </main></body></html>`, {
     url: 'https://chatgpt.com/c/tools-pill-decoy',
     pretendToBeVisual: true,
   });
   const { document } = dom.window;
   const picker = document.querySelector('#radix-model-tools-decoy');
   const toolsButton = document.querySelector('#radix-tools-decoy');
+  const temporaryButton = document.querySelector('#radix-temporary-decoy');
+  const feedbackButton = document.querySelector('#model-feedback-decoy');
   const sendButton = document.querySelector('[data-testid="send-button"]');
   let pickerClicks = 0;
   let toolsClicks = 0;
+  let temporaryClicks = 0;
+  let feedbackClicks = 0;
   let optionClicks = 0;
   let sends = 0;
 
@@ -450,6 +579,14 @@ test('generic Tools pill is never opened while simple math switches High to Inst
     toolsClicks += 1;
     toolsButton.setAttribute('aria-expanded', toolsButton.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
   });
+  temporaryButton.addEventListener('click', () => {
+    temporaryClicks += 1;
+    temporaryButton.setAttribute('aria-expanded', temporaryButton.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
+  });
+  feedbackButton.addEventListener('click', () => {
+    feedbackClicks += 1;
+    feedbackButton.setAttribute('aria-expanded', feedbackButton.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
+  });
   sendButton.addEventListener('click', () => { sends += 1; });
 
   const app = toolkit.createApp(document, dom.window, { routingDiscoveryTimeout: 120 });
@@ -465,6 +602,8 @@ test('generic Tools pill is never opened while simple math switches High to Inst
   const elapsed = Date.now() - startedAt;
 
   assert.equal(toolsClicks, 0, 'a non-level Tools pill must never be probed as a reasoning picker');
+  assert.equal(temporaryClicks, 0, 'an unrelated composer pill must never be probed as a reasoning picker');
+  assert.equal(feedbackClicks, 0, 'a popup that merely mentions model feedback must never be probed');
   assert.equal(pickerClicks, 1);
   assert.equal(optionClicks, 1);
   assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(picker)), 'instant');
@@ -640,7 +779,7 @@ test('simple math falls back from a High-only Intelligence menu to the base-mode
   assert.equal(app.state.lastRouteDecision.level, 'instant');
 });
 
-test('alternate picker probes share one discovery timeout budget', async (t) => {
+test('alternate picker probes share one budget and keep the draft when Instant cannot be activated', async (t) => {
   const dom = new JSDOM(`<!doctype html><html><body><main><div data-composer-surface="true">
     <form>
       <button type="button" class="__composer-pill" id="radix-model-timeout" data-testid="model-switcher" aria-haspopup="menu" aria-expanded="false">GPT-5.5</button>
@@ -680,9 +819,9 @@ test('alternate picker probes share one discovery timeout budget', async (t) => 
   const elapsed = Date.now() - startedAt;
 
   assert.ok(elapsed < 300, `both picker probes must share one 160ms discovery budget, received ${elapsed}ms`);
-  assert.equal(sends, 1);
-  assert.match(app.state.lastRouteDecision.reason, /no compatible option/iu);
-  const warning = 'No compatible Auto level was visible, so this message used the current model.';
+  assert.equal(sends, 0, 'Auto must not silently send with High after choosing Instant');
+  assert.equal(app.state.lastRouteDecision, null);
+  const warning = 'Adaptive Auto chose Instant but could not activate it. Your draft was not sent.';
   const toast = document.querySelector('#cgs-toast');
   assert.equal(toast.textContent, warning);
   assert.equal(composer.value, 'what is 2+2');
@@ -947,6 +1086,30 @@ test('ordinary prompt with no picker fails open and sends exactly once', async (
   assert.match(harness.app.state.lastRouteDecision.reason, /model control unavailable/iu);
 });
 
+test('simple math with no picker stays unsent instead of silently using the current level', async (t) => {
+  const prompt = 'what is 2+2';
+  const harness = await createHarness({ prompt, includePicker: false });
+  t.after(() => harness.cleanup());
+  const feedbackButton = harness.document.createElement('button');
+  feedbackButton.type = 'button';
+  feedbackButton.setAttribute('aria-label', 'Model response feedback');
+  feedbackButton.setAttribute('aria-haspopup', 'menu');
+  feedbackButton.textContent = 'Feedback';
+  let feedbackClicks = 0;
+  feedbackButton.addEventListener('click', () => { feedbackClicks += 1; });
+  harness.document.querySelector('main').append(feedbackButton);
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(feedbackClicks, 0, 'a popup that merely mentions model feedback must not be treated as a picker');
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.counters.requestSubmits, 0);
+  assert.equal(harness.composer.value, prompt);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /could not find.*model control.*draft was not sent/iu);
+});
+
 test('explicit override with no picker fails closed and keeps the draft unsent', async (t) => {
   const prompt = '!route:pro\nSay hello.';
   const harness = await createHarness({ prompt, includePicker: false });
@@ -1108,7 +1271,7 @@ test('Send becoming disabled during model switching keeps the draft and never fa
   assert.match(harness.document.querySelector('#cgs-toast').textContent, /Send control is not ready/iu);
 });
 
-test('ordinary unconfirmed switch sends with the reflected current level', async (t) => {
+test('ordinary unconfirmed Instant switch keeps the draft unsent', async (t) => {
   const harness = await createHarness({
     prompt: 'Thanks!',
     pickerLevel: 'High',
@@ -1120,12 +1283,12 @@ test('ordinary unconfirmed switch sends with the reflected current level', async
   await finishAdaptiveSend(harness);
 
   assert.equal(harness.counters.optionClicks, 1);
-  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.counters.requestSubmits, 0);
+  assert.equal(harness.composer.value, 'Thanks!');
   assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'high');
-  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
-  assert.equal(harness.app.state.lastRouteDecision.level, 'high');
-  assert.match(harness.app.state.lastRouteDecision.reason, /switch unconfirmed.*used current/iu);
-  assert.equal(harness.document.querySelector('[data-cgs-auto-badge]').textContent, 'Auto wanted Instant · used High');
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /did not confirm Instant.*draft was not sent/iu);
 });
 
 test('explicit unconfirmed switch stays unsent', async (t) => {

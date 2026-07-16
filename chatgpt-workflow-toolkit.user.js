@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.3
+// @version      1.4.4
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Atharv Joshi
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.3';
+  const VERSION = '1.4.4';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1500,18 +1500,17 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         isProbablyVisible(row) && !row.closest('[data-state="closed"], [aria-hidden="true"], [hidden]') &&
         !row.closest(`#${UI_ROOT_ID}`) && !row.matches('[aria-disabled="true"], [data-disabled], :disabled') &&
         !isModelUpsellLabel(accessibleText(row)) && Boolean(elementPickerLevel(row, { allowBareEffort: true })));
-      const topGroups = root.matches('[role="group"]')
-        ? [root]
-        : [...root.querySelectorAll('[role="group"]')].filter((group) => {
-          const parentGroup = group.parentElement && group.parentElement.closest('[role="group"]');
-          return group.closest('[data-testid="composer-intelligence-picker-content"]') === root &&
-            (!parentGroup || !root.contains(parentGroup));
-        });
-      if (topGroups.length) {
-        const groupedRows = topGroups.map((group) => {
+      const groups = uniqueElements([
+        root.matches('[role="group"]') ? root : null,
+        ...root.querySelectorAll('[role="group"]'),
+      ]).filter((group) => group.closest('[data-testid="composer-intelligence-picker-content"]') === root);
+      if (groups.length) {
+        const groupedRows = groups.map((group) => {
           const rows = allRows.filter((row) => row.closest('[role="group"]') === group);
-          return { rows, distinct: new Set(rows.map(optionLevel).filter(Boolean)).size };
-        }).sort((left, right) => right.distinct - left.distinct || right.rows.length - left.rows.length);
+          const levels = new Set(rows.map(optionLevel).filter(Boolean));
+          const checked = rows.some((row) => row.matches('[aria-checked="true"], [data-state="checked"]'));
+          return { rows, distinct: levels.size, checked };
+        }).sort((left, right) => right.distinct - left.distinct || Number(right.checked) - Number(left.checked) || right.rows.length - left.rows.length);
         if (groupedRows[0] && groupedRows[0].rows.length) return groupedRows[0].rows;
         continue;
       }
@@ -1520,6 +1519,33 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       if (fallback.length) return fallback;
     }
     return [];
+  }
+
+  function activePowerSlider(doc, picker = null) {
+    if (!doc) return null;
+    const candidates = [...doc.querySelectorAll(
+      '[data-testid="composer-model-picker-slider-simple-view"][data-active="true"] [aria-keyshortcuts~="ArrowLeft"][aria-keyshortcuts~="ArrowRight"]',
+    )].filter((candidate) => isProbablyVisible(candidate) && !candidate.closest('[inert], [aria-hidden="true"], [hidden]') &&
+      !candidate.closest('[data-state="closed"]') && !candidate.closest(`#${UI_ROOT_ID}`));
+    if (!picker) return candidates.length === 1 ? candidates[0] : null;
+    const controlledIds = new Set(normalizeText(picker.getAttribute('aria-controls')).split(/\s+/u).filter(Boolean));
+    const pickerId = normalizeText(picker.id);
+    const associated = candidates.filter((candidate) => {
+      const menu = candidate.closest('[data-radix-menu-content][role="menu"], [role="menu"], [role="listbox"]');
+      if (!menu) return false;
+      return controlledIds.has(normalizeText(menu.id)) || pickerId &&
+        normalizeText(menu.getAttribute('aria-labelledby')).split(/\s+/u).includes(pickerId);
+    });
+    return associated.length === 1 ? associated[0] : null;
+  }
+
+  function powerSliderLevel(control) {
+    if (!control || !control.ownerDocument) return '';
+    const descriptions = normalizeText(control.getAttribute('aria-describedby')).split(/\s+/u).filter(Boolean)
+      .map((id) => control.ownerDocument.getElementById(id))
+      .filter(Boolean)
+      .map((node) => normalizeText(node.textContent));
+    return extractModelLevel(descriptions.join(' ')) || elementPickerLevel(control, { allowBareEffort: true });
   }
 
   function findInstantOption(root, picker = null, excluded = new Set()) {
@@ -1591,9 +1617,17 @@ The request should sound natural, for example: “Okay, let’s continue here. I
             check();
           }, 60);
         });
-        observer.observe(root, { childList: true, subtree: true, attributes: options.attributes === true });
+        observer.observe(root, {
+          childList: true,
+          subtree: true,
+          attributes: options.attributes === true,
+          characterData: options.characterData === true,
+        });
       }
-      timeoutTimer = win.setTimeout(() => finish(null), timeout);
+      timeoutTimer = win.setTimeout(() => {
+        check();
+        if (!settled) finish(null);
+      }, timeout);
     });
   }
 
@@ -2518,9 +2552,12 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       const target = manual ? decision.target : cappedTarget(decision.target);
       const targetRank = modelLevelRank(target);
       const activeDiscoveryDeadline = discoveryDeadline || Date.now() + routingDiscoveryTimeout;
-      const routingPickerCandidates = () => uniqueElements(targetRank >= ROUTE_LEVEL_RANK.pro
-        ? [findModelPicker(doc), findReasoningPicker(doc)]
-        : [findReasoningPicker(doc), findModelPicker(doc)]);
+      const routingPickerCandidates = () => {
+        const preferred = targetRank >= ROUTE_LEVEL_RANK.pro
+          ? [findModelPicker(doc), findReasoningPicker(doc)]
+          : [findReasoningPicker(doc), findModelPicker(doc)];
+        return uniqueElements(preferred);
+      };
       const pickerCandidates = routingPickerCandidates();
       let picker = pickerCandidates[pickerAttempt] || null;
       const currentRoutingPicker = (expectedLevel = '') => {
@@ -2551,7 +2588,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         return replayNativeSend(snapshot, decision, current || target, manual);
       }
       if (!picker) {
-        if (routingIsStrict(decision)) {
+        if (routingIsStrict(decision) || target === 'instant') {
           toast(`Adaptive Auto could not find ChatGPT’s model control for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
           return false;
         }
@@ -2586,6 +2623,13 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       }
       if (!activateModelControl(picker)) {
         if (menuMutationObserver) menuMutationObserver.disconnect();
+        if (hasAlternatePicker) {
+          return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
+        }
+        if (target === 'instant') {
+          toast('Adaptive Auto chose Instant but could not activate it. Your draft was not sent.', 8_000);
+          return false;
+        }
         return replayNativeSend(snapshot, decision, current || 'unknown', manual, 'model control could not be opened; used current');
       }
       const discoverVisibleOptions = () => {
@@ -2594,6 +2638,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         // menus (Tools, attachments, sidebar actions, and similar portals).
         const currentOptions = currentIntelligenceOptions(doc, picker);
         if (currentOptions.length) return currentOptions;
+        const slider = activePowerSlider(doc, picker);
+        if (slider) return [slider];
         const controlled = controlledModelMenu(picker);
         const composer = findComposer(doc);
         const roots = uniqueElements([
@@ -2642,6 +2688,61 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         toast(`${validation.reason} It was not sent.`, 7_000);
         return false;
       }
+
+      const slider = activePowerSlider(doc, picker);
+      if (slider && target !== 'max') {
+        const targetMatches = (level) => level === target || target === 'instant' && level === 'auto';
+        const targetSliderRank = modelLevelRank(target);
+        let sliderControl = slider;
+        for (let step = 0; sliderControl && step < 8; step += 1) {
+          const pickerLevel = extractModelLevel(accessibleText(currentRoutingPicker()));
+          const sliderLevel = powerSliderLevel(sliderControl) || pickerLevel || current;
+          if (targetMatches(sliderLevel)) break;
+          const sliderRank = modelLevelRank(sliderLevel);
+          if (sliderRank < 0 || targetSliderRank < 0) break;
+          const key = sliderRank > targetSliderRank ? 'ArrowLeft' : 'ArrowRight';
+          const beforeLevel = sliderLevel;
+          try { sliderControl.focus({ preventScroll: true }); } catch (_error) { try { sliderControl.focus(); } catch (_focusError) { /* ignore */ } }
+          try {
+            sliderControl.dispatchEvent(new win.KeyboardEvent('keydown', {
+              key,
+              code: key,
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+            }));
+          } catch (_error) {
+            break;
+          }
+          sliderControl = await waitForCondition(() => {
+            const next = activePowerSlider(doc, currentRoutingPicker() || picker);
+            if (!next) return null;
+            const nextPickerLevel = extractModelLevel(accessibleText(currentRoutingPicker()));
+            const nextSliderLevel = powerSliderLevel(next);
+            return (nextSliderLevel && nextSliderLevel !== beforeLevel) ||
+              (nextPickerLevel && nextPickerLevel !== beforeLevel) ? next : null;
+          }, {
+            root: doc.documentElement,
+            win,
+            timeout: 500,
+            attributes: true,
+            characterData: true,
+          });
+        }
+        const finalSlider = activePowerSlider(doc, currentRoutingPicker() || picker);
+        const finalPicker = currentRoutingPicker(target);
+        const finalSliderLevel = powerSliderLevel(finalSlider) || extractModelLevel(accessibleText(finalPicker));
+        if (targetMatches(finalSliderLevel)) {
+          closeModelMenu(finalPicker || picker);
+          const sliderValidation = validateSendSnapshot(snapshot);
+          if (!sliderValidation.ok) {
+            toast(`${sliderValidation.reason} It was not sent.`, 7_000);
+            return false;
+          }
+          const reason = `${decision.reasons && decision.reasons.slice(0, 2).join(' + ') || 'prompt complexity'}; Power slider`;
+          return replayNativeSend(snapshot, decision, target === 'instant' && finalSliderLevel === 'auto' ? 'auto' : target, manual, reason);
+        }
+      }
       const exactTargetVisible = target === 'max' || (options || []).some((option) => {
         const level = optionLevel(option);
         return level === target || target === 'instant' && level === 'auto';
@@ -2649,6 +2750,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       if ((!options || !options.length || !exactTargetVisible) && hasAlternatePicker) {
         closeModelMenu(picker);
         return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
+      }
+      if (target === 'instant' && !exactTargetVisible) {
+        closeModelMenu(picker);
+        toast('Adaptive Auto chose Instant but could not activate it. Your draft was not sent.', 8_000);
+        return false;
       }
       const thinkingOption = routingStage === 0 && targetRank >= ROUTE_LEVEL_RANK.medium && targetRank <= ROUTE_LEVEL_RANK.ultra &&
         (options || []).find((option) => optionLevel(option) === 'medium' && /\bthinking\b/iu.test(accessibleText(option)));
@@ -2666,8 +2772,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           toast(`The requested ${modelLevelLabel(target)} level is not available in this account’s current model menu. Your draft was not sent.`, 8_000);
           return false;
         }
-        if (!silent) toast('No compatible Auto level was visible, so this message used the current model.', 6_000);
-        return replayNativeSend(snapshot, decision, current || 'unknown', manual, 'no compatible option; used current');
+        if (!silent) toast('Adaptive Auto could not find a compatible level. Your draft was not sent.', 8_000);
+        return false;
       }
       if (!stagedThinkingChoice && decision.explicit && decision.target !== 'max' && choice.level !== target) {
         closeModelMenu(picker);
@@ -2762,6 +2868,13 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       const confirmed = selectionConfirmed || reflected === choice.level || choice.level === 'instant' && reflected === 'auto';
       if (!confirmed) {
         closeModelMenu(picker);
+        if (target === 'instant') {
+          if (hasAlternatePicker) {
+            return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
+          }
+          toast(`ChatGPT did not confirm ${modelLevelLabel(target)}. Your draft was not sent.`, 8_000);
+          return false;
+        }
         if (routingIsStrict(decision)) {
           toast(`ChatGPT did not confirm ${modelLevelLabel(choice.level)}. Your draft was not sent.`, 8_000);
           return false;
