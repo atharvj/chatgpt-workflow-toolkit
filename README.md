@@ -2,11 +2,12 @@
 
 A small userscript that adds better conversation tools to ChatGPT.
 
+Its main feature, **Adaptive Auto for every message**, chooses the lowest likely-sufficient available intelligence level for each prompt—Instant for simple questions and stronger levels for harder work. This can reduce wait time and unnecessary reasoning-token use.
+
 ## Features
 
 - Ask a side question in a separate chat with the whole conversation so far.
 - Continue a laggy conversation in a fresh chat with an automatic handoff.
-- Automatically choose a model/intelligence level for each message.
 - Remove “Start writing.”
 
 ## Install
