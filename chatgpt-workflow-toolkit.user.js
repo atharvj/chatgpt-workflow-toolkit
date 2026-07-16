@@ -43,6 +43,7 @@
   'use strict';
 
   const VERSION = '1.2.0';
+  const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
   const JOB_INDEX_KEY = 'chatgptSidecar.jobIndex.v1';
@@ -3055,7 +3056,15 @@ Preserve essential commands, code, formulas, or data exactly where needed. Clear
       return null;
     }
     if (doc.documentElement.dataset.chatgptWorkflowToolkitInstalled === VERSION) return null;
+    if (doc.documentElement.dataset.chatgptSidecarInstalled) {
+      if (win.console && typeof win.console.warn === 'function') {
+        win.console.warn('[ChatGPT Workflow Toolkit] The earlier ChatGPT Sidecar userscript is still enabled. Disable it before enabling Workflow Toolkit.');
+      }
+      return null;
+    }
     doc.documentElement.dataset.chatgptWorkflowToolkitInstalled = VERSION;
+    // If this renamed build starts first, prevent the known earlier build from starting too.
+    doc.documentElement.dataset.chatgptSidecarInstalled = LEGACY_INSTALL_VERSION;
     // Capture one-shot fragments before the first await. ChatGPT may
     // canonicalize its SPA URL while the userscript is starting.
     const initialUrl = String(win.location.href);

@@ -23,6 +23,8 @@ ChatGPT officially supports [branching a conversation from a response](https://h
 3. Sign in to ChatGPT. Native branching is available to logged-in web users; logged-out ChatGPT supports only one conversation.
 4. Save the userscript, then reload `https://chatgpt.com/`.
 
+If you manually installed the earlier **ChatGPT Sidecar** build, disable or remove it before enabling this renamed build. Userscript managers can treat the new name and namespace as a separate script; a compatibility guard prevents both builds from injecting controls at the same time.
+
 For Greasy Fork, publish `chatgpt-workflow-toolkit.user.js` directly. It has no build step, remote library, tracking code, or `@connect` permission.
 
 ## Use

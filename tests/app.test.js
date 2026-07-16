@@ -49,3 +49,35 @@ test('app smoke: installs controls, opens Ask aside, and prepares a lightweight 
   app.state.observer.disconnect();
   dom.window.close();
 });
+
+test('install refuses to run beside the earlier renamed userscript', async () => {
+  const dom = new JSDOM('<!doctype html><html><body></body></html>', {
+    url: 'https://chatgpt.com/',
+    pretendToBeVisual: true,
+  });
+  dom.window.document.documentElement.dataset.chatgptSidecarInstalled = '1.1.0';
+  let warning = '';
+  dom.window.console.warn = (message) => { warning = String(message); };
+
+  const app = await toolkit.install(dom.window.document, dom.window);
+
+  assert.equal(app, null);
+  assert.equal(dom.window.document.querySelector('#cgs-root'), null);
+  assert.match(warning, /earlier ChatGPT Sidecar userscript is still enabled/u);
+  dom.window.close();
+});
+
+test('install reserves the earlier build marker to prevent duplicate controls', async () => {
+  const dom = new JSDOM('<!doctype html><html><body></body></html>', {
+    url: 'https://chatgpt.com/',
+    pretendToBeVisual: true,
+  });
+
+  const app = await toolkit.install(dom.window.document, dom.window);
+
+  assert.ok(app);
+  assert.equal(dom.window.document.documentElement.dataset.chatgptWorkflowToolkitInstalled, toolkit.VERSION);
+  assert.equal(dom.window.document.documentElement.dataset.chatgptSidecarInstalled, '1.1.0');
+  app.state.observer.disconnect();
+  dom.window.close();
+});
