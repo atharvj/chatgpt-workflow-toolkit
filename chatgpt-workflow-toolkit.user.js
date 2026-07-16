@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.1
+// @version      1.4.2
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Atharv Joshi
 // @license      MIT
@@ -42,7 +42,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.1';
+  const VERSION = '1.4.2';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -345,12 +345,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     #cgs-selection-pill:hover { background: #10a37f; }
     #cgs-toast {
       position: fixed;
-      left: 50%;
-      bottom: 28px;
+      top: 18px;
+      right: 18px;
       z-index: 2147483004;
       width: max-content;
       max-width: min(520px, calc(100vw - 30px));
-      transform: translateX(-50%);
       padding: 10px 13px;
       border-radius: 10px;
       color: #fff;
@@ -358,6 +357,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       box-shadow: 0 10px 32px rgba(0, 0, 0, .22);
       font-size: 12px;
       text-align: center;
+      pointer-events: none;
     }
     #cgs-recovery-backdrop {
       position: fixed;
@@ -389,6 +389,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       #cgs-dock { right: 10px; bottom: 68px; }
       .cgs-dock-label, .cgs-auto-badge { display: none; }
       #cgs-dialog-backdrop { right: 8px; bottom: 8px; left: 8px; height: min(50vh, 380px); height: min(50dvh, 380px); }
+      #cgs-toast { top: 10px; right: 10px; left: 10px; width: auto; max-width: none; }
     }
     @media (prefers-reduced-motion: reduce) {
       #${UI_ROOT_ID} *, .${TURN_BUTTON_CLASS} { scroll-behavior: auto !important; transition: none !important; }
@@ -2315,8 +2316,91 @@ The request should sound natural, for example: “Okay, let’s continue here. I
 
     function programmaticClick(node) {
       if (!node || typeof node.click !== 'function') return false;
-      node.click();
-      return true;
+      try {
+        node.click();
+        return true;
+      } catch (_error) {
+        return false;
+      }
+    }
+
+    function modelControlMenuRoots(picker) {
+      const roots = [];
+      const controlledIds = normalizeText(picker && picker.getAttribute('aria-controls')).split(/\s+/u).filter(Boolean);
+      for (const id of controlledIds) {
+        const controlled = doc.getElementById(id);
+        if (controlled) roots.push(controlled);
+      }
+      const pickerId = normalizeText(picker && picker.id);
+      if (pickerId) {
+        for (const candidate of doc.querySelectorAll('[aria-labelledby]')) {
+          if (normalizeText(candidate.getAttribute('aria-labelledby')).split(/\s+/u).includes(pickerId)) roots.push(candidate);
+        }
+      }
+      roots.push(...doc.querySelectorAll('[data-testid="composer-intelligence-picker-content"]'));
+      return uniqueElements(roots);
+    }
+
+    function modelControlActivationSnapshot(picker) {
+      return {
+        expanded: normalizeText(picker && picker.getAttribute('aria-expanded')),
+        state: normalizeText(picker && picker.getAttribute('data-state')),
+        roots: modelControlMenuRoots(picker).map((root) => ({
+          root,
+          connected: root.isConnected,
+          hidden: root.hidden === true,
+          ariaHidden: normalizeText(root.getAttribute('aria-hidden')),
+          state: normalizeText(root.getAttribute('data-state')),
+          visible: isProbablyVisible(root),
+        })),
+      };
+    }
+
+    function modelControlActivationChanged(picker, before) {
+      const after = modelControlActivationSnapshot(picker);
+      if (after.expanded !== before.expanded || after.state !== before.state || after.roots.length !== before.roots.length) return true;
+      return after.roots.some((entry, index) => {
+        const previous = before.roots[index];
+        return !previous || entry.root !== previous.root || entry.connected !== previous.connected || entry.hidden !== previous.hidden ||
+          entry.ariaHidden !== previous.ariaHidden || entry.state !== previous.state || entry.visible !== previous.visible;
+      });
+    }
+
+    function activateModelControl(node) {
+      if (!node || typeof node.dispatchEvent !== 'function') return false;
+      const before = modelControlActivationSnapshot(node);
+      let rect = null;
+      try { rect = node.getBoundingClientRect && node.getBoundingClientRect(); } catch (_error) { rect = null; }
+      const clientX = rect && Number.isFinite(rect.left) ? rect.left + Math.max(0, rect.width || 0) / 2 : 0;
+      const clientY = rect && Number.isFinite(rect.top) ? rect.top + Math.max(0, rect.height || 0) / 2 : 0;
+      const dispatchPointer = (type, buttons) => {
+        const EventConstructor = typeof win.PointerEvent === 'function' ? win.PointerEvent : win.MouseEvent;
+        if (typeof EventConstructor !== 'function') return;
+        const init = {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: win,
+          button: 0,
+          buttons,
+          clientX,
+          clientY,
+          pointerId: 1,
+          pointerType: 'mouse',
+          isPrimary: true,
+        };
+        node.dispatchEvent(new EventConstructor(type, init));
+      };
+      let pointerDispatched = false;
+      try {
+        dispatchPointer('pointerdown', 1);
+        pointerDispatched = true;
+        dispatchPointer('pointerup', 0);
+      } catch (_error) {
+        pointerDispatched = false;
+      }
+      if (!modelControlActivationChanged(node, before)) return programmaticClick(node);
+      return pointerDispatched;
     }
 
     function controlledModelMenu(picker) {
@@ -2348,7 +2432,9 @@ The request should sound natural, for example: “Okay, let’s continue here. I
 
     function closeModelMenu(picker) {
       const current = picker && picker.isConnected ? picker : findModelPicker(doc);
-      if (current && current.getAttribute('aria-expanded') === 'true') programmaticClick(current);
+      if (current && (current.getAttribute('aria-expanded') === 'true' || current.getAttribute('data-state') === 'open')) {
+        activateModelControl(current);
+      }
     }
 
     async function routeAndReplay(snapshot, decision, manual = false, silent = false, routingStage = 0, pickerAttempt = 0, discoveryDeadline = 0) {
@@ -2421,11 +2507,19 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           attributeFilter: ['aria-hidden', 'data-state', 'hidden', 'class', 'style', 'role'],
         });
       }
-      if (!programmaticClick(picker)) {
+      if (!activateModelControl(picker)) {
         if (menuMutationObserver) menuMutationObserver.disconnect();
         return replayNativeSend(snapshot, decision, current || 'unknown', manual, 'model control could not be opened; used current');
       }
       const discoverVisibleOptions = () => {
+        // Prefer the stable root used by ChatGPT's current unified
+        // Intelligence picker before considering other concurrently visible
+        // menus (Tools, attachments, sidebar actions, and similar portals).
+        for (const root of doc.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')) {
+          if (!isProbablyVisible(root) || root.closest('[data-state="closed"], [aria-hidden="true"], [hidden]')) continue;
+          const found = findModelOptions(root, picker) || [];
+          if (found.length) return found;
+        }
         const controlled = controlledModelMenu(picker);
         const composer = findComposer(doc);
         const roots = uniqueElements([

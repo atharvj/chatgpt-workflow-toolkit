@@ -217,11 +217,11 @@ test('current intelligence-level popover switches High to Instant', async (t) =>
   assert.equal(app.state.lastRouteDecision.level, 'instant');
 });
 
-test('current version-badged composer picker switches High5.6 to Instant5.5', async (t) => {
+test('current pointerdown Radix picker switches High5.6 to Instant5.5', async (t) => {
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <div data-composer-surface="true"><form>
       <textarea id="prompt-textarea">what is 2+2</textarea>
-      <button type="button" class="__composer-pill" id="radix-r1" aria-haspopup="menu"><span>High</span><span>5.6</span></button>
+      <button type="button" class="__composer-pill" aria-haspopup="menu" data-state="closed"><span>High</span><span>5.6</span></button>
       <button type="button" data-testid="send-button">Send</button>
     </form></div>
   </main></body></html>`, {
@@ -229,40 +229,50 @@ test('current version-badged composer picker switches High5.6 to Instant5.5', as
     pretendToBeVisual: true,
   });
   const { document } = dom.window;
-  const picker = document.querySelector('#radix-r1');
+  const picker = document.querySelector('button.__composer-pill[aria-haspopup="menu"]');
   const sendButton = document.querySelector('[data-testid="send-button"]');
   let sends = 0;
   let optionClicks = 0;
+  let optionPointerDowns = 0;
+  let pointerDowns = 0;
+  let triggerClicks = 0;
 
-  picker.addEventListener('click', () => {
+  // Radix DropdownMenu.Trigger opens on pointerdown. A bare
+  // HTMLElement.click() intentionally does nothing in this fixture.
+  picker.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    pointerDowns += 1;
     const existing = document.querySelector('[data-radix-menu-content]');
     if (existing) {
       existing.remove();
+      picker.dataset.state = 'closed';
       return;
     }
     const portal = document.createElement('div');
     portal.setAttribute('role', 'menu');
     portal.dataset.state = 'open';
     portal.setAttribute('data-radix-menu-content', '');
-    portal.setAttribute('aria-labelledby', picker.id);
     const content = document.createElement('div');
     content.dataset.testid = 'composer-intelligence-picker-content';
     for (const [level, version] of [['Instant', '5.5'], ['Medium', '5.6'], ['High', '5.6']]) {
       const option = document.createElement('div');
       option.setAttribute('role', 'menuitemradio');
       option.setAttribute('data-radix-collection-item', '');
-      option.dataset.testid = `model-switcher-${level.toLocaleLowerCase('en-US')}`;
       option.innerHTML = `<span>${level}</span><span>${version}</span>`;
+      option.addEventListener('pointerdown', () => { optionPointerDowns += 1; });
       option.addEventListener('click', () => {
         optionClicks += 1;
         picker.innerHTML = `<span>${level}</span><span>${version}</span>`;
+        picker.dataset.state = 'closed';
         portal.remove();
       });
       content.append(option);
     }
     portal.append(content);
     document.body.append(portal);
+    picker.dataset.state = 'open';
   });
+  picker.addEventListener('click', () => { triggerClicks += 1; });
   sendButton.addEventListener('click', () => { sends += 1; });
 
   const app = toolkit.createApp(document, dom.window);
@@ -278,6 +288,9 @@ test('current version-badged composer picker switches High5.6 to Instant5.5', as
 
   assert.equal(picker.textContent, 'Instant5.5');
   assert.equal(toolkit.extractModelLevel(picker.textContent), 'instant');
+  assert.equal(pointerDowns, 1, 'the current Radix trigger must receive primary pointerdown');
+  assert.equal(triggerClicks, 0, 'a successful pointerdown toggle must not be undone by a fallback click');
+  assert.equal(optionPointerDowns, 0, 'current Radix menu items should use their normal click selection path');
   assert.equal(optionClicks, 1);
   assert.equal(sends, 1);
   assert.equal(app.state.lastRouteDecision.target, 'instant');
@@ -538,8 +551,13 @@ test('alternate picker probes share one discovery timeout budget', async (t) => 
     pretendToBeVisual: true,
   });
   const { document } = dom.window;
+  const composer = document.querySelector('#prompt-textarea');
   const sendButton = document.querySelector('[data-testid="send-button"]');
+  const composerInputValues = [];
   let sends = 0;
+  composer.addEventListener('input', (event) => {
+    composerInputValues.push({ data: event.data, value: composer.value });
+  });
   for (const picker of document.querySelectorAll('button[aria-expanded]')) {
     picker.addEventListener('click', () => {
       picker.setAttribute('aria-expanded', picker.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
@@ -547,14 +565,8 @@ test('alternate picker probes share one discovery timeout budget', async (t) => 
   }
   sendButton.addEventListener('click', () => { sends += 1; });
 
-  const app = toolkit.createApp(document, dom.window, { routingDiscoveryTimeout: 80 });
+  const app = toolkit.createApp(document, dom.window, { routingDiscoveryTimeout: 160 });
   await app.start();
-  const nativeSetTimeout = dom.window.setTimeout.bind(dom.window);
-  const discoveryTimeouts = [];
-  dom.window.setTimeout = (callback, delay, ...args) => {
-    if (delay >= 50 && delay <= 100) discoveryTimeouts.push(delay);
-    return nativeSetTimeout(callback, delay, ...args);
-  };
   t.after(() => {
     if (app.state.observer) app.state.observer.disconnect();
     dom.window.close();
@@ -565,10 +577,21 @@ test('alternate picker probes share one discovery timeout budget', async (t) => 
   await finishAdaptiveSend({ app });
   const elapsed = Date.now() - startedAt;
 
-  assert.equal(discoveryTimeouts.length, 1, 'both picker probes must consume one timeout, not one timeout each');
-  assert.ok(elapsed < 500, `the bounded test route should finish promptly, received ${elapsed}ms`);
+  assert.ok(elapsed < 300, `both picker probes must share one 160ms discovery budget, received ${elapsed}ms`);
   assert.equal(sends, 1);
   assert.match(app.state.lastRouteDecision.reason, /no compatible option/iu);
+  const warning = 'No compatible Auto level was visible, so this message used the current model.';
+  const toast = document.querySelector('#cgs-toast');
+  assert.equal(toast.textContent, warning);
+  assert.equal(composer.value, 'what is 2+2');
+  assert.deepEqual(composerInputValues, [], 'showing the warning must not dispatch input or alter the draft');
+  assert.equal(composer.contains(toast), false, 'the warning toast must remain outside the native composer');
+  const warningTextParents = [];
+  const walker = document.createTreeWalker(document.body, dom.window.NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    if (walker.currentNode.nodeValue.includes(warning)) warningTextParents.push(walker.currentNode.parentElement.id);
+  }
+  assert.deepEqual(warningTextParents, ['cgs-toast'], 'the warning text must exist only in the injected toast');
 });
 
 test('alternate picker gets an immediate scan after the shared wait budget is exhausted', async (t) => {
