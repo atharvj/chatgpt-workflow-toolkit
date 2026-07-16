@@ -1,0 +1,29 @@
+{
+  "name": "chatgpt-workflow-toolkit",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Conversation branching, lightweight handoffs, adaptive model routing, and focused UI cleanup for ChatGPT.",
+  "main": "chatgpt-workflow-toolkit.user.js",
+  "type": "commonjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atharvj/chatgpt-workflow-toolkit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/atharvj/chatgpt-workflow-toolkit/issues"
+  },
+  "homepage": "https://github.com/atharvj/chatgpt-workflow-toolkit#readme",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "test:watch": "node --test --watch tests/*.test.js",
+    "syntax": "node --check chatgpt-workflow-toolkit.user.js",
+    "check": "npm run syntax && npm test"
+  },
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
+  "devDependencies": {
+    "jsdom": "29.1.1"
+  },
+  "license": "MIT"
+}

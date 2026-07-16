@@ -1,0 +1,79 @@
+# Manual browser test checklist
+
+Run these checks in a non-sensitive ChatGPT conversation after the automated test suite passes.
+
+Sign in first. The native branch workflow is a logged-in ChatGPT web feature; logged-out ChatGPT supports only one conversation.
+
+## Baseline
+
+- Enable the userscript and reload `https://chatgpt.com/`.
+- Confirm the **Continue lightweight** dock appears after the first completed response and ordinary scrolling, typing, streaming, copy, edit, retry, and voice controls still work.
+- Confirm the continuation action stays hidden on the blank home composer and while a response is streaming.
+- Open DevTools and confirm Workflow Toolkit produces no errors and no network requests.
+
+## Ask aside
+
+- Ask ChatGPT for a numbered set of at least five instructions.
+- Click **Ask aside** under the response, type a question about step 3, and open it.
+- Confirm a separate popup/tab is created, the URL changes to a new conversation, and the question is filled there for review.
+- Confirm the original tab remains at the same scroll position and has no new message.
+- Ask a second follow-up in the new branch and confirm it understands the earlier conversation.
+- Add another exchange to the original, ask aside from an older response with **Through latest response**, and confirm the branch includes the later completed exchange.
+- Repeat with **Only through this response** and confirm the branch stops at the selected response.
+- Turn automatic sending off and confirm the next side question is filled but not sent.
+
+## Selected instruction
+
+- Select part of one instruction in an assistant response.
+- Confirm the temporary **Ask aside** pill appears near the selection.
+- Open it and confirm the selected text is quoted, including multiline selections.
+- Select ordinary text outside an assistant response and confirm no pill appears.
+
+## Continue lightweight
+
+- Click **Continue lightweight → Prepare** and confirm the handoff request is filled but not sent.
+- Send it, use ChatGPT's normal Copy action on the result, then choose **Open fresh**.
+- Confirm the new side chat is empty, prompts you to paste, and contains none of the old rendered turns.
+- Paste the handoff and continue normally.
+- Confirm **Prepare** refuses to overwrite an unrelated existing draft.
+- Choose **Use full-context branch** and confirm the full native branch path remains available.
+- Repeat the fresh-chat and branch paths with **New tab** selected in Workflow Toolkit settings.
+
+## Adaptive Auto
+
+- Confirm the dock badge says **Adaptive Auto** and the setting is enabled by default.
+- With **Highest available** selected, send `Define osmosis in one sentence.` from High and confirm Workflow Toolkit selects Instant before sending exactly once.
+- Send `Compare TCP and UDP for multiplayer networking.` and confirm it selects Medium when Medium is available.
+- Paste a real traceback and ask for the root cause; confirm it selects High.
+- Ask for a production multi-tenant authentication design with a threat model, concurrency risks, migration, rollback, tests, and security tradeoffs; confirm it selects Extra High or Ultra if exposed.
+- Ask for an end-to-end repo-scale implementation with security review, exhaustive tests, benchmarks, and a formal correctness argument; confirm it can select a Pro-class option when the account exposes one.
+- Change **Maximum Auto level** to High and confirm even the hardest prompt does not select above High. Repeat with Extra High.
+- Manually choose a different model level, send one message, and confirm the badge shows **Manual → …** for that message; confirm Adaptive Auto resumes on the following message.
+- Start a prompt with `!route:high`, send it, and confirm High is selected. Verify the same words later in ordinary prose do not count as an override.
+- Hold Alt while clicking Send and confirm the current model is used without opening the picker.
+- Press Shift+Enter and use an IME composition flow; confirm neither triggers a send. Confirm plain Enter and Ctrl/Cmd+Enter still route and send once.
+- Enable Agent, Deep Research, Canvas, image/video generation, or voice/record mode when available; confirm Workflow Toolkit keeps that mode's current compatible model.
+- Start a model switch, then immediately edit the draft or change an attachment; confirm Workflow Toolkit cancels sending and leaves the edited draft for review.
+- On an account without a paid picker, confirm ordinary and high-stakes prompts report the picker as unavailable and still send once with the current model. Confirm an explicit `!route:high` draft remains unsent when High cannot be confirmed.
+- If ChatGPT native automatic switching is enabled, confirm it may still promote Workflow Toolkit's Instant choice to Medium; disable native switching when testing exact selections.
+
+## Start writing cleaner
+
+- Navigate to a ChatGPT surface that displays the exact **Start writing** placeholder/control.
+- Confirm that control disappears or its placeholder is cleared.
+- Send a message containing the literal phrase “Start writing” and confirm the message remains visible.
+- Disable the setting and confirm the changed placeholder/control is restored.
+
+## Failure recovery
+
+- Temporarily change `isBranchLabel` locally so it cannot match the menu.
+- Start an aside and confirm the duplicate window highlights the response and displays manual branching instructions.
+- Branch manually, click **I branched — insert question**, and confirm the saved question is inserted/sent according to the setting.
+- Block popups for `chatgpt.com`; confirm Workflow Toolkit reports the block and the original chat remains untouched.
+
+## Performance
+
+- Open a conversation with many turns and stream a long response.
+- Confirm Workflow Toolkit adds one response action per assistant turn, does not add duplicate buttons after rerenders, and does not noticeably affect input or scrolling.
+- Leave the tab open for several minutes and confirm there is no recurring CPU usage from Workflow Toolkit when the DOM is idle.
+- Type continuously in a long chat and confirm Adaptive Auto does no classification or picker work until Send is pressed.
