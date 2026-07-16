@@ -157,6 +157,37 @@ test('findReasoningPicker prefers a separate effort control', () => {
   assert.equal(toolkit.findReasoningPicker(document), document.querySelector('#effort'));
 });
 
+test('model and reasoning helpers keep distinct current composer pills', () => {
+  const { document } = createDom(`
+    <main><div data-composer-surface="true"><form>
+      <button class="__composer-pill" id="radix-model" data-testid="model-switcher-dropdown-button" aria-haspopup="menu">GPT-5.5</button>
+      <textarea id="prompt-textarea"></textarea>
+      <button class="__composer-pill" id="radix-intelligence" aria-haspopup="menu" aria-label="Intelligence level: High">High</button>
+      <button data-testid="send-button">Send</button>
+    </form></div></main>
+  `).window;
+
+  const modelPicker = toolkit.findModelPicker(document);
+  const reasoningPicker = toolkit.findReasoningPicker(document);
+  assert.equal(modelPicker, document.querySelector('#radix-model'));
+  assert.equal(reasoningPicker, document.querySelector('#radix-intelligence'));
+  assert.notEqual(reasoningPicker, modelPicker);
+});
+
+test('findReasoningPicker ignores a generic Tools composer pill', () => {
+  const { document } = createDom(`
+    <main><div data-composer-surface="true"><form>
+      <button class="__composer-pill" id="radix-model" data-testid="model-switcher-dropdown-button" aria-haspopup="menu">High</button>
+      <textarea id="prompt-textarea"></textarea>
+      <button class="__composer-pill" id="radix-tools" aria-haspopup="menu">Tools</button>
+      <button data-testid="send-button">Send</button>
+    </form></div></main>
+  `).window;
+
+  assert.equal(toolkit.findModelPicker(document), document.querySelector('#radix-model'));
+  assert.equal(toolkit.findReasoningPicker(document), null);
+});
+
 test('findInstantOption selects a visible menu option outside Workflow Toolkit UI', () => {
   const { document } = createDom(`
     <button id="picker">High</button>

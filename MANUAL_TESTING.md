@@ -22,13 +22,14 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 ## Ask in new chat
 
 - Ask ChatGPT for a numbered set of at least five instructions.
-- Click **Ask in new chat** under the response, type a question about step 3, and open it.
+- Click **Ask in new chat** under the response and confirm the question form opens as a side panel without dimming or blocking the original chat.
+- Scroll and read the original answer while typing a question about step 3 in the panel.
 - Confirm a separate popup/tab is created, the URL changes to a new conversation, and the question is filled there for review.
 - Confirm the original tab remains at the same scroll position and has no new message.
 - Ask a second follow-up in the new branch and confirm it understands the earlier conversation.
-- Add another exchange to the original, ask from an older response with **Through latest response**, and confirm the branch includes the later completed exchange.
-- Repeat with **Only through this response** and confirm the branch stops at the selected response.
-- Turn automatic sending off and confirm the next side question is filled but not sent.
+- Add another exchange to the original, ask from an older response with **Whole chat so far**, and confirm the new chat contains everything from the beginning through the newest answer.
+- Repeat with **Chat up to this answer** and confirm the new chat contains everything from the beginning through the answer you clicked, but nothing after it.
+- Turn **Send questions right away** off and confirm the next side question is filled but not sent.
 
 ## Selected instruction
 

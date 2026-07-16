@@ -76,8 +76,11 @@ function assertSelectedLevel(options, target, maxSetting, expected) {
 
 test('extractModelLevel returns stable canonical IDs for current and future-facing labels', () => {
   assert.equal(toolkit.extractModelLevel('Instant — fast answers'), 'instant');
+  assert.equal(toolkit.extractModelLevel('Instant5.5'), 'instant');
   assert.equal(toolkit.extractModelLevel('Medium reasoning'), 'medium');
+  assert.equal(toolkit.extractModelLevel('Medium5.6'), 'medium');
   assert.equal(toolkit.extractModelLevel('GPT-5 High'), 'high');
+  assert.equal(toolkit.extractModelLevel('High5.6'), 'high');
   assert.equal(toolkit.extractModelLevel('Use Extra High reasoning'), 'extra-high');
   assert.equal(toolkit.extractModelLevel('Ultra — maximum reasoning'), 'ultra');
   assert.equal(toolkit.extractModelLevel('Thinking Extended'), 'high');
@@ -86,6 +89,12 @@ test('extractModelLevel returns stable canonical IDs for current and future-faci
   assert.equal(toolkit.extractModelLevel('GPT-5 · Pro Extended thinking'), 'pro-extended');
   assert.equal(toolkit.extractModelLevel('Pro Ultra'), 'pro-ultra');
   assert.equal(toolkit.extractModelLevel('Automatic switching'), '');
+});
+
+test('extractPickerLevel separates current Intelligence labels from adjacent version badges', () => {
+  assert.equal(toolkit.extractPickerLevel('Instant5.5'), 'instant');
+  assert.equal(toolkit.extractPickerLevel('Medium5.6'), 'medium');
+  assert.equal(toolkit.extractPickerLevel('High5.6'), 'high');
 });
 
 test('parseRouteOverride accepts an anchored hard override and ignores ordinary mentions', () => {

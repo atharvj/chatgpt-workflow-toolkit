@@ -27,8 +27,7 @@ test('app smoke: installs simplified controls with self-explanatory side-questio
   });
 
   const { document } = dom.window;
-  const app = toolkit.createApp(document, dom.window);
-  await app.start();
+  const app = await toolkit.install(document, dom.window);
   await waitFor(() => document.querySelector('.cgs-turn-action') && !document.querySelector('#cgs-dock').hidden, dom.window);
 
   const turnButton = document.querySelector('.cgs-turn-action');
@@ -43,38 +42,54 @@ test('app smoke: installs simplified controls with self-explanatory side-questio
   const questionBackdrop = document.querySelector('#cgs-dialog-backdrop');
   const questionDialog = questionBackdrop.querySelector('.cgs-dialog');
   assert.equal(questionBackdrop.hidden, false);
+  assert.equal(questionDialog.getAttribute('aria-modal'), 'false');
+  assert.equal(document.querySelector('main').hasAttribute('inert'), false, 'the original chat stays interactive');
+  assert.match(questionDialog.querySelector('p').textContent, /keep reading and scrolling the original chat/iu);
   assert.equal(document.querySelector('#cgs-context-mode').value, 'clicked');
 
+  const contextMode = document.querySelector('#cgs-context-mode');
+  const contextHelp = document.querySelector('#cgs-context-help');
+  assert.equal(contextMode.getAttribute('aria-describedby'), contextHelp.id);
+
   const autoSend = document.querySelector('#cgs-dialog-autosend');
-  assert.match(autoSend.closest('label').textContent, /Send this question automatically/u);
+  const autoSendHelp = document.querySelector('#cgs-autosend-help');
+  assert.equal(autoSend.getAttribute('aria-describedby'), autoSendHelp.id);
+  assert.match(autoSend.closest('label').textContent, /Send question right away/u);
   const questionDialogText = questionDialog.textContent.replace(/\s+/gu, ' ').trim();
   assert.match(
     questionDialogText,
-    /checked[^.]*send[^.]*after[^.]*branch[^.]*ready/iu,
-    'the dialog explains what happens when automatic sending is checked',
+    /On:[^.]*sends your question[^.]*new chat opens/iu,
+    'the panel plainly explains what happens when automatic sending is on',
   );
   assert.match(
     questionDialogText,
-    /unchecked[^.]*leave[^.]*question[^.]*composer[^.]*review/iu,
-    'the dialog explains what happens when automatic sending is unchecked',
+    /Off:[^.]*message box[^.]*edit it first/iu,
+    'the panel plainly explains what happens when automatic sending is off',
   );
 
   const contextOptions = [...document.querySelector('#cgs-context-mode').options]
     .map((option) => ({ value: option.value, label: option.textContent.trim() }));
   assert.deepEqual(contextOptions, [
-    { value: 'latest', label: 'Through latest response (include later messages)' },
-    { value: 'clicked', label: 'Only through this response (exclude later messages)' },
+    { value: 'clicked', label: 'Chat up to this answer' },
+    { value: 'latest', label: 'Whole chat so far' },
   ]);
   assert.match(
     questionDialogText,
-    /Only through this response[^.]*clicked response[^.]*excludes? later (?:turns|messages)/iu,
-    'the dialog explains that clicked-response context stops before later messages',
+    /Chat up to this answer[^.]*everything from the beginning through the answer you clicked/iu,
+    'the panel explains exactly what clicked-answer context contains',
   );
   assert.match(
     questionDialogText,
-    /Through latest response[^.]*includes?[^.]*later (?:turns|messages)/iu,
-    'the dialog explains that latest-response context includes later messages',
+    /Whole chat so far[^.]*everything from the beginning through the newest answer/iu,
+    'the panel explains exactly what whole-chat context contains',
   );
+  assert.equal(document.querySelector('[data-cgs-action="submit-question"]').textContent, 'Open new chat');
+
+  const styleText = document.querySelector('#cgs-style').textContent;
+  assert.match(styleText, /#cgs-dialog-backdrop\s*\{[^}]*pointer-events:\s*none/su);
+  assert.match(styleText, /#cgs-dialog-backdrop \.cgs-dialog\s*\{[^}]*pointer-events:\s*auto/su);
+  assert.match(styleText, /@media \(max-width: 1100px\)[\s\S]*?#cgs-dialog-backdrop\s*\{[^}]*height:\s*min\(48dvh, 420px\)[^}]*overflow:\s*hidden/su);
+  assert.match(styleText, /@media \(max-width: 1100px\)[\s\S]*?#cgs-dialog-backdrop \.cgs-dialog\s*\{[^}]*height:\s*100%[^}]*max-height:\s*none/su);
   document.querySelector('[data-cgs-action="cancel-question"]').click();
 
   document.querySelector('[data-cgs-action="open-handoff"]').click();

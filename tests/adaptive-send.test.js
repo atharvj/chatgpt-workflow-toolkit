@@ -217,6 +217,507 @@ test('current intelligence-level popover switches High to Instant', async (t) =>
   assert.equal(app.state.lastRouteDecision.level, 'instant');
 });
 
+test('current version-badged composer picker switches High5.6 to Instant5.5', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <div data-composer-surface="true"><form>
+      <textarea id="prompt-textarea">what is 2+2</textarea>
+      <button type="button" class="__composer-pill" id="radix-r1" aria-haspopup="menu"><span>High</span><span>5.6</span></button>
+      <button type="button" data-testid="send-button">Send</button>
+    </form></div>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/version-badged-intelligence-picker',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const picker = document.querySelector('#radix-r1');
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  let sends = 0;
+  let optionClicks = 0;
+
+  picker.addEventListener('click', () => {
+    const existing = document.querySelector('[data-radix-menu-content]');
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    const portal = document.createElement('div');
+    portal.setAttribute('role', 'menu');
+    portal.dataset.state = 'open';
+    portal.setAttribute('data-radix-menu-content', '');
+    portal.setAttribute('aria-labelledby', picker.id);
+    const content = document.createElement('div');
+    content.dataset.testid = 'composer-intelligence-picker-content';
+    for (const [level, version] of [['Instant', '5.5'], ['Medium', '5.6'], ['High', '5.6']]) {
+      const option = document.createElement('div');
+      option.setAttribute('role', 'menuitemradio');
+      option.setAttribute('data-radix-collection-item', '');
+      option.dataset.testid = `model-switcher-${level.toLocaleLowerCase('en-US')}`;
+      option.innerHTML = `<span>${level}</span><span>${version}</span>`;
+      option.addEventListener('click', () => {
+        optionClicks += 1;
+        picker.innerHTML = `<span>${level}</span><span>${version}</span>`;
+        portal.remove();
+      });
+      content.append(option);
+    }
+    portal.append(content);
+    document.body.append(portal);
+  });
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window);
+  await app.start();
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  assert.equal(toolkit.extractModelLevel(picker.textContent), 'high');
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+
+  assert.equal(picker.textContent, 'Instant5.5');
+  assert.equal(toolkit.extractModelLevel(picker.textContent), 'instant');
+  assert.equal(optionClicks, 1);
+  assert.equal(sends, 1);
+  assert.equal(app.state.lastRouteDecision.target, 'instant');
+  assert.equal(app.state.lastRouteDecision.level, 'instant');
+  assert.doesNotMatch(document.querySelector('#cgs-toast').textContent, /no compatible auto level/iu);
+});
+
+test('generic Tools pill is never opened while simple math switches High to Instant', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body><main><div data-composer-surface="true"><form>
+    <button type="button" class="__composer-pill" id="radix-model-tools-decoy" data-testid="model-switcher" aria-haspopup="menu" aria-expanded="false">High</button>
+    <textarea id="prompt-textarea">what is 2+2</textarea>
+    <button type="button" class="__composer-pill" id="radix-tools-decoy" aria-haspopup="menu" aria-expanded="false">Tools</button>
+    <button type="button" data-testid="send-button">Send</button>
+  </form></div></main></body></html>`, {
+    url: 'https://chatgpt.com/c/tools-pill-decoy',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const picker = document.querySelector('#radix-model-tools-decoy');
+  const toolsButton = document.querySelector('#radix-tools-decoy');
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  let pickerClicks = 0;
+  let toolsClicks = 0;
+  let optionClicks = 0;
+  let sends = 0;
+
+  picker.addEventListener('click', () => {
+    pickerClicks += 1;
+    const existing = document.querySelector('#tools-decoy-model-menu');
+    if (existing) {
+      existing.remove();
+      picker.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    const menu = document.createElement('div');
+    menu.id = 'tools-decoy-model-menu';
+    menu.setAttribute('role', 'menu');
+    for (const label of ['Instant', 'High']) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.setAttribute('role', 'menuitem');
+      option.textContent = label;
+      option.addEventListener('click', () => {
+        optionClicks += 1;
+        picker.textContent = label;
+        picker.setAttribute('aria-expanded', 'false');
+        menu.remove();
+      });
+      menu.append(option);
+    }
+    document.body.append(menu);
+    picker.setAttribute('aria-expanded', 'true');
+  });
+  toolsButton.addEventListener('click', () => {
+    toolsClicks += 1;
+    toolsButton.setAttribute('aria-expanded', toolsButton.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
+  });
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window, { routingDiscoveryTimeout: 120 });
+  await app.start();
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  const startedAt = Date.now();
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(toolsClicks, 0, 'a non-level Tools pill must never be probed as a reasoning picker');
+  assert.equal(pickerClicks, 1);
+  assert.equal(optionClicks, 1);
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(picker)), 'instant');
+  assert.equal(sends, 1);
+  assert.ok(elapsed < 500, `simple routing should not wait on Tools, received ${elapsed}ms`);
+  assert.equal(app.state.lastRouteDecision.level, 'instant');
+});
+
+test('unannotated portaled intelligence rows switch High to Instant', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body><main><form>
+    <button type="button" data-testid="composer-intelligence-level" aria-label="Intelligence level: High" aria-expanded="false">High</button>
+    <textarea id="prompt-textarea">what is 2+2</textarea>
+    <button type="button" data-testid="send-button">Send</button>
+  </form></main></body></html>`, {
+    url: 'https://chatgpt.com/c/plain-portaled-intelligence-picker',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const picker = document.querySelector('[data-testid="composer-intelligence-level"]');
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  let sends = 0;
+  let optionClicks = 0;
+  let unrelatedClicks = 0;
+
+  picker.addEventListener('click', () => {
+    if (picker.getAttribute('aria-expanded') === 'true') {
+      document.querySelector('.unannotated-intelligence-portal')?.remove();
+      document.querySelector('.concurrent-intelligence-status')?.remove();
+      picker.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    const unrelated = document.createElement('div');
+    unrelated.className = 'concurrent-intelligence-status';
+    unrelated.setAttribute('aria-label', 'Intelligence status');
+    const loneLevel = document.createElement('span');
+    loneLevel.textContent = 'Instant';
+    loneLevel.addEventListener('click', () => { unrelatedClicks += 1; });
+    unrelated.append(loneLevel);
+    document.body.append(unrelated);
+
+    const portal = document.createElement('div');
+    portal.className = 'unannotated-intelligence-portal';
+    const items = document.createElement('div');
+    items.className = 'items';
+    for (const [level, description] of [
+      ['Instant', 'Fast for everyday questions'],
+      ['Medium', 'Balances speed and reasoning'],
+      ['High', 'Uses deeper reasoning'],
+    ]) {
+      const option = document.createElement('div');
+      option.className = 'plain-intelligence-row';
+      option.innerHTML = `<span>${level}</span><small>${description}</small>`;
+      option.addEventListener('click', () => {
+        optionClicks += 1;
+        picker.textContent = level;
+        picker.setAttribute('aria-label', `Intelligence level: ${level}`);
+        picker.setAttribute('aria-expanded', 'false');
+        portal.remove();
+        unrelated.remove();
+      });
+      items.append(option);
+    }
+    portal.append(items);
+    document.body.append(portal);
+    picker.setAttribute('aria-expanded', 'true');
+  });
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window);
+  await app.start();
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(picker)), 'instant');
+  assert.equal(optionClicks, 1);
+  assert.equal(unrelatedClicks, 0, 'a concurrent subtree with only one level label must never be clicked');
+  assert.equal(sends, 1);
+  assert.equal(app.state.lastRouteDecision.target, 'instant');
+  assert.equal(app.state.lastRouteDecision.level, 'instant');
+  assert.doesNotMatch(document.querySelector('#cgs-toast').textContent, /no compatible auto level/iu);
+});
+
+test('simple math falls back from a High-only Intelligence menu to the base-model Instant option', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <div data-composer-surface="true">
+    <form>
+      <button type="button" class="__composer-pill" id="radix-model" data-testid="model-switcher" aria-haspopup="menu" aria-label="Model: GPT-5.5" aria-expanded="false">GPT-5.5</button>
+      <textarea id="prompt-textarea">what is 2+2</textarea>
+      <button type="button" data-testid="send-button">Send</button>
+    </form>
+    <button type="button" class="__composer-pill" id="radix-intelligence" data-testid="composer-intelligence-level" aria-haspopup="menu" aria-label="Intelligence level: High" aria-expanded="false">High</button>
+    </div>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/split-model-and-intelligence-menus',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const basePicker = document.querySelector('[data-testid="model-switcher"]');
+  const intelligencePicker = document.querySelector('[data-testid="composer-intelligence-level"]');
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  let basePickerClicks = 0;
+  let intelligencePickerClicks = 0;
+  let baseOptionClicks = 0;
+  let intelligenceOptionClicks = 0;
+  let sends = 0;
+
+  const installMenu = (picker, menuId, labels, onChoice) => {
+    const existing = document.querySelector(`#${menuId}`);
+    if (existing) {
+      existing.remove();
+      picker.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    const menu = document.createElement('div');
+    menu.id = menuId;
+    menu.setAttribute('role', 'menu');
+    for (const label of labels) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.setAttribute('role', 'menuitem');
+      option.textContent = label;
+      option.addEventListener('click', () => {
+        onChoice(label);
+        picker.setAttribute('aria-expanded', 'false');
+        menu.remove();
+      });
+      menu.append(option);
+    }
+    document.body.append(menu);
+    picker.setAttribute('aria-expanded', 'true');
+  };
+
+  basePicker.addEventListener('click', () => {
+    basePickerClicks += 1;
+    installMenu(basePicker, 'base-model-menu', ['Instant', 'Thinking', 'Pro'], (label) => {
+      baseOptionClicks += 1;
+      basePicker.textContent = label;
+      basePicker.setAttribute('aria-label', `Model: ${label}`);
+    });
+  });
+  intelligencePicker.addEventListener('click', () => {
+    intelligencePickerClicks += 1;
+    installMenu(intelligencePicker, 'intelligence-menu', ['Standard', 'High', 'Extra High'], (label) => {
+      intelligenceOptionClicks += 1;
+      intelligencePicker.textContent = label;
+      intelligencePicker.setAttribute('aria-label', `Intelligence level: ${label}`);
+    });
+  });
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window);
+  await app.start();
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+
+  assert.ok(intelligencePickerClicks <= 2, 'the Intelligence menu may be probed once and then closed');
+  assert.equal(intelligenceOptionClicks, 0, 'a harder Intelligence level must not substitute for Instant');
+  assert.equal(basePickerClicks, 1);
+  assert.equal(baseOptionClicks, 1);
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(basePicker)), 'instant');
+  assert.equal(sends, 1);
+  assert.equal(app.state.lastRouteDecision.target, 'instant');
+  assert.equal(app.state.lastRouteDecision.level, 'instant');
+});
+
+test('alternate picker probes share one discovery timeout budget', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body><main><div data-composer-surface="true">
+    <form>
+      <button type="button" class="__composer-pill" id="radix-model-timeout" data-testid="model-switcher" aria-haspopup="menu" aria-expanded="false">GPT-5.5</button>
+      <textarea id="prompt-textarea">what is 2+2</textarea>
+      <button type="button" data-testid="send-button">Send</button>
+    </form>
+    <button type="button" class="__composer-pill" id="radix-intelligence-timeout" data-testid="composer-intelligence-level" aria-haspopup="menu" aria-label="Intelligence level: High" aria-expanded="false">High</button>
+  </div></main></body></html>`, {
+    url: 'https://chatgpt.com/c/shared-routing-timeout',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  let sends = 0;
+  for (const picker of document.querySelectorAll('button[aria-expanded]')) {
+    picker.addEventListener('click', () => {
+      picker.setAttribute('aria-expanded', picker.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
+    });
+  }
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window, { routingDiscoveryTimeout: 80 });
+  await app.start();
+  const nativeSetTimeout = dom.window.setTimeout.bind(dom.window);
+  const discoveryTimeouts = [];
+  dom.window.setTimeout = (callback, delay, ...args) => {
+    if (delay >= 50 && delay <= 100) discoveryTimeouts.push(delay);
+    return nativeSetTimeout(callback, delay, ...args);
+  };
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  const startedAt = Date.now();
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(discoveryTimeouts.length, 1, 'both picker probes must consume one timeout, not one timeout each');
+  assert.ok(elapsed < 500, `the bounded test route should finish promptly, received ${elapsed}ms`);
+  assert.equal(sends, 1);
+  assert.match(app.state.lastRouteDecision.reason, /no compatible option/iu);
+});
+
+test('alternate picker gets an immediate scan after the shared wait budget is exhausted', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body><main><div data-composer-surface="true">
+    <form>
+      <button type="button" class="__composer-pill" id="radix-model-immediate" data-testid="model-switcher" aria-haspopup="menu" aria-expanded="false">GPT-5.5</button>
+      <textarea id="prompt-textarea">what is 2+2</textarea>
+      <button type="button" data-testid="send-button">Send</button>
+    </form>
+    <button type="button" class="__composer-pill" id="radix-intelligence-immediate" data-testid="composer-intelligence-level" aria-haspopup="menu" aria-label="Intelligence level: High" aria-expanded="false">High</button>
+  </div></main></body></html>`, {
+    url: 'https://chatgpt.com/c/immediate-alternate-picker',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const basePicker = document.querySelector('[data-testid="model-switcher"]');
+  const intelligencePicker = document.querySelector('[data-testid="composer-intelligence-level"]');
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  let instantClicks = 0;
+  let sends = 0;
+
+  intelligencePicker.addEventListener('click', () => {
+    intelligencePicker.setAttribute('aria-expanded', intelligencePicker.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
+  });
+  basePicker.addEventListener('click', () => {
+    const existing = document.querySelector('#immediate-base-menu');
+    if (existing) {
+      existing.remove();
+      basePicker.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    const menu = document.createElement('div');
+    menu.id = 'immediate-base-menu';
+    menu.setAttribute('role', 'menu');
+    const instant = document.createElement('button');
+    instant.type = 'button';
+    instant.setAttribute('role', 'menuitem');
+    instant.textContent = 'Instant';
+    instant.addEventListener('click', () => {
+      instantClicks += 1;
+      basePicker.textContent = 'Instant';
+      basePicker.setAttribute('aria-label', 'Model: Instant');
+      basePicker.setAttribute('aria-expanded', 'false');
+      menu.remove();
+    });
+    menu.append(instant);
+    document.body.append(menu);
+    basePicker.setAttribute('aria-expanded', 'true');
+  });
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window, { routingDiscoveryTimeout: 80 });
+  await app.start();
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+
+  assert.equal(instantClicks, 1, 'the synchronously visible alternate option must still be selected');
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(basePicker)), 'instant');
+  assert.equal(sends, 1);
+  assert.equal(app.state.lastRouteDecision.level, 'instant');
+});
+
+test('rerendered base picker confirms Instant after alternate-picker fallback', async (t) => {
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form>
+      <button type="button" data-testid="model-switcher" aria-label="Model: GPT-5.5" aria-expanded="false">GPT-5.5</button>
+      <textarea id="prompt-textarea">what is 2+2</textarea>
+      <button type="button" data-testid="send-button">Send</button>
+    </form>
+    <button type="button" data-testid="composer-intelligence-level" aria-label="Intelligence level: High" aria-expanded="false">High</button>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/rerendered-alternate-picker',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  let basePicker = document.querySelector('[data-testid="model-switcher"]');
+  const intelligencePicker = document.querySelector('[data-testid="composer-intelligence-level"]');
+  const sendButton = document.querySelector('[data-testid="send-button"]');
+  let baseOptionClicks = 0;
+  let sends = 0;
+
+  const toggleMenu = (picker, menuId, labels, onChoice) => {
+    const existing = document.querySelector(`#${menuId}`);
+    if (existing) {
+      existing.remove();
+      picker.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    const menu = document.createElement('div');
+    menu.id = menuId;
+    menu.setAttribute('role', 'menu');
+    for (const label of labels) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.setAttribute('role', 'menuitem');
+      option.textContent = label;
+      option.addEventListener('click', () => {
+        menu.remove();
+        onChoice(label);
+      });
+      menu.append(option);
+    }
+    document.body.append(menu);
+    picker.setAttribute('aria-expanded', 'true');
+  };
+
+  intelligencePicker.addEventListener('click', () => {
+    toggleMenu(intelligencePicker, 'rerender-effort-menu', ['Standard', 'High', 'Extra High'], () => {});
+  });
+  basePicker.addEventListener('click', () => {
+    toggleMenu(basePicker, 'rerender-base-menu', ['Instant', 'Thinking', 'Pro'], (label) => {
+      if (label !== 'Instant') return;
+      baseOptionClicks += 1;
+      const replacement = document.createElement('button');
+      replacement.type = 'button';
+      replacement.dataset.testid = 'model-switcher';
+      replacement.setAttribute('aria-label', 'Model: Instant');
+      replacement.innerHTML = '<span>Instant</span><span>5.5</span>';
+      basePicker.replaceWith(replacement);
+      intelligencePicker.remove();
+      basePicker = replacement;
+    });
+  });
+  sendButton.addEventListener('click', () => { sends += 1; });
+
+  const app = toolkit.createApp(document, dom.window);
+  await app.start();
+  t.after(() => {
+    if (app.state.observer) app.state.observer.disconnect();
+    dom.window.close();
+  });
+
+  sendButton.click();
+  await finishAdaptiveSend({ app });
+
+  assert.equal(baseOptionClicks, 1);
+  assert.equal(basePicker.textContent, 'Instant5.5');
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(basePicker)), 'instant');
+  assert.equal(sends, 1);
+  assert.equal(app.state.lastRouteDecision.target, 'instant');
+  assert.equal(app.state.lastRouteDecision.level, 'instant');
+  assert.doesNotMatch(document.querySelector('#cgs-toast').textContent, /did not confirm|no compatible/iu);
+});
+
 test('simple math uses the local Intelligence control instead of a separate base-model picker', async (t) => {
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <form>
@@ -598,6 +1099,27 @@ test('model option selectors recognize radio-style intelligence rows', () => {
     assert.deepEqual(
       toolkit.findModelOptions(dom.window.document).map((node) => node.id),
       ['instant', 'medium', 'high'],
+    );
+  } finally {
+    dom.window.close();
+  }
+});
+
+test('model option selectors recognize plain current-style buttons and accessible labels', () => {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <div class="unannotated-model-portal" id="portal">
+      <button type="button" data-testid="model-switcher-option-instant" data-state="checked" aria-checked="true" id="nested-label" aria-label="Instant — Fast for everyday questions">
+        <span>Instant</span><small>Fast for everyday questions</small>
+      </button>
+      <button type="button" data-testid="model-switcher-option-instant-compact" id="accessible-label" aria-label="Instant, fast responses"></button>
+      <button type="button" data-testid="model-switcher-configure" id="configure">Configure Instant automatic switching</button>
+      <button type="button" data-testid="model-switcher-option-pro" id="disabled" disabled>Pro</button>
+    </div>
+  </body></html>`, { url: 'https://chatgpt.com/c/plain-option-labels' });
+  try {
+    assert.deepEqual(
+      toolkit.findModelOptions(dom.window.document.querySelector('#portal')).map((node) => node.id),
+      ['nested-label', 'accessible-label'],
     );
   } finally {
     dom.window.close();

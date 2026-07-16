@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.0
+// @version      1.4.1
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Atharv Joshi
 // @license      MIT
@@ -42,7 +42,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.1';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -94,9 +94,9 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     'button[aria-label="Send message"]',
     'button[aria-label^="Send"]',
   ];
-  const MODEL_OPTION_CONTAINER_SELECTOR = '[role="menuitem"], [role="menuitemradio"], [role="option"], [role="radio"], [data-radix-collection-item], [data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-radio-item"]';
+  const MODEL_OPTION_CONTAINER_SELECTOR = '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="radio"], [data-radix-collection-item], [data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-radio-item"]';
   const MODEL_OPTION_SELECTOR = `${MODEL_OPTION_CONTAINER_SELECTOR}, button`;
-  const MODEL_MENU_ROOT_SELECTOR = '[role="menu"], [role="listbox"], [role="radiogroup"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-menu-items], [data-slot="dropdown-menu-content"], [data-slot="popover-content"], [data-state="open"][role="dialog"], [data-testid*="model-menu"], [data-testid*="model-picker-menu"], [data-testid*="intelligence-menu"]';
+  const MODEL_MENU_ROOT_SELECTOR = '[role="menu"], [role="listbox"], [role="radiogroup"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-menu-items], [data-slot="dropdown-menu-content"], [data-slot="popover-content"], [data-state="open"][role="dialog"], [data-testid="composer-intelligence-picker-content"], [data-testid*="model-menu"], [data-testid*="model-picker-menu"], [data-testid*="intelligence-menu"]';
   const ROUTE_LEVEL_RANK = Object.freeze({
     instant: 0,
     auto: 0,
@@ -261,7 +261,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     .cgs-link-button { margin-top: 8px; padding: 6px 8px; border-radius: 7px; color: #087f5b; background: rgba(16, 163, 127, .12); font-size: 11px; font-weight: 700; }
     .cgs-help-link { color: #0f8f70; text-decoration: underline; text-underline-offset: 2px; }
     .cgs-version { margin-top: 10px; color: var(--text-secondary, #6b7280); font-size: 10px; text-align: right; }
-    #cgs-dialog-backdrop, #cgs-handoff-backdrop {
+    #cgs-handoff-backdrop {
       position: fixed;
       inset: 0;
       z-index: 2147483002;
@@ -269,6 +269,22 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       place-items: center;
       padding: 18px;
       background: rgba(0, 0, 0, .36);
+    }
+    #cgs-dialog-backdrop {
+      position: fixed;
+      top: 64px;
+      right: 16px;
+      bottom: 16px;
+      z-index: 2147483002;
+      width: min(390px, calc(100vw - 32px));
+      pointer-events: none;
+    }
+    #cgs-dialog-backdrop .cgs-dialog {
+      width: 100%;
+      max-height: 100%;
+      overflow: auto;
+      overscroll-behavior: contain;
+      pointer-events: auto;
     }
     .cgs-dialog {
       width: min(560px, 100%);
@@ -295,8 +311,9 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       outline: none;
     }
     .cgs-dialog textarea:focus { border-color: #10a37f; box-shadow: 0 0 0 2px rgba(16, 163, 127, .18); }
-    .cgs-dialog-options { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 10px; }
-    .cgs-dialog-options label { display: inline-flex; align-items: center; gap: 7px; color: var(--text-secondary, #6b7280); font-size: 12px; }
+    .cgs-dialog-options { display: grid; gap: 11px; margin-top: 10px; }
+    .cgs-dialog-options label { display: flex; align-items: center; gap: 7px; color: var(--text-secondary, #6b7280); font-size: 12px; }
+    .cgs-dialog-options .cgs-context-label { align-items: flex-start; flex-direction: column; gap: 5px; }
     .cgs-dialog-options input { accent-color: #10a37f; }
     .cgs-dialog-options select {
       padding: 5px 7px;
@@ -306,7 +323,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       background: var(--main-surface-primary, #fff);
       font: inherit;
     }
-    .cgs-dialog-help { margin-top: 8px !important; line-height: 1.45; }
+    .cgs-dialog-help { margin: 5px 0 0 !important; line-height: 1.45; }
     .cgs-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
     .cgs-primary, .cgs-secondary { min-height: 36px; padding: 8px 12px; border-radius: 9px; font-weight: 700; }
     .cgs-primary { color: #fff; background: #10a37f; }
@@ -353,9 +370,25 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     }
     #cgs-recovery-backdrop .cgs-dialog { width: 100%; padding: 15px; }
     .cgs-recovery-note { padding: 9px 10px; border-radius: 9px; color: #7c4a03; background: #fff4d6; font-size: 12px; }
+    @media (max-width: 1100px) {
+      #cgs-dialog-backdrop {
+        top: auto;
+        right: 12px;
+        bottom: 12px;
+        left: 12px;
+        width: auto;
+        height: min(48vh, 420px);
+        height: min(48dvh, 420px);
+        max-height: calc(100vh - 24px);
+        max-height: calc(100dvh - 24px);
+        overflow: hidden;
+      }
+      #cgs-dialog-backdrop .cgs-dialog { height: 100%; max-height: none; }
+    }
     @media (max-width: 720px) {
       #cgs-dock { right: 10px; bottom: 68px; }
       .cgs-dock-label, .cgs-auto-badge { display: none; }
+      #cgs-dialog-backdrop { right: 8px; bottom: 8px; left: 8px; height: min(50vh, 380px); height: min(50dvh, 380px); }
     }
     @media (prefers-reduced-motion: reduce) {
       #${UI_ROOT_ID} *, .${TURN_BUTTON_CLASS} { scroll-behavior: auto !important; transition: none !important; }
@@ -368,6 +401,13 @@ The request should sound natural, for example: “Okay, let’s continue here. I
 
   function lowerText(value) {
     return normalizeText(value).toLocaleLowerCase('en-US');
+  }
+
+  function separateAdjacentLevelBadge(value) {
+    return String(value == null ? '' : value).replace(
+      /\b(instant|fast|auto|thinking|medium|standard|high|extended|heavy|ultra|pro)(?=\d+(?:\.\d+)+)/giu,
+      '$1 ',
+    );
   }
 
   function clampInteger(value, fallback, minimum, maximum) {
@@ -951,7 +991,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
   }
 
   function extractModelLevel(value) {
-    const text = lowerText(value)
+    const text = lowerText(separateAdjacentLevelBadge(value))
       .replace(/[–—·|/()]+/gu, ' ')
       .replace(/[_]+/gu, '-')
       .replace(/\s+/gu, ' ');
@@ -989,7 +1029,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
   }
 
   function extractPickerLevel(value, options = {}) {
-    const text = lowerText(value).replace(/[–—·|/()]+/gu, ' ').replace(/\s+/gu, ' ');
+    const text = lowerText(separateAdjacentLevelBadge(value)).replace(/[–—·|/()]+/gu, ' ').replace(/\s+/gu, ' ');
     if (!text || /^(?:configure|settings?|automatic switching)\b/iu.test(text) || isModelUpsellLabel(text) || /\bhigh school\b/iu.test(text)) return '';
     if (options.allowBareEffort === true) {
       if (/^standard(?:\s+standard)?(?:\s+reasoning)?$/iu.test(text)) return 'medium';
@@ -1299,13 +1339,13 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const preferred = [
       'button[data-testid*="model-picker"]',
       'button[data-testid*="model-switcher"]',
+      'button[data-testid="model-switcher-dropdown-button"]',
       'button[aria-label*="model" i]',
-      'button[aria-label*="reasoning" i]',
     ];
     const localPreferred = [
+      ...preferred,
       'button[data-testid*="intelligence"]',
       'button[aria-label*="intelligence" i]',
-      ...preferred,
     ];
     for (const scope of scopes) {
       const isLocal = localScopes.includes(scope);
@@ -1338,7 +1378,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       doc.querySelector('main'),
       doc,
     ]);
-    const preferred = [
+    const primary = findModelPicker(doc, composer);
+    const explicitPreferred = [
       'button[data-testid*="reasoning"]',
       'button[data-testid*="thinking-time"]',
       'button[data-testid*="intelligence"]',
@@ -1346,19 +1387,29 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       'button[aria-label*="thinking time" i]',
       'button[aria-label*="intelligence level" i]',
     ];
-    for (const scope of localScopes) {
-      for (const selector of preferred) {
-        const candidate = [...scope.querySelectorAll(selector)].find((button) => isPlausiblePickerButton(button, true));
-        if (candidate) return candidate;
+    const genericPreferred = [
+      '[data-composer-surface="true"] button.__composer-pill[aria-haspopup="menu"][id^="radix-"]',
+      'button.__composer-pill[aria-haspopup="menu"][id^="radix-"]',
+    ];
+    const findDistinct = (candidateScopes, selectors, allowGenericPopup, requireLevel = false) => {
+      for (const scope of candidateScopes) {
+        for (const selector of selectors) {
+          const candidates = [...scope.querySelectorAll(selector)].filter((button) =>
+            button !== primary && isPlausiblePickerButton(button, allowGenericPopup));
+          const candidate = requireLevel
+            ? candidates.find((button) => Boolean(extractPickerLevel(accessibleText(button))))
+            : candidates[0];
+          if (candidate) return candidate;
+        }
       }
-    }
-    const primary = findModelPicker(doc, composer);
-    for (const scope of scopes.filter((scope) => !localScopes.includes(scope))) {
-      for (const selector of preferred) {
-        const candidate = [...scope.querySelectorAll(selector)].find((button) => isPlausiblePickerButton(button, false));
-        if (candidate) return candidate;
-      }
-    }
+      return null;
+    };
+    const nonLocalScopes = scopes.filter((scope) => !localScopes.includes(scope));
+    const preferred = findDistinct(localScopes, explicitPreferred, true) ||
+      findDistinct(localScopes, genericPreferred, true, true) ||
+      findDistinct(nonLocalScopes, explicitPreferred, false) ||
+      findDistinct(nonLocalScopes, genericPreferred, false, true);
+    if (preferred) return preferred;
     for (const scope of localScopes) {
       const candidate = [...scope.querySelectorAll('button')].find((button) => {
         if (button === primary || !isProbablyVisible(button) || button.closest(`#${UI_ROOT_ID}`)) return false;
@@ -1374,7 +1425,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const contextText = lowerText(`${accessibleText(picker)} ${accessibleText(root)}`);
     const allowBareEffort = /\b(?:reasoning|thinking time|intelligence level|effort)\b/iu.test(contextText);
     const candidates = [...root.querySelectorAll(MODEL_OPTION_SELECTOR)];
-    return candidates.filter((candidate) => {
+    const isCandidate = (candidate) => {
       if (excluded.has(candidate) || candidate === picker || candidate.contains(picker) || !isProbablyVisible(candidate) ||
         candidate.closest('[data-state="closed"], [aria-hidden="true"], [hidden]') || candidate.closest(`#${UI_ROOT_ID}`)) return false;
       if (candidate.disabled || candidate.closest('[aria-disabled="true"], [data-disabled="true"], :disabled')) return false;
@@ -1382,8 +1433,22 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       if (outerOption && isModelUpsellLabel(accessibleText(outerOption))) return false;
       if (outerOption && outerOption !== candidate &&
         extractPickerLevel(accessibleText(outerOption), { allowBareEffort }) === extractPickerLevel(accessibleText(candidate), { allowBareEffort })) return false;
-      return Boolean(extractPickerLevel(accessibleText(candidate), { allowBareEffort }));
-    });
+      return !isModelUpsellLabel(accessibleText(candidate)) && Boolean(extractPickerLevel(accessibleText(candidate), { allowBareEffort }));
+    };
+    const recognized = candidates.filter(isCandidate);
+    if (recognized.length || root.nodeType !== 1 || root.matches('html, body, main')) return recognized;
+
+    // ChatGPT sometimes renders a new popover with clickable plain div/span
+    // rows before accessibility roles or test IDs are attached. This fallback
+    // is intentionally limited to the already-scoped, newly changed menu root.
+    const textRows = uniqueElements([...root.querySelectorAll('div, span, p, strong')].slice(0, 500).filter((candidate) => {
+      if (!isCandidate(candidate)) return false;
+      const level = extractPickerLevel(accessibleText(candidate), { allowBareEffort });
+      return ![...candidate.children].some((child) =>
+        extractPickerLevel(accessibleText(child), { allowBareEffort }) === level);
+    }));
+    const distinctLevels = new Set(textRows.map(optionLevel).filter(Boolean));
+    return distinctLevels.size >= 2 ? textRows : [];
   }
 
   function findInstantOption(root, picker = null, excluded = new Set()) {
@@ -1729,12 +1794,12 @@ The request should sound natural, for example: “Okay, let’s continue here. I
             <select data-cgs-setting="autoMaxLevel" aria-label="Maximum Adaptive Auto level"><option value="high">High</option><option value="extra-high">Extra High</option><option value="highest">Highest available</option></select>
           </label>
           <label class="cgs-setting">
-            <span><strong>Open side-question branches in</strong><small>A side window keeps the original instructions visible. Small screens use a tab. Fresh-chat continuation always switches this tab.</small></span>
-            <select data-cgs-setting="openMode" aria-label="Open side-question branches in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
+            <span><strong>Open side questions in</strong><small>A side window keeps the original instructions visible. Small screens use a tab. Fresh-chat continuation always switches this tab.</small></span>
+            <select data-cgs-setting="openMode" aria-label="Open side questions in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
           </label>
           <label class="cgs-setting">
-            <span><strong>Send side questions automatically</strong><small>The question is sent only after ChatGPT finishes creating the native branch.</small></span>
-            <input type="checkbox" data-cgs-setting="autoSend" aria-label="Send side questions automatically">
+            <span><strong>Send questions right away</strong><small>On: sends your question when the new chat opens. Off: leaves it typed so you can edit it first.</small></span>
+            <input type="checkbox" data-cgs-setting="autoSend" aria-label="Send questions right away">
           </label>
           <label class="cgs-setting">
             <span><strong>Show “Ask in new chat” on responses</strong><small>You can also select response text to get a temporary Ask in new chat button.</small></span>
@@ -1759,18 +1824,19 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       </div>
 
       <div id="cgs-dialog-backdrop" hidden>
-        <section class="cgs-dialog" role="dialog" aria-modal="true" aria-labelledby="cgs-dialog-title">
+        <section class="cgs-dialog" role="dialog" aria-modal="false" aria-labelledby="cgs-dialog-title">
           <h2 id="cgs-dialog-title">Ask in new chat</h2>
-          <p>The new chat uses ChatGPT’s native branch, so it keeps context while this page stays put.</p>
-          <textarea id="cgs-question" aria-label="Side question" placeholder="What are you stuck on?"></textarea>
+          <p>Write your question here. You can keep reading and scrolling the original chat while you type.</p>
+          <textarea id="cgs-question" aria-label="Question for new chat" placeholder="What are you stuck on?"></textarea>
           <div class="cgs-dialog-options">
-            <label><input id="cgs-dialog-autosend" type="checkbox"> Send this question automatically</label>
-            <label>Context <select id="cgs-context-mode" aria-label="Side chat context"><option value="latest">Through latest response (include later messages)</option><option value="clicked">Only through this response (exclude later messages)</option></select></label>
+            <label class="cgs-context-label"><span>What should the new chat remember?</span><select id="cgs-context-mode" aria-label="What the new chat should remember" aria-describedby="cgs-context-help"><option value="clicked">Chat up to this answer</option><option value="latest">Whole chat so far</option></select></label>
+            <p class="cgs-dialog-help" id="cgs-context-help"><strong>Chat up to this answer</strong> includes everything from the beginning through the answer you clicked. <strong>Whole chat so far</strong> includes everything from the beginning through the newest answer.</p>
+            <label><input id="cgs-dialog-autosend" type="checkbox" aria-describedby="cgs-autosend-help"> Send question right away</label>
+            <p class="cgs-dialog-help" id="cgs-autosend-help">On: sends your question as soon as the new chat opens. Off: puts it in the message box so you can edit it first.</p>
           </div>
-          <p class="cgs-dialog-help">When checked, this sends the question after the new branch is ready. When unchecked, it leaves the question in the composer for review. “Only through this response” stops at the clicked response and excludes later messages. “Through latest response” includes those later messages.</p>
           <div class="cgs-dialog-actions">
             <button class="cgs-secondary" type="button" data-cgs-action="cancel-question">Cancel</button>
-            <button class="cgs-primary" type="button" data-cgs-action="submit-question">Open side chat</button>
+            <button class="cgs-primary" type="button" data-cgs-action="submit-question">Open new chat</button>
           </div>
         </section>
       </div>
@@ -1843,9 +1909,10 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       : (url) => {
         win.location.assign(url);
         return true;
-      };
+    };
     const freshResponseTimeout = clampInteger(options.freshResponseTimeout, 5 * 60 * 1000, 500, 10 * 60 * 1000);
     const freshStabilityMs = clampInteger(options.freshStabilityMs, 650, 20, 5_000);
+    const routingDiscoveryTimeout = clampInteger(options.routingDiscoveryTimeout, 2_500, 50, 10_000);
     const state = {
       settings: { ...DEFAULT_SETTINGS },
       root: null,
@@ -2254,8 +2321,14 @@ The request should sound natural, for example: “Okay, let’s continue here. I
 
     function controlledModelMenu(picker) {
       const ids = normalizeText(picker && picker.getAttribute('aria-controls')).split(/\s+/u).filter(Boolean);
-      return ids.map((id) => doc.getElementById(id)).find((node) => node && node.isConnected && isProbablyVisible(node) &&
+      const controlled = ids.map((id) => doc.getElementById(id)).find((node) => node && node.isConnected && isProbablyVisible(node) &&
         !node.matches('[data-state="closed"], [aria-hidden="true"], [hidden]')) || null;
+      if (controlled) return controlled;
+      const pickerId = normalizeText(picker && picker.id);
+      if (!pickerId) return null;
+      return [...doc.querySelectorAll(`${MODEL_MENU_ROOT_SELECTOR}, [aria-labelledby]`)].find((node) =>
+        normalizeText(node.getAttribute('aria-labelledby')).split(/\s+/u).includes(pickerId) &&
+        node.isConnected && isProbablyVisible(node) && !node.matches('[data-state="closed"], [aria-hidden="true"], [hidden]')) || null;
     }
 
     function visibleModelMenuRoots(picker) {
@@ -2278,12 +2351,29 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       if (current && current.getAttribute('aria-expanded') === 'true') programmaticClick(current);
     }
 
-    async function routeAndReplay(snapshot, decision, manual = false, silent = false, routingStage = 0) {
+    async function routeAndReplay(snapshot, decision, manual = false, silent = false, routingStage = 0, pickerAttempt = 0, discoveryDeadline = 0) {
       const target = manual ? decision.target : cappedTarget(decision.target);
       const targetRank = modelLevelRank(target);
-      const currentRoutingPicker = () => findReasoningPicker(doc) || findModelPicker(doc);
-      const picker = currentRoutingPicker();
+      const activeDiscoveryDeadline = discoveryDeadline || Date.now() + routingDiscoveryTimeout;
+      const routingPickerCandidates = () => uniqueElements(targetRank >= ROUTE_LEVEL_RANK.pro
+        ? [findModelPicker(doc), findReasoningPicker(doc)]
+        : [findReasoningPicker(doc), findModelPicker(doc)]);
+      const pickerCandidates = routingPickerCandidates();
+      let picker = pickerCandidates[pickerAttempt] || null;
+      const currentRoutingPicker = (expectedLevel = '') => {
+        const refreshed = routingPickerCandidates();
+        if (expectedLevel) {
+          const reflected = uniqueElements([picker && picker.isConnected ? picker : null, ...refreshed]).find((candidate) => {
+            const level = extractModelLevel(accessibleText(candidate));
+            return level === expectedLevel || expectedLevel === 'instant' && level === 'auto';
+          });
+          if (reflected) return reflected;
+        }
+        if (picker && picker.isConnected) return picker;
+        return refreshed[pickerAttempt] || refreshed[0] || null;
+      };
       const current = extractModelLevel(accessibleText(picker));
+      const hasAlternatePicker = pickerCandidates.length > pickerAttempt + 1;
 
       if (snapshot.specialMode) {
         if (!silent) toast(`Adaptive Auto kept the current model because ${snapshot.specialMode} controls model compatibility.`);
@@ -2307,10 +2397,43 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       }
 
       const preexistingMenuRoots = new Set(visibleModelMenuRoots(picker));
-      if (!programmaticClick(picker)) return replayNativeSend(snapshot, decision, current || 'unknown', manual, 'model control could not be opened; used current');
-      const options = await waitForCondition(() => {
+      const mutatedMenuRoots = new Set();
+      const collectMutatedRoot = (node) => {
+        let currentNode = node && (node.nodeType === 1 ? node : node.parentElement);
+        for (let depth = 0; currentNode && depth < 6; depth += 1, currentNode = currentNode.parentElement) {
+          if (currentNode.matches('html, body, main') || currentNode.closest(`#${UI_ROOT_ID}`)) break;
+          if (currentNode === picker || currentNode.contains(picker)) continue;
+          mutatedMenuRoots.add(currentNode);
+        }
+      };
+      let menuMutationObserver = null;
+      if (win.MutationObserver) {
+        menuMutationObserver = new win.MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            if (mutation.type === 'attributes') collectMutatedRoot(mutation.target);
+            else for (const node of mutation.addedNodes) collectMutatedRoot(node);
+          }
+        });
+        menuMutationObserver.observe(doc.body || doc.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['aria-hidden', 'data-state', 'hidden', 'class', 'style', 'role'],
+        });
+      }
+      if (!programmaticClick(picker)) {
+        if (menuMutationObserver) menuMutationObserver.disconnect();
+        return replayNativeSend(snapshot, decision, current || 'unknown', manual, 'model control could not be opened; used current');
+      }
+      const discoverVisibleOptions = () => {
         const controlled = controlledModelMenu(picker);
-        const roots = visibleModelMenuRoots(picker).filter((root) => root === controlled || !preexistingMenuRoots.has(root));
+        const composer = findComposer(doc);
+        const roots = uniqueElements([
+          ...visibleModelMenuRoots(picker).filter((root) => root === controlled || !preexistingMenuRoots.has(root)),
+          ...mutatedMenuRoots,
+        ]).filter((root) => root && root.isConnected && isProbablyVisible(root) &&
+          !root.closest('[data-state="closed"], [aria-hidden="true"], [hidden]') &&
+          root !== picker && !root.contains(picker) && (!composer || !root.contains(composer)));
         const candidates = [];
         for (const root of roots) {
           const found = findModelOptions(root, picker) || [];
@@ -2328,12 +2451,17 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         }
         candidates.sort((left, right) => right.score - left.score);
         return candidates[0] && candidates[0].found || null;
-      }, {
-        root: doc.documentElement,
-        win,
-        timeout: 2_500,
-        attributes: true,
-      });
+      };
+      const remainingDiscoveryTime = Math.max(0, activeDiscoveryDeadline - Date.now());
+      const options = remainingDiscoveryTime >= 50
+        ? await waitForCondition(discoverVisibleOptions, {
+          root: doc.documentElement,
+          win,
+          timeout: remainingDiscoveryTime,
+          attributes: true,
+        })
+        : discoverVisibleOptions();
+      if (menuMutationObserver) menuMutationObserver.disconnect();
 
       if (state.adaptiveCancelled) {
         closeModelMenu(picker);
@@ -2345,6 +2473,14 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         closeModelMenu(picker);
         toast(`${validation.reason} It was not sent.`, 7_000);
         return false;
+      }
+      const exactTargetVisible = target === 'max' || (options || []).some((option) => {
+        const level = optionLevel(option);
+        return level === target || target === 'instant' && level === 'auto';
+      });
+      if ((!options || !options.length || !exactTargetVisible) && hasAlternatePicker) {
+        closeModelMenu(picker);
+        return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
       }
       const thinkingOption = routingStage === 0 && targetRank >= ROUTE_LEVEL_RANK.medium && targetRank <= ROUTE_LEVEL_RANK.ultra &&
         (options || []).find((option) => optionLevel(option) === 'medium' && /\bthinking\b/iu.test(accessibleText(option)));
@@ -2382,7 +2518,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
             const basePicker = findModelPicker(doc);
             if (basePicker && /\bthinking\b/iu.test(accessibleText(basePicker))) return basePicker;
           }
-          const updated = currentRoutingPicker();
+          const updated = currentRoutingPicker(choice.level);
           const selected = extractModelLevel(accessibleText(updated));
           if (selected === choice.level || choice.level === 'instant' && selected === 'auto') return updated || doc.documentElement;
           return null;
@@ -2401,7 +2537,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         toast(`${after.reason} It was not sent.`, 7_000);
         return false;
       }
-      const reflected = extractModelLevel(accessibleText(currentRoutingPicker()));
+      const reflected = extractModelLevel(accessibleText(currentRoutingPicker(choice.level)));
       const confirmed = selectionConfirmed || reflected === choice.level || choice.level === 'instant' && reflected === 'auto';
       if (!confirmed) {
         closeModelMenu(picker);
@@ -2477,7 +2613,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       const textarea = element('#cgs-question');
       textarea.value = buildSelectedQuestion(selectedText);
       element('#cgs-dialog-autosend').checked = state.settings.autoSend;
-      element('#cgs-context-mode').value = selectedText ? 'latest' : 'clicked';
+      element('#cgs-context-mode').value = 'clicked';
       element('#cgs-dialog-backdrop').hidden = false;
       win.setTimeout(() => {
         textarea.focus();
@@ -3272,13 +3408,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
 
     function onKeyDown(event) {
       if (event.key === 'Tab') {
-        const activeModal = !element('#cgs-dialog-backdrop').hidden
-          ? element('#cgs-dialog-backdrop')
-          : !element('#cgs-handoff-backdrop').hidden
-            ? element('#cgs-handoff-backdrop')
-            : !element('#cgs-settings-backdrop').hidden
-              ? element('#cgs-settings-backdrop')
-              : null;
+        const activeModal = !element('#cgs-handoff-backdrop').hidden
+          ? element('#cgs-handoff-backdrop')
+          : !element('#cgs-settings-backdrop').hidden
+            ? element('#cgs-settings-backdrop')
+            : null;
         if (activeModal) {
           const focusable = [...activeModal.querySelectorAll('button, textarea, select, input, a[href]')]
             .filter((node) => !node.disabled && isProbablyVisible(node));
