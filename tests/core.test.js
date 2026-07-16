@@ -175,6 +175,8 @@ test('sanitizeJob returns a bounded, normalized one-shot job', () => {
     branchClickAttempted: false,
     branchConversation: '',
     branchReloadFrom: '',
+    fallbackMode: false,
+    fallbackTranscript: '',
     questionInserted: false,
     baselineUserCount: -1,
     sendAttempted: false,
@@ -200,6 +202,33 @@ test('sanitizeJob accepts continue jobs and caps oversized questions', () => {
   assert.equal(result.branchClickAttempted, true);
   assert.equal(result.branchConversation, 'separate-chat');
   assert.equal(result.sendAttempted, true);
+});
+
+test('fallback jobs keep bounded transcript context and cannot retain a native Branch click intent', () => {
+  const now = 1_800_000_000_000;
+  const result = toolkit.sanitizeJob({
+    createdAt: now,
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: 'What does step four mean?',
+    fallbackMode: true,
+    fallbackTranscript: `USER:\r\nQuestion\r\n\r\nASSISTANT:\r\n${'x'.repeat(toolkit.SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH + 100)}`,
+    branchClickAttempted: true,
+    branchReloadFrom: 'source_page_1234',
+  }, now);
+
+  assert.equal(result.fallbackMode, true);
+  assert.equal(result.branchClickAttempted, false);
+  assert.equal(result.branchReloadFrom, 'source_page_1234');
+  assert.ok(result.fallbackTranscript.length <= toolkit.SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH);
+  assert.doesNotMatch(result.fallbackTranscript, /\r/u);
+  assert.equal(toolkit.sanitizeJob({
+    createdAt: now,
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    fallbackMode: true,
+    fallbackTranscript: '',
+  }, now).fallbackMode, false);
 });
 
 test('sanitizeJob rejects malformed, expired, future, and off-site jobs', () => {

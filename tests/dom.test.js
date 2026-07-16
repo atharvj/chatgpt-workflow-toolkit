@@ -120,6 +120,42 @@ test('extractAssistantHandoff rejects non-assistant turns', () => {
   assert.equal(toolkit.extractAssistantHandoff(null), '');
 });
 
+test('emergency side-chat transcript preserves role order, omits action UI, and puts the question last', () => {
+  const { document } = createDom(`
+    <section data-testid="conversation-turn-0"><div data-message-author-role="user">How do I run the lab?</div></section>
+    <section data-testid="conversation-turn-1"><div data-message-author-role="assistant"><p>Open results.csv.</p><button data-testid="copy-turn-action-button">Copy</button></div></section>
+    <section data-testid="conversation-turn-2"><div data-message-author-role="user">Then what?</div></section>
+    <section data-testid="conversation-turn-3"><div data-message-author-role="assistant">Compare the groups.<div id="cgs-root">Toolkit controls</div></div></section>
+  `).window;
+  const turns = toolkit.getTurns(document);
+  const transcript = toolkit.serializeConversation(document, turns[3]);
+  const prompt = toolkit.buildSideFallbackPrompt(transcript, 'Why do I compare those groups?');
+
+  assert.match(transcript, /^USER:\nHow do I run the lab\?/u);
+  assert.match(transcript, /ASSISTANT:\nOpen results\.csv\./u);
+  assert.match(transcript, /USER:\nThen what\?/u);
+  assert.match(transcript, /ASSISTANT:\nCompare the groups\.$/u);
+  assert.doesNotMatch(transcript, /Copy|Toolkit controls/u);
+  assert.match(prompt, /--- PREVIOUS CONVERSATION ---/u);
+  assert.match(prompt, /attachments are not transferred/iu);
+  assert.match(prompt, /--- SIDE QUESTION ---\nWhy do I compare those groups\?$/u);
+});
+
+test('emergency transcript clipping preserves both the beginning and newest context', () => {
+  const { document } = createDom(`
+    <section data-testid="conversation-turn-0"><div data-message-author-role="user">OPENING-GOAL ${'a'.repeat(900)}</div></section>
+    <section data-testid="conversation-turn-1"><div data-message-author-role="assistant">MIDDLE ${'b'.repeat(1_500)}</div></section>
+    <section data-testid="conversation-turn-2"><div data-message-author-role="user">LATEST-QUESTION ${'c'.repeat(900)}</div></section>
+    <section data-testid="conversation-turn-3"><div data-message-author-role="assistant">NEWEST-ANSWER ${'d'.repeat(900)}</div></section>
+  `).window;
+  const transcript = toolkit.serializeConversation(document, null, 1_000);
+
+  assert.equal(transcript.length, 1_000);
+  assert.match(transcript, /OPENING-GOAL/u);
+  assert.match(transcript, /older middle messages omitted/u);
+  assert.match(transcript, /NEWEST-ANSWER/u);
+});
+
 test('decorateTurn adds one Ask in new chat control per assistant response', () => {
   const { document } = createDom(`
     <article id="assistant" data-testid="conversation-turn-1" data-turn="assistant">

@@ -234,15 +234,99 @@ test('findInstantOption selects a visible menu option outside Workflow Toolkit U
 
 test('findMoreButton supports preferred selectors and ellipsis fallback', () => {
   const { document } = createDom(`
-    <article id="preferred">
+    <article id="preferred" data-testid="message-actions">
       <button data-testid="more-turn-action-button" id="hidden-more" hidden>More</button>
       <button aria-label="More actions" id="more">Menu</button>
     </article>
-    <article id="fallback"><button id="ellipsis">⋯</button></article>
+    <article id="fallback"><div data-testid="message-actions"><button id="ellipsis">⋯</button></div></article>
   `).window;
 
   assert.equal(toolkit.findMoreButton(document.querySelector('#preferred')), document.querySelector('#more'));
   assert.equal(toolkit.findMoreButton(document.querySelector('#fallback')), document.querySelector('#ellipsis'));
+});
+
+test('findMoreButton resolves a response toolbar outside the article by message ID', () => {
+  const { document } = createDom(`
+    <article data-testid="conversation-turn-1">
+      <div data-message-author-role="assistant" data-message-id="message-first">First answer</div>
+    </article>
+    <div data-testid="message-actions" data-message-id="message-first">
+      <button data-testid="turn-actions-menu-button" id="first-more" aria-label="More actions"></button>
+    </div>
+    <article data-testid="conversation-turn-3" id="target-turn">
+      <div data-message-author-role="assistant" data-message-id="message-target">Target answer</div>
+    </article>
+    <div data-testid="message-actions" data-message-id="message-target">
+      <button data-testid="turn-actions-menu-button" id="target-more" aria-label="More actions"></button>
+    </div>
+  `).window;
+
+  assert.equal(
+    toolkit.findMoreButton(document.querySelector('#target-turn')),
+    document.querySelector('#target-more'),
+    'the action toolbar can be a sibling/portal rather than a descendant of the response article',
+  );
+});
+
+test('findMoreButton recognizes an unlabeled menu button from its ellipsis icon test ID', () => {
+  const { document } = createDom(`
+    <article id="turn" data-testid="conversation-turn-1" data-turn="assistant">
+      <p>Answer</p>
+      <div data-testid="message-actions">
+        <button id="unlabeled-more" data-testid="turn-actions-menu-button">
+          <svg data-testid="ellipsis-icon" aria-hidden="true"></svg>
+        </button>
+      </div>
+    </article>
+  `).window;
+
+  assert.equal(
+    toolkit.findMoreButton(document.querySelector('#turn')),
+    document.querySelector('#unlabeled-more'),
+    'ChatGPT does not always expose More actions as button text or an aria-label',
+  );
+});
+
+test('findMoreButton accepts ChatGPT hover-hidden controls but rejects unrelated and ambiguous controls', () => {
+  const { document } = createDom(`
+    <header><button aria-label="More actions" id="header-more"></button></header>
+    <article id="turn" data-testid="conversation-turn-1" data-turn="assistant">
+      <p>Answer</p>
+      <div role="group" data-testid="message-actions"><button id="hover-more" aria-label="More actions" style="opacity: 0"></button></div>
+    </article>
+    <form><button aria-label="More actions" id="composer-more"></button></form>
+  `).window;
+
+  assert.equal(toolkit.findMoreButton(document.querySelector('#turn')), document.querySelector('#hover-more'));
+
+  document.querySelector('#hover-more').insertAdjacentHTML(
+    'afterend',
+    '<button id="duplicate-more" aria-label="More actions" style="opacity: 0"></button>',
+  );
+  assert.equal(toolkit.findMoreButton(document.querySelector('#turn')), null, 'equal target-owned candidates fail closed');
+});
+
+test('findMoreButton supports a response-owned role button', () => {
+  const { document } = createDom(`
+    <article id="turn" data-testid="conversation-turn-1" data-turn="assistant">
+      <div data-testid="message-actions"><span id="role-more" role="button" tabindex="0" aria-haspopup="menu" aria-label="More options"></span></div>
+    </article>
+  `).window;
+
+  assert.equal(toolkit.findMoreButton(document.querySelector('#turn')), document.querySelector('#role-more'));
+});
+
+test('findMoreButton never mistakes content overflow controls for response actions', () => {
+  const { document } = createDom(`
+    <article id="turn" data-testid="conversation-turn-1" data-turn="assistant">
+      <div class="image-carousel"><button id="content-overflow" data-testid="image-ellipsis-button"><svg data-testid="ellipsis-icon"></svg></button></div>
+      <div data-testid="message-actions"><button id="real-more" aria-label="More actions"></button></div>
+    </article>
+  `).window;
+
+  assert.equal(toolkit.findMoreButton(document.querySelector('#turn')), document.querySelector('#real-more'));
+  document.querySelector('#real-more').remove();
+  assert.equal(toolkit.findMoreButton(document.querySelector('#turn')), null);
 });
 
 test('branch menu matching accepts native label variants and ignores Workflow Toolkit UI', () => {

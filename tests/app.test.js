@@ -237,12 +237,625 @@ test('side question waits instead of silently omitting an unfinished latest resp
   dom.window.close();
 });
 
+test('automatic Branch finds a More-actions button rendered outside the turn after hover', async () => {
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <article data-testid="conversation-turn-0"><div data-message-author-role="user">Original question</div></article>
+    <article data-testid="conversation-turn-1" id="latest-turn">
+      <div data-message-author-role="assistant" data-message-id="message-latest">Latest answer</div>
+    </article>
+    <div id="action-portal" data-testid="message-actions" data-message-id="message-latest"></div>
+    <div id="turn-menu" role="menu" hidden><button role="menuitem" id="branch">Branch in new chat</button></div>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/source-chat',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const turn = document.querySelector('#latest-turn');
+  const portal = document.querySelector('#action-portal');
+  const menu = document.querySelector('#turn-menu');
+  turn.scrollIntoView = () => {};
+
+  let hoverCount = 0;
+  turn.addEventListener('pointerover', () => {
+    hoverCount += 1;
+    dom.window.setTimeout(() => {
+      if (document.querySelector('#lazy-more')) return;
+      const more = document.createElement('button');
+      more.id = 'lazy-more';
+      more.dataset.testid = 'turn-actions-menu-button';
+      more.setAttribute('aria-controls', 'turn-menu');
+      more.innerHTML = '<svg data-testid="ellipsis-icon" aria-hidden="true"></svg>';
+      more.addEventListener('click', () => { menu.hidden = false; });
+      portal.append(more);
+    }, 25);
+  });
+  let branchCount = 0;
+  document.querySelector('#branch').addEventListener('click', () => {
+    branchCount += 1;
+    menu.hidden = true;
+    dom.window.history.pushState({}, '', '/c/hover-created-branch');
+  });
+
+  const app = toolkit.createApp(document, dom.window, { branchNavigationTimeout: 600 });
+  await app.start();
+  const job = toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    locator: toolkit.getTurnLocator(turn, document),
+    targetFingerprint: toolkit.assistantTurnFingerprint(turn),
+    contextFingerprint: toolkit.conversationContextFingerprint(document, turn),
+    question: 'Keep this question in the separate chat.',
+    autoSend: true,
+  });
+
+  try {
+    assert.equal(await app.runIncomingJob(job), false, 'without an incoming job ID the test stops after proving the branch route');
+    assert.ok(hoverCount > 0, 'the response is hovered so ChatGPT can lazily render its actions');
+    assert.equal(branchCount, 1);
+    assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'hover-created-branch');
+    assert.equal(document.querySelector('#prompt-textarea').value, '');
+  } finally {
+    app.state.observer.disconnect();
+    dom.window.close();
+  }
+});
+
+test('automatic Branch re-resolves the latest response after ChatGPT rerenders it', async () => {
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <article data-testid="conversation-turn-0"><div data-message-author-role="user">Original question</div></article>
+    <article data-testid="conversation-turn-1" id="latest-turn"><div data-message-author-role="assistant">Stable latest answer</div></article>
+    <div id="turn-menu" role="menu" hidden><button role="menuitem" id="branch">Branch in new chat</button></div>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/source-chat',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const originalTurn = document.querySelector('#latest-turn');
+  originalTurn.scrollIntoView = () => {};
+  let rerendered = false;
+  originalTurn.addEventListener('pointerover', () => {
+    if (rerendered) return;
+    rerendered = true;
+    const replacement = document.createElement('article');
+    replacement.dataset.testid = 'conversation-turn-1';
+    replacement.id = 'replacement-turn';
+    replacement.innerHTML = '<div data-message-author-role="assistant">Stable latest answer</div><button id="replacement-more" data-testid="more-turn-action-button" aria-label="More actions" aria-controls="turn-menu"></button>';
+    replacement.scrollIntoView = () => {};
+    originalTurn.replaceWith(replacement);
+    replacement.querySelector('#replacement-more').addEventListener('click', () => {
+      document.querySelector('#turn-menu').hidden = false;
+    });
+  });
+  let branchCount = 0;
+  document.querySelector('#branch').addEventListener('click', () => {
+    branchCount += 1;
+    dom.window.history.pushState({}, '', '/c/rerendered-branch');
+  });
+  const app = toolkit.createApp(document, dom.window, {
+    branchActionTimeout: 500,
+    branchNavigationTimeout: 600,
+  });
+  await app.start();
+  const job = toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    locator: toolkit.getTurnLocator(originalTurn, document),
+    targetFingerprint: toolkit.assistantTurnFingerprint(originalTurn),
+    contextFingerprint: toolkit.conversationContextFingerprint(document, originalTurn),
+    question: 'Keep working after the rerender.',
+    autoSend: true,
+  });
+
+  try {
+    assert.equal(await app.runIncomingJob(job), false);
+    assert.equal(rerendered, true);
+    assert.equal(branchCount, 1);
+    assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'rerendered-branch');
+    assert.equal(document.querySelector('#prompt-textarea').value, '');
+  } finally {
+    app.state.observer.disconnect();
+    dom.window.close();
+  }
+});
+
+test('automatic Branch uses a directly exposed native Branch action when More actions is absent', async () => {
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <article data-testid="conversation-turn-0"><div data-message-author-role="user">Original question</div></article>
+    <article data-testid="conversation-turn-1" id="latest-turn">
+      <div data-message-author-role="assistant" data-message-id="message-latest">Latest answer</div>
+    </article>
+    <div data-testid="message-actions" data-message-id="message-latest">
+      <button id="direct-branch" data-testid="branch-turn-action-button" aria-label="Branch in new chat"></button>
+    </div>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/source-chat',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const turn = document.querySelector('#latest-turn');
+  turn.scrollIntoView = () => {};
+  let branchCount = 0;
+  document.querySelector('#direct-branch').addEventListener('click', () => {
+    branchCount += 1;
+    dom.window.history.pushState({}, '', '/c/direct-action-branch');
+  });
+
+  const app = toolkit.createApp(document, dom.window, { branchNavigationTimeout: 600 });
+  await app.start();
+  const job = toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    locator: toolkit.getTurnLocator(turn, document),
+    targetFingerprint: toolkit.assistantTurnFingerprint(turn),
+    contextFingerprint: toolkit.conversationContextFingerprint(document, turn),
+    question: 'Use the direct native branch action.',
+    autoSend: true,
+  });
+
+  try {
+    assert.equal(await app.runIncomingJob(job), false, 'without an incoming job ID the test stops after proving the branch route');
+    assert.equal(branchCount, 1, 'the direct Branch action is the native fallback when no More-actions button exists');
+    assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'direct-action-branch');
+    assert.equal(document.querySelector('#prompt-textarea').value, '');
+  } finally {
+    app.state.observer.disconnect();
+    dom.window.close();
+  }
+});
+
+test('automatic Branch ignores content links and older response actions with Branch-like labels', async () => {
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <article data-testid="conversation-turn-0"><div data-message-author-role="assistant" data-message-id="older-message">Older answer</div></article>
+    <div data-testid="message-actions" data-message-id="older-message"><button id="older-branch" data-testid="branch-turn-action-button" aria-label="Branch in new chat"></button></div>
+    <article data-testid="conversation-turn-1" id="latest-turn">
+      <div data-message-author-role="assistant">Read <a href="#branch-help" id="content-branch">Branch in new chat</a> for documentation.</div>
+      <button id="more" data-testid="more-turn-action-button" aria-label="More actions" aria-controls="turn-menu"></button>
+    </article>
+    <div id="turn-menu" role="menu" hidden><button role="menuitem" id="native-branch">Branch in new chat</button></div>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/source-chat',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const turn = document.querySelector('#latest-turn');
+  turn.scrollIntoView = () => {};
+  let oldCount = 0;
+  let contentCount = 0;
+  let nativeCount = 0;
+  document.querySelector('#older-branch').addEventListener('click', () => { oldCount += 1; });
+  document.querySelector('#content-branch').addEventListener('click', (event) => { event.preventDefault(); contentCount += 1; });
+  document.querySelector('#more').addEventListener('click', () => { document.querySelector('#turn-menu').hidden = false; });
+  document.querySelector('#native-branch').addEventListener('click', () => {
+    nativeCount += 1;
+    dom.window.history.pushState({}, '', '/c/correct-native-branch');
+  });
+  const app = toolkit.createApp(document, dom.window, { branchNavigationTimeout: 600 });
+  await app.start();
+  const job = toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    locator: toolkit.getTurnLocator(turn, document),
+    targetFingerprint: toolkit.assistantTurnFingerprint(turn),
+    contextFingerprint: toolkit.conversationContextFingerprint(document, turn),
+    question: 'Use only the real response action.',
+    autoSend: true,
+  });
+
+  try {
+    assert.equal(await app.runIncomingJob(job), false);
+    assert.equal(oldCount, 0);
+    assert.equal(contentCount, 0);
+    assert.equal(nativeCount, 1);
+    assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'correct-native-branch');
+    assert.equal(document.querySelector('#prompt-textarea').value, '');
+  } finally {
+    app.state.observer.disconnect();
+    dom.window.close();
+  }
+});
+
+test('missing native response actions automatically transfer context to a blank chat and send once', async () => {
+  const jobId = 'transcript_fallback_job_1234';
+  const stored = new Map();
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+
+  const sourceDom = new JSDOM(`<!doctype html><html><body><main>
+    <section data-testid="conversation-turn-0"><div data-message-author-role="user">How do I finish the lab?</div></section>
+    <section data-testid="conversation-turn-1" id="latest-turn"><div data-message-author-role="assistant">Open results.csv, then compare both groups.</div></section>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: `https://chatgpt.com/c/source-chat#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  const sourceDocument = sourceDom.window.document;
+  const sourceTurn = sourceDocument.querySelector('#latest-turn');
+  sourceTurn.scrollIntoView = () => {};
+  let fallbackUrl = '';
+  const sourceApp = toolkit.createApp(sourceDocument, sourceDom.window, {
+    pageInstanceId: 'fallback_source_page_1234',
+    branchActionTimeout: 100,
+    navigateTo: (url) => { fallbackUrl = String(url); return true; },
+  });
+  await sourceApp.start();
+  sourceApp.state.incomingJobId = jobId;
+  const job = toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    locator: toolkit.getTurnLocator(sourceTurn, sourceDocument),
+    targetFingerprint: toolkit.assistantTurnFingerprint(sourceTurn),
+    contextFingerprint: toolkit.conversationContextFingerprint(sourceDocument, sourceTurn),
+    question: 'Why do I need to compare both groups?',
+    autoSend: true,
+  });
+
+  let destinationDom;
+  let destinationApp;
+  try {
+    assert.equal(await sourceApp.runIncomingJob(job), false, 'the source copy stops after navigating its side window');
+    assert.equal(fallbackUrl, `https://chatgpt.com/#cwt-job=${jobId}`);
+    assert.equal(sourceDocument.querySelector('#prompt-textarea').value, '', 'the original composer is never used');
+    assert.equal(sourceDocument.querySelectorAll('[data-testid^="conversation-turn-"]').length, 2);
+    assert.equal(sourceDocument.querySelector('#cgs-recovery-backdrop').hidden, true, 'missing More actions is recovered automatically');
+    const savedFallback = stored.get(`chatgptSidecar.job.v1.${jobId}`);
+    assert.equal(savedFallback.fallbackMode, true);
+    assert.equal(savedFallback.branchClickAttempted, false);
+    assert.equal(savedFallback.branchReloadFrom, 'fallback_source_page_1234');
+    assert.match(savedFallback.fallbackTranscript, /USER:\nHow do I finish the lab\?/u);
+    assert.match(savedFallback.fallbackTranscript, /ASSISTANT:\nOpen results\.csv/u);
+
+    destinationDom = new JSDOM(`<!doctype html><html><body><main>
+      <form><button type="button" data-testid="model-switcher-dropdown-button" aria-label="Instant">Instant</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+    </main></body></html>`, {
+      url: fallbackUrl,
+      pretendToBeVisual: true,
+    });
+    const destinationDocument = destinationDom.window.document;
+    const locks = createIfAvailableLockManager();
+    Object.defineProperty(destinationDom.window.navigator, 'locks', { configurable: true, value: locks });
+    let sendCount = 0;
+    let sentPrompt = '';
+    destinationDocument.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+      sendCount += 1;
+      const composer = destinationDocument.querySelector('#prompt-textarea');
+      sentPrompt = composer.value;
+      composer.value = '';
+      const userTurn = destinationDocument.createElement('section');
+      userTurn.dataset.testid = 'conversation-turn-0';
+      const role = destinationDocument.createElement('div');
+      role.dataset.messageAuthorRole = 'user';
+      role.textContent = sentPrompt;
+      userTurn.append(role);
+      destinationDocument.querySelector('main').insertBefore(userTurn, destinationDocument.querySelector('form'));
+      destinationDom.window.history.pushState({}, '', `/c/fallback-side-chat#cwt-job=${jobId}`);
+    });
+    destinationApp = toolkit.createApp(destinationDocument, destinationDom.window, {
+      initialJobId: jobId,
+      pageInstanceId: 'fallback_destination_page_1234',
+      sideSendAckTimeout: 1_000,
+    });
+    await destinationApp.start();
+
+    assert.equal(sendCount, 1);
+    assert.equal(destinationApp.state.settings.adaptiveRouting, true, 'the default Adaptive Auto path performs the send');
+    assert.match(sentPrompt, /--- PREVIOUS CONVERSATION ---/u);
+    assert.match(sentPrompt, /Open results\.csv, then compare both groups\./u);
+    assert.match(sentPrompt, /--- SIDE QUESTION ---\nWhy do I need to compare both groups\?$/u);
+    assert.equal(toolkit.conversationIdentity(destinationDom.window.location.href), 'fallback-side-chat');
+    assert.equal(stored.has(`chatgptSidecar.job.v1.${jobId}`), false, 'the one-shot transfer is deleted after acknowledgement');
+    assert.equal(sourceDocument.querySelector('#prompt-textarea').value, '');
+  } finally {
+    if (sourceApp.state.observer) sourceApp.state.observer.disconnect();
+    if (destinationApp && destinationApp.state.observer) destinationApp.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    sourceDom.window.close();
+    if (destinationDom) destinationDom.window.close();
+  }
+});
+
+test('fallback refuses a navigation no-op and leaves the source composer untouched', async () => {
+  const jobId = 'fallback_navigation_guard_1234';
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: `https://chatgpt.com/#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  const app = toolkit.createApp(dom.window.document, dom.window, { pageInstanceId: 'same_page_instance_1234' });
+  await app.start();
+  app.state.incomingJobId = jobId;
+  const job = toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: 'Do not stage this.',
+    autoSend: true,
+    fallbackMode: true,
+    fallbackTranscript: 'USER:\nOriginal context',
+    branchReloadFrom: 'same_page_instance_1234',
+  });
+
+  try {
+    assert.equal(await app.runIncomingJob(job), false);
+    assert.equal(dom.window.document.querySelector('#prompt-textarea').value, '');
+    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /could not be verified/iu);
+  } finally {
+    app.state.observer.disconnect();
+    dom.window.close();
+  }
+});
+
+test('fallback never acknowledges an unrelated chat after send intent was saved', async () => {
+  const jobId = 'fallback_unrelated_ack_1234';
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <article data-testid="conversation-turn-0"><div data-message-author-role="user">An unrelated old message</div></article>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/unrelated-chat',
+    pretendToBeVisual: true,
+  });
+  let sendCount = 0;
+  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sendCount += 1; });
+  const app = toolkit.createApp(dom.window.document, dom.window, { sideSendAckTimeout: 250 });
+  await app.start();
+  app.state.incomingJobId = jobId;
+  const job = toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: 'The real side question',
+    autoSend: true,
+    fallbackMode: true,
+    fallbackTranscript: 'USER:\nOriginal context',
+    branchReloadFrom: 'fallback_source_page_1234',
+    sendAttempted: true,
+    baselineUserCount: 0,
+  });
+
+  try {
+    assert.equal(await app.runIncomingJob(job), false);
+    assert.equal(sendCount, 0);
+    assert.equal(app.state.incomingJobId, jobId, 'an unacknowledged one-shot job is retained for inspection');
+    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /prevent a duplicate/iu);
+  } finally {
+    app.state.observer.disconnect();
+    dom.window.close();
+  }
+});
+
+test('fallback rejects a different live job hash before touching the blank composer', async () => {
+  const expectedJobId = 'fallback_expected_hash_1234';
+  const otherJobId = 'fallback_other_hash_1234';
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/',
+    pretendToBeVisual: true,
+  });
+  const app = toolkit.createApp(dom.window.document, dom.window, {
+    pageInstanceId: 'fallback_destination_page_1234',
+    branchComposerTimeout: 250,
+  });
+  await app.start();
+  dom.window.history.replaceState({}, '', `/#cwt-job=${otherJobId}`);
+  app.state.incomingJobId = expectedJobId;
+  const job = toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: 'Do not put this in the wrong job.',
+    autoSend: true,
+    fallbackMode: true,
+    fallbackTranscript: 'USER:\nOriginal context',
+    branchReloadFrom: 'fallback_source_page_1234',
+  });
+
+  try {
+    assert.equal(await app.runIncomingJob(job), false);
+    assert.equal(dom.window.document.querySelector('#prompt-textarea').value, '');
+    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /blank new chat could not be verified/iu);
+  } finally {
+    app.state.observer.disconnect();
+    dom.window.close();
+  }
+});
+
+test('fallback routing failure before replay remains retryable and records no Send intent', async () => {
+  const jobId = 'fallback_routing_retry_1234';
+  const stored = new Map();
+  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
+  stored.set(storageKey, toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: 'what is 2+2',
+    autoSend: true,
+    fallbackMode: true,
+    fallbackTranscript: 'USER:\nOriginal context',
+    branchReloadFrom: 'fallback_source_page_1234',
+  }));
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: `https://chatgpt.com/#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  const locks = createIfAvailableLockManager();
+  Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
+  let sendCount = 0;
+  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sendCount += 1; });
+  const app = toolkit.createApp(dom.window.document, dom.window, {
+    initialJobId: jobId,
+    pageInstanceId: 'fallback_destination_page_1234',
+    routingDiscoveryTimeout: 100,
+  });
+
+  try {
+    await app.start();
+    const saved = stored.get(storageKey);
+    assert.equal(sendCount, 0);
+    assert.equal(saved.questionInserted, true);
+    assert.equal(saved.sendAttempted, false, 'routing failed before the beforeReplay write-ahead hook');
+    assert.equal(dom.window.document.querySelector('[data-cgs-action="retry-branch"]').hidden, false);
+    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /Nothing was sent.*try/isu);
+  } finally {
+    if (app.state.observer) app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
+});
+
+test('fallback reload recognizes its transfer marker without clicking Send again', async () => {
+  const jobId = 'fallback_reload_marker_1234';
+  const stored = new Map();
+  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
+  stored.set(storageKey, toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: 'Explain the transformed message.',
+    autoSend: true,
+    fallbackMode: true,
+    fallbackTranscript: 'USER:\nOriginal context',
+    branchReloadFrom: 'fallback_source_page_1234',
+    branchConversation: 'fallback-side-chat',
+    questionInserted: true,
+    baselineUserCount: 0,
+    sendAttempted: true,
+  }));
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <article data-testid="conversation-turn-0"><div data-message-author-role="user"><p>ChatGPT transformed the Markdown around this message.</p><code>[Workflow Toolkit transfer ${jobId}]</code></div></article>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/fallback-side-chat',
+    pretendToBeVisual: true,
+  });
+  const locks = createIfAvailableLockManager();
+  Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
+  let sendCount = 0;
+  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sendCount += 1; });
+  const app = toolkit.createApp(dom.window.document, dom.window, {
+    initialJobId: jobId,
+    pageInstanceId: 'fallback_reloaded_page_1234',
+    sideSendAckTimeout: 500,
+  });
+
+  try {
+    await app.start();
+    assert.equal(sendCount, 0);
+    assert.equal(stored.has(storageKey), false, 'the acknowledged transfer is cleaned up after reload');
+    assert.equal(app.state.incomingJobId, '');
+  } finally {
+    if (app.state.observer) app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
+});
+
+test('blank fallback destination retries a briefly busy navigation lock', async () => {
+  const jobId = 'fallback_lock_overlap_1234';
+  const stored = new Map();
+  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
+  stored.set(storageKey, toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question: 'Finish after the old page releases the lock.',
+    autoSend: true,
+    fallbackMode: true,
+    fallbackTranscript: 'USER:\nOriginal context',
+    branchReloadFrom: 'fallback_source_page_1234',
+  }));
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form><button type="button" data-testid="model-switcher-dropdown-button" aria-label="Instant">Instant</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: `https://chatgpt.com/#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  let lockAttempts = 0;
+  Object.defineProperty(dom.window.navigator, 'locks', {
+    configurable: true,
+    value: {
+      request(name, options, callback) {
+        lockAttempts += 1;
+        assert.equal(options.ifAvailable, true);
+        return Promise.resolve(callback(lockAttempts < 3 ? null : { name, mode: 'exclusive' }));
+      },
+    },
+  });
+  let sendCount = 0;
+  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+    sendCount += 1;
+    const composer = dom.window.document.querySelector('#prompt-textarea');
+    const userTurn = dom.window.document.createElement('article');
+    userTurn.dataset.testid = 'conversation-turn-0';
+    const role = dom.window.document.createElement('div');
+    role.dataset.messageAuthorRole = 'user';
+    role.textContent = composer.value;
+    userTurn.append(role);
+    composer.value = '';
+    dom.window.document.querySelector('main').insertBefore(userTurn, dom.window.document.querySelector('form'));
+    dom.window.history.pushState({}, '', `/c/fallback-after-lock#cwt-job=${jobId}`);
+  });
+  const app = toolkit.createApp(dom.window.document, dom.window, {
+    initialJobId: jobId,
+    pageInstanceId: 'fallback_destination_page_1234',
+    sideSendAckTimeout: 750,
+  });
+
+  try {
+    await app.start();
+    assert.equal(lockAttempts, 3);
+    assert.equal(sendCount, 1);
+    assert.equal(stored.has(storageKey), false);
+  } finally {
+    if (app.state.observer) app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
+});
+
 test('automatic Branch aborts if a newer turn appears while the response menu is opening', async () => {
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-0"><div data-message-author-role="user">Original question</div></article>
     <article data-testid="conversation-turn-1">
       <div data-message-author-role="assistant">Original latest answer</div>
-      <button id="more" aria-label="More actions" aria-controls="turn-menu">More</button>
+      <button id="more" data-testid="more-turn-action-button" aria-label="More actions" aria-controls="turn-menu">More</button>
     </article>
     <div id="turn-menu" role="menu" hidden></div>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
@@ -311,7 +924,7 @@ test('automatic Branch aborts if generation starts during branch-intent persiste
     <article data-testid="conversation-turn-0"><div data-message-author-role="user">Original question</div></article>
     <article data-testid="conversation-turn-1">
       <div data-message-author-role="assistant">Latest completed answer</div>
-      <button id="more" aria-label="More actions" aria-controls="turn-menu">More</button>
+      <button id="more" data-testid="more-turn-action-button" aria-label="More actions" aria-controls="turn-menu">More</button>
     </article>
     <div id="turn-menu" role="menu" hidden><button role="menuitem" id="branch">Branch in new chat</button></div>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
@@ -385,7 +998,7 @@ test('automatic Branch forces a persisted destination reload before any composer
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-1">
       <div data-message-author-role="assistant">Latest answer</div>
-      <button id="more" aria-label="More actions" aria-controls="turn-menu">More</button>
+      <button id="more" data-testid="more-turn-action-button" aria-label="More actions" aria-controls="turn-menu">More</button>
     </article>
     <div id="turn-menu" role="menu" hidden><button role="menuitem" id="branch">Branch in new chat</button></div>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
@@ -1004,7 +1617,7 @@ test('query-only navigation never inserts or sends a side question in the source
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-1">
       <div data-message-author-role="assistant">Latest answer</div>
-      <button id="more" aria-label="More actions" aria-controls="turn-menu">More</button>
+      <button id="more" data-testid="more-turn-action-button" aria-label="More actions" aria-controls="turn-menu">More</button>
     </article>
     <div id="turn-menu" role="menu" hidden><button role="menuitem" id="branch">Branch in new chat</button></div>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
@@ -1055,7 +1668,7 @@ test('retry after an ambiguous Branch click never clicks Branch a second time', 
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-1">
       <div data-message-author-role="assistant">Latest answer</div>
-      <button id="more" aria-label="More actions" aria-controls="turn-menu">More</button>
+      <button id="more" data-testid="more-turn-action-button" aria-label="More actions" aria-controls="turn-menu">More</button>
     </article>
     <div id="turn-menu" role="menu" hidden><button role="menuitem" id="branch">Branch in new chat</button></div>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
@@ -1106,7 +1719,7 @@ test('route reverting to the source during branch setup aborts before any compos
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-1">
       <div data-message-author-role="assistant">Latest answer</div>
-      <button id="more" aria-label="More actions" aria-controls="turn-menu">More</button>
+      <button id="more" data-testid="more-turn-action-button" aria-label="More actions" aria-controls="turn-menu">More</button>
     </article>
     <div id="turn-menu" role="menu" hidden><button role="menuitem" id="branch">Branch in new chat</button></div>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>

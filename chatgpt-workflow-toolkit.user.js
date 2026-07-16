@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.6
+// @version      1.4.7
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Atharv Joshi
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.6';
+  const VERSION = '1.4.7';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -59,6 +59,8 @@
   const FRESH_HANDOFF_MAX_AGE_MS = 10 * 60 * 1000;
   const FRESH_HANDOFF_MAX_LENGTH = 28_000;
   const QUESTION_MAX_LENGTH = 30_000;
+  const SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH = 120_000;
+  const SIDE_FALLBACK_PROMPT_MAX_LENGTH = SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH + QUESTION_MAX_LENGTH + 2_000;
   const TARGET_FINGERPRINT_MAX_LENGTH = 1_200;
   const SELECTED_QUOTE_MAX_LENGTH = 2_000;
   const UI_ROOT_ID = 'cgs-root';
@@ -84,7 +86,7 @@ Also account for materials that will not automatically carry into a new chat:
 
 The request should sound natural, for example: “Okay, let’s continue here. If you have them, could you provide [exact names] in full? If not, that’s okay—I can continue from this handoff. Providing them would give me significantly more context.”`;
 
-  const TURN_SELECTOR = 'article[data-testid^="conversation-turn-"]';
+  const TURN_SELECTOR = '[data-testid^="conversation-turn-"]';
   const ROLE_SELECTOR = '[data-message-author-role]';
   const COMPOSER_SELECTORS = [
     'textarea#prompt-textarea',
@@ -683,6 +685,56 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return `${lastIndex + 1}:${length}:${hashA.toString(16).padStart(8, '0')}:${hashB.toString(16).padStart(8, '0')}`;
   }
 
+  function serializeConversation(root, throughTurn = null, maximumLength = SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH) {
+    const turns = getTurns(root);
+    const lastIndex = throughTurn ? turns.indexOf(throughTurn) : turns.length - 1;
+    if (lastIndex < 0) return '';
+    const blocks = turns.slice(0, lastIndex + 1).map((turn) => {
+      const role = roleOfTurn(turn);
+      if (role !== 'user' && role !== 'assistant') return '';
+      const content = readableNodeText(turn).replace(/\r\n?/gu, '\n').trim();
+      return content ? `${role.toUpperCase()}:\n${content}` : '';
+    }).filter(Boolean);
+    const transcript = blocks.join('\n\n');
+    const limit = clampInteger(maximumLength, SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH, 1_000, SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH);
+    if (transcript.length <= limit) return transcript;
+    const marker = '\n\n[... older middle messages omitted because the chat was too long for the emergency transfer ...]\n\n';
+    const available = Math.max(2, limit - marker.length);
+    const headLength = Math.floor(available * 0.38);
+    const tailLength = Math.max(1, available - headLength);
+    const newestBlock = blocks[blocks.length - 1] || '';
+    let tail = transcript.slice(-tailLength).trimStart();
+    if (newestBlock.length > tailLength) {
+      const innerMarker = '\n[... middle of newest message omitted ...]\n';
+      const innerAvailable = Math.max(2, tailLength - innerMarker.length);
+      const newestHeadLength = Math.floor(innerAvailable * 0.45);
+      tail = `${newestBlock.slice(0, newestHeadLength).trimEnd()}${innerMarker}${newestBlock.slice(-(innerAvailable - newestHeadLength)).trimStart()}`;
+    }
+    return `${transcript.slice(0, headLength).trimEnd()}${marker}${tail}`
+      .slice(0, limit);
+  }
+
+  function buildSideFallbackPrompt(transcriptValue, questionValue, kind = 'ask', transferId = '') {
+    const transcript = String(transcriptValue == null ? '' : transcriptValue).replace(/\r\n?/gu, '\n').trim();
+    const question = String(questionValue == null ? '' : questionValue).replace(/\r\n?/gu, '\n').trim();
+    const marker = isValidJobId(transferId) ? `[Workflow Toolkit transfer ${transferId}]` : '';
+    if (!transcript) return '';
+    const request = question || (kind === 'continue'
+      ? 'Continue the conversation from where it stopped.'
+      : 'Answer the side question using the available conversation context.');
+    return `Answer the request at the end using the previous ChatGPT conversation as context. This is a separate chat, so do not merely summarize the transcript and do not ask the user to repeat information already included here.
+
+Files, images, and other attachments are not transferred by this fallback. Use all information available in the transcript. If missing material is truly essential, ask the user to upload it, while making clear that it is okay if they cannot.
+${marker ? `\n${marker}\n` : ''}
+
+--- PREVIOUS CONVERSATION ---
+${transcript}
+--- END PREVIOUS CONVERSATION ---
+
+--- ${kind === 'continue' && !question ? 'REQUEST' : 'SIDE QUESTION'} ---
+${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
+  }
+
   function isEditableElement(element) {
     if (!element || element.nodeType !== 1) return false;
     const tag = element.tagName.toLowerCase();
@@ -813,6 +865,18 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     }
   }
 
+  function urlWithNewChatJob(value, jobId) {
+    if (!isValidJobId(jobId)) return '';
+    try {
+      const source = new URL(String(value));
+      const url = new URL('/', source.origin);
+      url.hash = `${JOB_HASH_KEY}=${encodeURIComponent(jobId)}`;
+      return url.toString();
+    } catch (_error) {
+      return '';
+    }
+  }
+
   function parseJobId(value) {
     try {
       const url = new URL(String(value));
@@ -887,6 +951,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const sourceConversation = conversationIdentity(sourceUrl);
     const branchConversation = sanitizeConversationIdentity(raw.branchConversation);
     const branchReloadFrom = isValidJobId(raw.branchReloadFrom) ? String(raw.branchReloadFrom) : '';
+    const fallbackTranscript = String(raw.fallbackTranscript == null ? '' : raw.fallbackTranscript)
+      .replace(/\r\n?/gu, '\n')
+      .slice(0, SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH)
+      .trim();
+    const fallbackMode = raw.fallbackMode === true && Boolean(fallbackTranscript);
     return {
       version: 1,
       createdAt,
@@ -899,9 +968,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       contextFingerprint,
       question,
       autoSend: raw.autoSend === true,
-      branchClickAttempted: raw.branchClickAttempted === true,
+      branchClickAttempted: !fallbackMode && raw.branchClickAttempted === true,
       branchConversation: branchConversation && branchConversation !== sourceConversation ? branchConversation : '',
       branchReloadFrom,
+      fallbackMode,
+      fallbackTranscript,
       questionInserted: raw.questionInserted === true,
       baselineUserCount: clampInteger(raw.baselineUserCount, -1, -1, 100_000),
       sendAttempted: raw.sendAttempted === true,
@@ -1016,9 +1087,10 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     element.dispatchEvent(event);
   }
 
-  function setComposerText(composer, value, win) {
+  function setComposerText(composer, value, win, maximumLength = QUESTION_MAX_LENGTH) {
     if (!composer || !win) return false;
-    const text = String(value == null ? '' : value).slice(0, QUESTION_MAX_LENGTH);
+    const limit = clampInteger(maximumLength, QUESTION_MAX_LENGTH, 1, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
+    const text = String(value == null ? '' : value).slice(0, limit);
     const tag = composer.tagName.toLowerCase();
     composer.focus();
     if (tag === 'textarea' || tag === 'input') {
@@ -1642,23 +1714,117 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     }) || null;
   }
 
-  function findMoreButton(turn) {
-    if (!turn) return null;
-    const preferred = [
-      'button[data-testid="more-turn-action-button"]',
-      'button[data-testid*="more-turn"]',
-      'button[aria-label="More actions"]',
-      'button[aria-label*="More" i]',
-      'button[title*="More" i]',
-    ];
-    for (const selector of preferred) {
-      const button = [...turn.querySelectorAll(selector)].find((candidate) =>
-        isProbablyVisible(candidate) && !candidate.matches(':disabled, [aria-disabled="true"], [data-disabled]'));
-      if (button) return button;
+  function actionControlIsUsable(control) {
+    return Boolean(control && control.isConnected && !control.closest(`#${UI_ROOT_ID}`) &&
+      !control.closest('nav, aside, header, form, [data-testid*="composer" i]') &&
+      !control.matches(':disabled, [aria-disabled="true"], [data-disabled], [inert]'));
+  }
+
+  function turnMessageIds(turn) {
+    if (!turn) return new Set();
+    return new Set(collectMatches(turn, '[data-message-id]')
+      .map((node) => normalizeText(node.getAttribute('data-message-id')))
+      .filter(Boolean));
+  }
+
+  function responseActionScopes(turn) {
+    if (!turn || !turn.ownerDocument) return [];
+    const doc = turn.ownerDocument;
+    const scopes = [turn];
+    const messageIds = turnMessageIds(turn);
+
+    if (messageIds.size) {
+      for (const node of doc.querySelectorAll('[data-message-id]')) {
+        if (messageIds.has(normalizeText(node.getAttribute('data-message-id')))) scopes.push(node);
+      }
     }
-    return [...turn.querySelectorAll('button')].find((button) =>
-      /^(?:\.\.\.|…|⋯)$/u.test(normalizeText(button.textContent)) && isProbablyVisible(button) &&
-      !button.matches(':disabled, [aria-disabled="true"], [data-disabled]')) || null;
+
+    // ChatGPT sometimes renders the response toolbar beside the turn rather
+    // than inside it. A wrapper containing only this turn is still a safe
+    // search boundary; main/body and multi-turn containers are not.
+    let ancestor = turn.parentElement;
+    for (let depth = 0; ancestor && depth < 4; depth += 1, ancestor = ancestor.parentElement) {
+      if (ancestor.matches('main, body, html, nav, aside, header, form')) break;
+      const containedTurns = ancestor.querySelectorAll(TURN_SELECTOR);
+      if (containedTurns.length !== 1 || containedTurns[0] !== turn) break;
+      scopes.push(ancestor);
+    }
+
+    return uniqueElements(scopes).filter((scope) => scope.isConnected && !scope.closest(`#${UI_ROOT_ID}`));
+  }
+
+  function responseActionRow(control) {
+    if (!control || !control.closest) return null;
+    const explicit = control.closest(
+      '[data-testid*="message-actions" i], [data-testid*="turn-actions" i], [data-testid*="response-actions" i], [data-testid*="response-toolbar" i]',
+    );
+    if (explicit) return explicit;
+    const group = control.closest('[role="group"]');
+    if (!group) return null;
+    return group.querySelector(
+      '[data-testid*="copy" i], [data-testid*="feedback" i], [data-testid*="good-response" i], [data-testid*="bad-response" i], [aria-label^="Copy" i], [aria-label*="Read aloud" i]',
+    ) ? group : null;
+  }
+
+  function moreControlScore(control, scopes, messageIds) {
+    if (!actionControlIsUsable(control)) return -1;
+    const testId = lowerText(control.getAttribute('data-testid'));
+    const label = lowerText(control.getAttribute('aria-label'));
+    const title = lowerText(control.getAttribute('title'));
+    const text = normalizeText(control.textContent);
+    const iconTestIds = [...control.querySelectorAll('[data-testid]')]
+      .map((node) => lowerText(node.getAttribute('data-testid')))
+      .join(' ');
+    const ownerId = normalizeText((control.closest('[data-message-id]') || control).getAttribute('data-message-id'));
+    const scoped = scopes.some((scope) => scope === control || scope.contains(control));
+    const linked = Boolean(ownerId && messageIds.has(ownerId));
+    const exactPattern = /^(?:more|more actions|more options|message actions|response actions)$/u;
+    const exactLabel = exactPattern.test(label) || exactPattern.test(title);
+    const strongTestId = /(?:more[-_ ]?turn|turn[-_ ]?actions[-_ ]?(?:menu|more|overflow)|message[-_ ]?actions[-_ ]?(?:menu|more|overflow)|response[-_ ]?actions[-_ ]?(?:menu|more|overflow))/u.test(testId);
+    const genericOverflowTestId = /(?:^|[-_ ])(?:overflow|ellipsis)(?:$|[-_ ])/u.test(testId);
+    const ellipsisIcon = /(?:ellipsis|overflow|more[-_ ]?(?:horizontal|vertical)?)/u.test(iconTestIds);
+    const ellipsisText = /^(?:\.\.\.|…|⋯)$/u.test(text);
+    const menuTrigger = lowerText(control.getAttribute('aria-haspopup')) === 'menu';
+    const actionRow = responseActionRow(control);
+
+    if (!scoped && !linked) return -1;
+    if (!strongTestId && !actionRow) return -1;
+    if (!exactLabel && !strongTestId && !(actionRow && (genericOverflowTestId || ellipsisIcon || ellipsisText || menuTrigger))) return -1;
+    if (/(?:copy|share|feedback|good-response|bad-response|read-aloud|regenerate|edit|send)/u.test(testId) ||
+      /^(?:copy|share|good response|bad response|read aloud|regenerate|edit|send)$/u.test(label)) return -1;
+
+    let score = 0;
+    if (linked) score += 100;
+    if (scoped) score += 60;
+    if (exactLabel) score += 50;
+    if (strongTestId) score += 45;
+    if (actionRow && genericOverflowTestId) score += 35;
+    if (actionRow && ellipsisIcon) score += 35;
+    if (actionRow && menuTrigger) score += 20;
+    if (actionRow && ellipsisText) score += 15;
+    return score;
+  }
+
+  function findMoreButton(turn, suppliedScopes = null, suppliedMessageIds = null) {
+    if (!turn || !turn.ownerDocument) return null;
+    const scopes = suppliedScopes || responseActionScopes(turn);
+    const messageIds = suppliedMessageIds || turnMessageIds(turn);
+    const selector = [
+      'button',
+      '[role="button"]',
+      '[tabindex][aria-haspopup="menu"]',
+    ].join(', ');
+    const candidates = uniqueElements([
+      ...scopes.flatMap((scope) => collectMatches(scope, selector)),
+    ]).map((control, index) => ({
+      control,
+      index,
+      score: moreControlScore(control, scopes, messageIds),
+    })).filter(({ control, score }) => score >= 45 && isMountedAndNotHidden(control));
+    if (!candidates.length) return null;
+    candidates.sort((left, right) => right.score - left.score || right.index - left.index);
+    if (candidates[1] && candidates[1].score === candidates[0].score) return null;
+    return candidates[0].control;
   }
 
   function isBranchLabel(value) {
@@ -1676,6 +1842,26 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return distinct.length === 1 ? distinct[0] : null;
   }
 
+  function findDirectBranchAction(turn, suppliedScopes = null) {
+    if (!turn) return null;
+    const scopes = suppliedScopes || responseActionScopes(turn);
+    const matches = uniqueElements(scopes.flatMap((scope) => [
+      ...collectMatches(scope, '[aria-label*="branch" i], [title*="branch" i], [data-testid*="branch" i], button, [role="button"], a'),
+    ])).filter((candidate) => {
+      const testId = lowerText(candidate.getAttribute('data-testid'));
+      const nativeBranchId = /(?:branch.*(?:turn|message|response).*action|(?:turn|message|response).*branch.*action)/u.test(testId);
+      return actionControlIsUsable(candidate) && isMountedAndNotHidden(candidate) &&
+        (nativeBranchId || responseActionRow(candidate)) && isBranchLabel(accessibleText(candidate));
+    });
+    const distinct = matches.filter((candidate) => !matches.some((other) => other !== candidate && candidate.contains(other)));
+    return distinct.length === 1 ? distinct[0] : null;
+  }
+
+  function clearBranchTargetMarks(doc) {
+    if (!doc) return;
+    for (const target of doc.querySelectorAll('.cgs-branch-target')) target.classList.remove('cgs-branch-target');
+  }
+
   function waitForCondition(test, options = {}) {
     const root = options.root;
     const win = options.win || global;
@@ -1685,12 +1871,14 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       let observer = null;
       let timeoutTimer = null;
       let checkTimer = null;
+      let pollTimer = null;
       const finish = (value) => {
         if (settled) return;
         settled = true;
         if (observer) observer.disconnect();
         if (timeoutTimer) win.clearTimeout(timeoutTimer);
         if (checkTimer) win.clearTimeout(checkTimer);
+        if (pollTimer) win.clearInterval(pollTimer);
         resolve(value || null);
       };
       const check = () => {
@@ -1717,6 +1905,10 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           attributes: options.attributes === true,
           characterData: options.characterData === true,
         });
+      }
+      if (options.pollInterval) {
+        const interval = clampInteger(options.pollInterval, 125, 50, 2_000);
+        pollTimer = win.setInterval(check, interval);
       }
       timeoutTimer = win.setTimeout(() => {
         check();
@@ -1816,7 +2008,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
   }
 
   function dispatchHover(turn, win) {
-    for (const type of ['pointerover', 'mouseover', 'mouseenter']) {
+    if (!turn) return;
+    for (const type of ['pointerover', 'pointerenter', 'pointermove', 'mouseover', 'mouseenter', 'mousemove']) {
       try {
         turn.dispatchEvent(new win.MouseEvent(type, { bubbles: true, cancelable: true, view: win }));
       } catch (_error) {
@@ -1840,77 +2033,158 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     expectedConversation = '',
     expectedTargetFingerprint = '',
     expectedContextFingerprint = '',
+    actionTimeout = 6_000,
   ) {
+    const discoveryTimeout = clampInteger(actionTimeout, 6_000, 100, 20_000);
+    const locator = getTurnLocator(turn, doc);
     const stillExpected = () => !expectedConversation || conversationIdentity(win.location.href) === expectedConversation;
-    const targetStillExpected = () => stillExpected() && branchTargetIsStillLatest(
-      doc,
-      turn,
-      expectedTargetFingerprint,
-      expectedContextFingerprint,
-    );
+    const resolveTarget = (verifyFingerprints = false) => {
+      if (!stillExpected()) return null;
+      const candidates = uniqueElements([getLatestCompletedAssistantTurn(doc), locateTurn(doc, locator)]);
+      return candidates.find((candidate) => branchTargetIsStillLatest(
+        doc,
+        candidate,
+        verifyFingerprints ? expectedTargetFingerprint : '',
+        verifyFingerprints ? expectedContextFingerprint : '',
+      )) || null;
+    };
+    const targetStillExpected = () => Boolean(resolveTarget(true));
     if (!stillExpected()) return { ok: false, attempted: false, reason: 'The source conversation changed before branching.' };
     if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
-    try {
-      turn.scrollIntoView({ block: 'center', behavior: 'auto' });
-    } catch (_error) {
-      turn.scrollIntoView();
-    }
-    turn.classList.add('cgs-branch-target');
-    dispatchHover(turn, win);
+    let lastRevealedTurn = null;
+    let lastRevealAt = 0;
+    const revealActions = (force = false) => {
+      const liveTurn = resolveTarget(false);
+      if (!liveTurn) return null;
+      const now = Date.now();
+      const nodeChanged = liveTurn !== lastRevealedTurn;
+      if (!force && !nodeChanged && now - lastRevealAt < 750) return liveTurn;
+      if (nodeChanged) {
+        try {
+          liveTurn.scrollIntoView({ block: 'center', behavior: 'auto' });
+        } catch (_error) {
+          try { liveTurn.scrollIntoView(); } catch (_secondError) { /* A rerender can detach it between checks. */ }
+        }
+      }
+      lastRevealedTurn = liveTurn;
+      lastRevealAt = now;
+      liveTurn.classList.add('cgs-branch-target');
+      const roleNode = liveTurn.matches(ROLE_SELECTOR) ? liveTurn : liveTurn.querySelector(ROLE_SELECTOR);
+      for (const target of uniqueElements([liveTurn, roleNode])) dispatchHover(target, win);
+      const nativeAction = [...liveTurn.querySelectorAll(
+        '[data-testid*="copy" i], [aria-label^="Copy" i], [role="group"] button',
+      )].find((candidate) => actionControlIsUsable(candidate));
+      if (nativeAction && typeof nativeAction.focus === 'function') {
+        try { nativeAction.focus({ preventScroll: true }); } catch (_error) { try { nativeAction.focus(); } catch (_secondError) { /* Optional reveal only. */ } }
+      }
+      return liveTurn;
+    };
+    let liveTurn = revealActions(true);
+    if (!liveTurn) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
 
-    const visibleBranchActions = () => [...doc.querySelectorAll(
-      '[role="menuitem"], [role="option"], [data-radix-collection-item], button, a',
-    )].filter((candidate) => !candidate.closest(`#${UI_ROOT_ID}`) && isProbablyVisible(candidate) &&
-      isBranchLabel(accessibleText(candidate)));
-    if (visibleBranchActions().length) {
+    let actionScopes = responseActionScopes(liveTurn);
+    const directBranch = findDirectBranchAction(liveTurn, actionScopes);
+    if (directBranch) {
+      if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+      try {
+        directBranch.click();
+        clearBranchTargetMarks(doc);
+        return { ok: true, attempted: true };
+      } catch (_error) {
+        return { ok: false, attempted: true, reason: 'ChatGPT did not confirm whether the automatic branch action was accepted.' };
+      }
+    }
+
+    const mountedMenuRoots = () => [...doc.querySelectorAll(
+      '[data-radix-popper-content-wrapper], [data-radix-menu-content], [data-slot="dropdown-menu-content"], [role="menu"]',
+    )].filter((root) => isMountedAndNotHidden(root));
+    const openMenuBranchActions = () => uniqueElements(mountedMenuRoots()
+      .map((root) => findBranchAction(root)).filter(Boolean));
+    if (openMenuBranchActions().length) {
       try {
         doc.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       } catch (_error) {
         // The visibility check below still fails closed.
       }
-      const closed = await waitForCondition(() => visibleBranchActions().length === 0, {
+      const closed = await waitForCondition(() => openMenuBranchActions().length === 0, {
         root: doc.documentElement,
         win,
         timeout: 1_000,
         attributes: true,
       });
-      if (!closed) return { ok: false, attempted: false, reason: 'Close the open response menu and try again.' };
+      if (!closed) return { ok: false, attempted: false, fallback: true, reason: 'ChatGPT’s open response menu could not be reused.' };
       if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
     }
+    const menuRootsBeforeOpen = new Set(mountedMenuRoots());
 
-    let moreButton = findMoreButton(turn);
+    let moreButton = findMoreButton(liveTurn, actionScopes, turnMessageIds(liveTurn));
     if (!moreButton) {
-      moreButton = await waitForCondition(() => findMoreButton(turn), {
-        root: turn,
+      moreButton = await waitForCondition(() => {
+        liveTurn = revealActions();
+        if (!liveTurn) return null;
+        actionScopes = responseActionScopes(liveTurn);
+        const direct = findDirectBranchAction(liveTurn, actionScopes);
+        if (direct) return { kind: 'branch', control: direct };
+        const more = findMoreButton(liveTurn, actionScopes, turnMessageIds(liveTurn));
+        return more ? { kind: 'more', control: more } : null;
+      }, {
+        root: doc.documentElement,
         win,
-        timeout: 3_000,
+        timeout: discoveryTimeout,
         attributes: true,
+        pollInterval: 250,
       });
+      if (moreButton && moreButton.kind === 'branch') {
+        if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+        try {
+          moreButton.control.click();
+          clearBranchTargetMarks(doc);
+          return { ok: true, attempted: true };
+        } catch (_error) {
+          return { ok: false, attempted: true, reason: 'ChatGPT did not confirm whether the automatic branch action was accepted.' };
+        }
+      }
+      moreButton = moreButton && moreButton.control;
     }
-    if (!moreButton) return { ok: false, attempted: false, reason: 'Could not find More actions on the response.' };
+    if (!moreButton) return { ok: false, attempted: false, fallback: true, reason: 'ChatGPT’s response actions were unavailable.' };
     if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
     try {
       moreButton.click();
     } catch (_error) {
-      return { ok: false, attempted: false, reason: 'ChatGPT did not open the response menu.' };
+      return { ok: false, attempted: false, fallback: true, reason: 'ChatGPT did not open the response menu.' };
     }
 
-    const controlledId = normalizeText(moreButton.getAttribute('aria-controls'));
-    const controlledMenu = controlledId ? doc.getElementById(controlledId) : null;
-
     const branchAction = await waitForCondition(
-      () => stillExpected() && findBranchAction(controlledMenu && controlledMenu.isConnected ? controlledMenu : doc), {
-      root: controlledMenu || doc.documentElement,
+      () => {
+        if (!stillExpected()) return null;
+        const controlledId = normalizeText(moreButton.getAttribute('aria-controls'));
+        const controlledMenu = controlledId ? doc.getElementById(controlledId) : null;
+        if (controlledMenu && controlledMenu.isConnected) return findBranchAction(controlledMenu);
+        const triggerId = normalizeText(moreButton.id);
+        const menuRoots = mountedMenuRoots();
+        const linkedRoots = triggerId ? menuRoots.filter((candidate) =>
+          normalizeText(candidate.getAttribute('aria-labelledby')).split(/\s+/u).includes(triggerId)) : [];
+        const newlyOpenedRoots = menuRoots.filter((candidate) => !menuRootsBeforeOpen.has(candidate));
+        const triggerStateIsExposed = moreButton.hasAttribute('aria-expanded') || moreButton.hasAttribute('data-state');
+        const triggerIsOpen = moreButton.getAttribute('aria-expanded') === 'true' || moreButton.getAttribute('data-state') === 'open';
+        const roots = linkedRoots.length ? linkedRoots : (!triggerStateIsExposed || triggerIsOpen ? newlyOpenedRoots : []);
+        const menuActions = uniqueElements(roots.map((candidate) => findBranchAction(candidate)).filter(Boolean));
+        return menuActions.length === 1 ? menuActions[0] : null;
+      }, {
+      root: doc.documentElement,
       win,
-      timeout: 4_000,
+      timeout: Math.max(1_000, Math.min(5_000, discoveryTimeout)),
+      attributes: true,
+      pollInterval: 125,
     });
-    if (!branchAction) return { ok: false, attempted: false, reason: 'Could not find “Branch in new chat” in ChatGPT’s menu.' };
+    if (!branchAction) return { ok: false, attempted: false, fallback: true, reason: 'ChatGPT’s Branch action was unavailable.' };
     if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
     try {
       branchAction.click();
     } catch (_error) {
       return { ok: false, attempted: true, reason: 'ChatGPT did not confirm whether the automatic branch action was accepted.' };
     }
+    clearBranchTargetMarks(doc);
     return { ok: true, attempted: true };
   }
 
@@ -2181,6 +2455,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const routingDiscoveryTimeout = clampInteger(options.routingDiscoveryTimeout, 2_500, 50, 10_000);
     const branchNavigationTimeout = clampInteger(options.branchNavigationTimeout, 15_000, 250, 60_000);
     const branchComposerTimeout = clampInteger(options.branchComposerTimeout, 20_000, 250, 60_000);
+    const branchActionTimeout = clampInteger(options.branchActionTimeout, 6_000, 100, 20_000);
     const sideSendAckTimeout = clampInteger(options.sideSendAckTimeout, 8_000, 250, 60_000);
     const state = {
       pageInstanceId: isValidJobId(options.pageInstanceId) ? String(options.pageInstanceId) : createJobId(),
@@ -2559,8 +2834,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       return true;
     }
 
-    function replayNativeSend(snapshot, decision, selectedLevel, manual = false, reason = '') {
-      const validation = validateSendSnapshot(snapshot);
+    async function replayNativeSend(snapshot, decision, selectedLevel, manual = false, reason = '') {
+      let validation = validateSendSnapshot(snapshot);
       if (!validation.ok) {
         toast(`${validation.reason} Review it and press Send again.`, 7_000);
         return false;
@@ -2575,6 +2850,22 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           toast('ChatGPT’s Send control is not ready. Your draft was not sent.', 7_000);
           return false;
         }
+        if (typeof snapshot.beforeReplay === 'function') {
+          const ready = await snapshot.beforeReplay({ composer: validation.composer, sendButton });
+          if (!ready) return false;
+          validation = validateSendSnapshot(snapshot);
+          if (!validation.ok) {
+            toast(`${validation.reason} Review it and press Send again.`, 7_000);
+            return false;
+          }
+          const currentSendButton = findSendButton(doc, validation.composer);
+          if (!currentSendButton || currentSendButton.disabled || currentSendButton.getAttribute('aria-disabled') === 'true') return false;
+          armSubmitReplayPermit(validation.composer, 'adaptive-replay');
+          state.replayingSend = true;
+          try { currentSendButton.click(); } finally { state.replayingSend = false; }
+          rememberRoute(selectedLevel, decision, manual, reason);
+          return true;
+        }
         armSubmitReplayPermit(validation.composer, 'adaptive-replay');
         state.replayingSend = true;
         try { sendButton.click(); } finally { state.replayingSend = false; }
@@ -2583,9 +2874,17 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       }
       const form = validation.composer.closest('form');
       if (form && typeof form.requestSubmit === 'function') {
+        if (typeof snapshot.beforeReplay === 'function') {
+          const ready = await snapshot.beforeReplay({ composer: validation.composer, form });
+          if (!ready) return false;
+          validation = validateSendSnapshot(snapshot);
+          if (!validation.ok) return false;
+        }
+        const currentForm = validation.composer.closest('form');
+        if (!currentForm || !currentForm.isConnected || typeof currentForm.requestSubmit !== 'function') return false;
         armSubmitReplayPermit(validation.composer, 'adaptive-replay');
         state.replayingSend = true;
-        try { form.requestSubmit(); } catch (_error) { return false; } finally { state.replayingSend = false; }
+        try { currentForm.requestSubmit(); } catch (_error) { return false; } finally { state.replayingSend = false; }
         rememberRoute(selectedLevel, decision, manual, reason);
         return true;
       }
@@ -3158,10 +3457,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       const composer = options.composer && options.composer.isConnected ? options.composer : findComposer(doc);
       const snapshot = captureSendSnapshot(composer);
       if (!snapshot) return false;
+      snapshot.beforeReplay = typeof options.beforeReplay === 'function' ? options.beforeReplay : null;
       state.adaptiveCancelled = false;
 
       const task = Promise.resolve().then(async () => {
-        const explicitDecision = classifyPrompt(snapshot.draft, {
+        const explicitDecision = classifyPrompt(options.routingText == null ? snapshot.draft : options.routingText, {
           previousLevel: previousRouteLevel(),
           attachmentCount: snapshot.attachmentCount,
         });
@@ -3685,6 +3985,243 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         conversationIdentity(win.location.href) === expectedConversation);
     }
 
+    function isBlankFallbackDestination(job) {
+      if (!job || !job.fallbackMode || !job.fallbackTranscript || !job.branchReloadFrom ||
+        job.branchReloadFrom === state.pageInstanceId || conversationIdentity(win.location.href) ||
+        getTurns(doc).length || hasActiveGeneration(doc)) return false;
+      try {
+        const current = new URL(String(win.location.href));
+        const currentJobId = parseJobId(current.href);
+        const launchWasCaptured = state.initialJobId === state.incomingJobId;
+        const jobIsBound = currentJobId === state.incomingJobId || !currentJobId && launchWasCaptured;
+        return isAllowedChatGPTUrl(current.href) && current.pathname === '/' && jobIsBound;
+      } catch (_error) {
+        return false;
+      }
+    }
+
+    async function beginTranscriptFallback(job, turn) {
+      if (!state.incomingJobId) {
+        return { ok: false, reason: 'The separate-chat transfer was unavailable, so nothing was sent.' };
+      }
+      const resolveFallbackTurn = () => uniqueElements([
+        getLatestCompletedAssistantTurn(doc),
+        locateTurn(doc, job.locator),
+        turn,
+      ]).find((candidate) => branchTargetIsStillLatest(
+        doc,
+        candidate,
+        job.targetFingerprint,
+        job.contextFingerprint,
+      )) || null;
+      const liveTurn = resolveFallbackTurn();
+      if (conversationIdentity(win.location.href) !== job.sourceConversation || !liveTurn) {
+        return { ok: false, reason: 'The source chat changed before a separate chat could be prepared. Nothing was sent.' };
+      }
+      const transcript = serializeConversation(doc, liveTurn);
+      if (!transcript) {
+        return { ok: false, reason: 'The conversation could not be copied into a separate chat. Nothing was sent.' };
+      }
+
+      state.branchClickAttempted = false;
+      state.branchConversation = '';
+      state.sideSendAttempted = false;
+      job.branchClickAttempted = false;
+      job.branchConversation = '';
+      job.branchReloadFrom = state.pageInstanceId;
+      job.fallbackMode = true;
+      job.fallbackTranscript = transcript;
+      job.questionInserted = false;
+      job.baselineUserCount = -1;
+      job.sendAttempted = false;
+      if (!await persistIncomingJob(job)) {
+        return { ok: false, reason: 'Workflow Toolkit could not save the separate-chat transfer. Nothing was sent.' };
+      }
+
+      const verifiedTurn = resolveFallbackTurn();
+      if (conversationIdentity(win.location.href) !== job.sourceConversation || !verifiedTurn) {
+        job.fallbackMode = false;
+        job.fallbackTranscript = '';
+        job.branchReloadFrom = '';
+        await persistIncomingJob(job);
+        return { ok: false, reason: 'The source chat changed before the separate chat opened. Nothing was sent.' };
+      }
+
+      const targetUrl = urlWithNewChatJob(job.sourceUrl, state.incomingJobId);
+      if (!targetUrl) {
+        job.fallbackMode = false;
+        job.fallbackTranscript = '';
+        job.branchReloadFrom = '';
+        await persistIncomingJob(job);
+        return { ok: false, reason: 'Workflow Toolkit could not prepare the separate-chat address. Nothing was sent.' };
+      }
+      try {
+        clearBranchTargetMarks(doc);
+        const navigated = await Promise.resolve(navigateCurrent(targetUrl));
+        if (navigated === false) throw new Error('navigation rejected');
+      } catch (_error) {
+        job.fallbackMode = false;
+        job.fallbackTranscript = '';
+        job.branchReloadFrom = '';
+        await persistIncomingJob(job);
+        return { ok: false, reason: 'The separate chat could not be opened. Nothing was sent.' };
+      }
+      toast('Opening and sending your question with the conversation context…');
+      return { ok: true };
+    }
+
+    async function waitForFallbackSendAcknowledgement(job, baselineUserCount) {
+      const marker = normalizeText(`[Workflow Toolkit transfer ${state.incomingJobId}]`);
+      return waitForCondition(() => {
+        const currentConversation = conversationIdentity(win.location.href);
+        if (currentConversation === job.sourceConversation ||
+          job.branchConversation && currentConversation && currentConversation !== job.branchConversation) {
+          return { status: 'drift' };
+        }
+        const userTurns = getTurns(doc).filter((candidate) => roleOfTurn(candidate) === 'user');
+        const matchingSentTurn = marker && userTurns.slice(baselineUserCount).some((candidate) =>
+          normalizeText(readableNodeText(candidate)).includes(marker));
+        if (currentConversation && currentConversation !== job.sourceConversation && matchingSentTurn) {
+          return { status: 'sent', conversation: currentConversation };
+        }
+        return null;
+      }, {
+        root: doc.documentElement,
+        win,
+        timeout: sideSendAckTimeout,
+        attributes: true,
+        characterData: true,
+        pollInterval: 125,
+      });
+    }
+
+    async function finishObservedFallbackSend(job, baselineUserCount) {
+      const acknowledgement = await waitForFallbackSendAcknowledgement(job, baselineUserCount);
+      if (!acknowledgement || acknowledgement.status !== 'sent') {
+        showRecovery(
+          job,
+          acknowledgement && acknowledgement.status === 'drift'
+            ? 'The chat changed after the automatic Send step. Check this window before doing anything else.'
+            : 'ChatGPT did not show the question as a sent message. To prevent a duplicate, Workflow Toolkit stopped.',
+          null,
+          { canRetry: false },
+        );
+        return false;
+      }
+      state.branchConversation = acknowledgement.conversation;
+      job.branchConversation = acknowledgement.conversation;
+      await persistIncomingJob(job);
+      toast('Side question sent in the separate chat.');
+      return true;
+    }
+
+    async function runTranscriptFallbackJob(job) {
+      const baselineUserCount = job.baselineUserCount >= 0 ? job.baselineUserCount : 0;
+      if (state.sideSendAttempted || job.sendAttempted) {
+        return finishObservedFallbackSend(job, baselineUserCount);
+      }
+      if (!state.incomingJobId || !job.branchReloadFrom || job.branchReloadFrom === state.pageInstanceId) {
+        showRecovery(job, 'The new-chat transfer could not be verified, so the message box was left untouched.', null, { canRetry: false });
+        return false;
+      }
+
+      let composer = await waitForCondition(() => isBlankFallbackDestination(job) && findComposer(doc), {
+        root: doc.documentElement,
+        win,
+        timeout: branchComposerTimeout,
+        attributes: true,
+        characterData: true,
+        pollInterval: 125,
+      });
+      if (!composer || !isBlankFallbackDestination(job)) {
+        showRecovery(job, 'A blank new chat could not be verified, so nothing was inserted or sent.', null, { canRetry: false });
+        return false;
+      }
+      const prompt = buildSideFallbackPrompt(job.fallbackTranscript, job.question, job.kind, state.incomingJobId);
+      if (!prompt) {
+        showRecovery(job, 'The saved conversation context was unavailable, so nothing was inserted or sent.', null, { canRetry: false });
+        return false;
+      }
+      if (attachmentState(composer).count) {
+        showRecovery(job, 'The new chat already has an attachment. Workflow Toolkit left it untouched.', null, { canRetry: false });
+        return false;
+      }
+      const existingDraft = getComposerText(composer).trim();
+      if (existingDraft && !composerTextEquals(composer, prompt)) {
+        showRecovery(job, 'The new chat already has a different draft. Workflow Toolkit left it untouched.', null, { canRetry: false });
+        return false;
+      }
+
+      if (!job.questionInserted) {
+        job.questionInserted = true;
+        job.baselineUserCount = baselineUserCount;
+        if (!await persistIncomingJob(job) || !isBlankFallbackDestination(job)) {
+          showRecovery(job, 'The side question could not be staged safely. Nothing was sent.', null, { canRetry: false });
+          return false;
+        }
+      }
+      if (!existingDraft && !setComposerText(composer, prompt, win, SIDE_FALLBACK_PROMPT_MAX_LENGTH)) {
+        showRecovery(job, 'ChatGPT did not accept the transferred conversation and question.', null);
+        return false;
+      }
+      await new Promise((resolve) => win.setTimeout(resolve, 250));
+      composer = findComposer(doc);
+      if (!isBlankFallbackDestination(job) || !composer || !composerTextEquals(composer, prompt) ||
+        attachmentState(composer).count) {
+        showRecovery(job, 'The new chat changed before the question could be sent. Nothing was sent.', null, { canRetry: false });
+        return false;
+      }
+      if (!job.autoSend) {
+        composer.focus();
+        toast('Separate chat ready — review the transferred context and press Send.');
+        return true;
+      }
+      const sendButton = await waitForCondition(() => {
+        if (!isBlankFallbackDestination(job)) return null;
+        const currentComposer = findComposer(doc);
+        const button = currentComposer && composerTextEquals(currentComposer, prompt) && findSendButton(doc, currentComposer);
+        return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
+      }, {
+        root: composerScope(composer) || doc.documentElement,
+        win,
+        timeout: 5_000,
+        attributes: true,
+        pollInterval: 125,
+      });
+      if (!sendButton || !isBlankFallbackDestination(job)) {
+        showRecovery(job, 'The new chat opened, but its Send button did not become ready.', null);
+        return false;
+      }
+      let sendIntentPersisted = false;
+      const sent = await smartRouteAndSend({
+        composer,
+        silent: true,
+        routingText: job.question,
+        beforeReplay: async () => {
+          const currentComposer = findComposer(doc);
+          const currentSendButton = currentComposer && findSendButton(doc, currentComposer);
+          if (!isBlankFallbackDestination(job) || !currentComposer || !composerTextEquals(currentComposer, prompt) ||
+            attachmentState(currentComposer).count || !currentSendButton || currentSendButton.disabled ||
+            currentSendButton.getAttribute('aria-disabled') === 'true') return false;
+          if (!await markSideSendAttempted(job)) return false;
+          sendIntentPersisted = true;
+          return true;
+        },
+      });
+      if (!sent) {
+        showRecovery(
+          job,
+          sendIntentPersisted
+            ? 'Adaptive Auto could not safely finish after the Send step was saved. To prevent a duplicate, Workflow Toolkit will not retry it.'
+            : 'Adaptive Auto could not prepare this message. Nothing was sent; you can try the automatic step again.',
+          null,
+          { canRetry: !sendIntentPersisted },
+        );
+        return false;
+      }
+      return finishObservedFallbackSend(job, baselineUserCount);
+    }
+
     async function waitForSideSendAcknowledgement(job, expectedConversation, baselineUserCount) {
       return waitForCondition(() => {
         if (!isExpectedBranchConversation(job, expectedConversation)) return { status: 'drift' };
@@ -3880,7 +4417,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
 
     function closeRecovery() {
       element('#cgs-recovery-backdrop').hidden = true;
-      if (state.recoveryTurn) state.recoveryTurn.classList.remove('cgs-branch-target');
+      clearBranchTargetMarks(doc);
       state.recoveryJob = null;
       state.recoveryTurn = null;
     }
@@ -3927,6 +4464,17 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       state.branchClickAttempted = state.branchClickAttempted || job.branchClickAttempted;
       state.branchConversation = state.branchConversation || job.branchConversation;
       state.sideSendAttempted = state.sideSendAttempted || job.sendAttempted;
+      if (job.fallbackMode) {
+        state.sideAutomationActive = true;
+        let completed;
+        try {
+          completed = await runTranscriptFallbackJob(job);
+        } finally {
+          state.sideAutomationActive = false;
+        }
+        if (completed) await finishIncomingJob();
+        return completed;
+      }
       let currentConversation = conversationIdentity(win.location.href);
       if (!state.branchConversation && state.branchClickAttempted && currentConversation && currentConversation !== job.sourceConversation) {
         state.branchConversation = currentConversation;
@@ -3997,8 +4545,15 @@ The request should sound natural, for example: “Okay, let’s continue here. I
             job.sourceConversation,
             job.targetFingerprint,
             job.contextFingerprint,
+            branchActionTimeout,
           );
           if (!clickResult.ok) {
+            if (clickResult.fallback && !clickResult.attempted) {
+              const fallbackResult = await beginTranscriptFallback(job, turn);
+              if (fallbackResult.ok) return false;
+              showRecovery(job, fallbackResult.reason, turn, { canRetry: false });
+              return false;
+            }
             if (!clickResult.attempted) {
               state.branchClickAttempted = false;
               job.branchClickAttempted = false;
@@ -4022,7 +4577,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
           showRecovery(job, 'The separate chat opened, but Workflow Toolkit could not save its verified identity. Nothing was sent.', state.recoveryTurn, { canRetry: false });
           return false;
         }
-        if (state.recoveryTurn) state.recoveryTurn.classList.remove('cgs-branch-target');
+        clearBranchTargetMarks(doc);
         state.recoveryTurn = null;
         currentConversation = changedConversation;
         resumingConfirmedBranch = true;
@@ -4123,7 +4678,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         if (messages.unsupported !== '') {
           toast(messages.unsupported || 'This browser cannot safely lock the separate-chat handoff, so Workflow Toolkit did not send anything.', 8_000);
         }
-        return { acquired: false, value: false };
+        return { acquired: false, value: false, reason: 'unsupported' };
       }
       try {
         return await lockManager.request(
@@ -4134,23 +4689,23 @@ The request should sound natural, for example: “Okay, let’s continue here. I
               if (messages.busy !== '') {
                 toast(messages.busy || 'This side question is already opening in another window. Nothing was sent here.', 7_000);
               }
-              return { acquired: false, value: false };
+              return { acquired: false, value: false, reason: 'busy' };
             }
-            return { acquired: true, value: await task() };
+            return { acquired: true, value: await task(), reason: '' };
           },
         );
       } catch (_error) {
         if (messages.error !== '') {
           toast(messages.error || 'Workflow Toolkit could not safely lock this separate-chat handoff. Nothing was sent.', 8_000);
         }
-        return { acquired: false, value: false };
+        return { acquired: false, value: false, reason: 'error' };
       }
     }
 
     async function consumeIncomingJob(capturedJobId = '') {
       const jobId = isValidJobId(capturedJobId) ? capturedJobId : parseJobId(win.location.href);
       if (!jobId) return;
-      const outcome = await withIncomingJobLock(jobId, async () => {
+      const consumeLockedJob = async () => {
         // Read only after acquiring the lock so a second page cannot run a
         // stale copy after the first page advances or completes the job.
         const raw = await storageGet(`${JOB_PREFIX}${jobId}`, null);
@@ -4166,8 +4721,22 @@ The request should sound natural, for example: “Okay, let’s continue here. I
         state.branchConversation = job.branchConversation;
         state.sideSendAttempted = job.sendAttempted;
         return runIncomingJob(job);
-      });
-      return outcome.value;
+      };
+      let blankRootLaunch = false;
+      try {
+        blankRootLaunch = !conversationIdentity(win.location.href) && new URL(String(win.location.href)).pathname === '/';
+      } catch (_error) {
+        blankRootLaunch = false;
+      }
+      const attempts = blankRootLaunch ? 12 : 1;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const outcome = await withIncomingJobLock(jobId, consumeLockedJob, {
+          busy: attempt === attempts - 1 ? undefined : '',
+        });
+        if (outcome.acquired || outcome.reason !== 'busy') return outcome.value;
+        await new Promise((resolve) => win.setTimeout(resolve, 125));
+      }
+      return false;
     }
 
     async function retryIncomingJob() {
@@ -4576,6 +5145,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     JOB_MAX_AGE_MS,
     FRESH_HANDOFF_MAX_AGE_MS,
     FRESH_HANDOFF_MAX_LENGTH,
+    SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH,
     SELECTED_QUOTE_MAX_LENGTH,
     normalizeText,
     sanitizeSettings,
@@ -4596,6 +5166,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     extractAssistantHandoff,
     assistantTurnFingerprint,
     conversationContextFingerprint,
+    serializeConversation,
+    buildSideFallbackPrompt,
     cleanStartWriting,
     restoreStartWriting,
     canonicalPageUrl,
@@ -4606,6 +5178,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     isValidJobId,
     freshHandoffStorageKey,
     urlWithJob,
+    urlWithNewChatJob,
     parseJobId,
     urlWithFreshLaunch,
     parseFreshJobId,

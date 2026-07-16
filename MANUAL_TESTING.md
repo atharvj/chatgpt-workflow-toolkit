@@ -74,9 +74,10 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 
 ## Failure recovery
 
-- Temporarily change `isBranchLabel` locally so it cannot match the menu.
-- Start a side question and confirm the popup preserves the question, offers only **Close** and **Try again**, and never asks you to branch manually.
-- Change only the source URL query string during this failure and confirm Workflow Toolkit does not treat it as a new chat or insert the question.
+- Temporarily change `findMoreButton` and `findDirectBranchAction` locally so both return `null`.
+- Start a side question and confirm the side window automatically switches to a blank chat, transfers the visible conversation transcript, and sends the question once.
+- Confirm the original chat receives no draft or message and no “Could not find More actions” dialog appears.
+- Confirm a long chat keeps its opening goal and newest response if the emergency transcript must be shortened.
 - Block popups for `chatgpt.com`; confirm Workflow Toolkit reports the block and the original chat remains untouched.
 
 ## Performance
