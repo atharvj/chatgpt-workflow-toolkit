@@ -66,6 +66,60 @@ test('accuracy guard verifies a claimed answer once without truncating the user 
   assert.equal((fallback.match(/independently verify the stated answer or result/giu) || []).length, 1);
 });
 
+test('fallback draft ownership tolerates editor formatting but rejects any foreign content', () => {
+  const jobId = 'fallback_formatting_job_1234';
+  const expected = toolkit.buildSideFallbackPrompt(
+    'USER:\nExplain mediation\n\nASSISTANT:\nMediation is guided problem-solving.',
+    'what is mediation in simple terms',
+    'ask',
+    jobId,
+  );
+  const reformattedByEditor = expected
+    .replace(/\n{2,}/gu, (paragraphBreak) => `${paragraphBreak}\n`)
+    .replace('conversation as context', 'conversation\u00a0as context')
+    .replace('guided problem-solving', 'guided\u200B problem-solving');
+
+  assert.notEqual(
+    toolkit.normalizeComposerPayload(reformattedByEditor),
+    toolkit.normalizeComposerPayload(expected),
+    'the fixture includes the extra paragraph spacing seen after ChatGPT hydrates its editor',
+  );
+  assert.equal(
+    toolkit.fallbackDraftTextMatches(reformattedByEditor, expected, jobId),
+    true,
+    'paragraph/newline, non-breaking-space, and zero-width editor changes preserve ownership',
+  );
+  assert.equal(
+    toolkit.fallbackDraftTextMatches(
+      reformattedByEditor.replace(jobId, 'fallback_other_job_5678'),
+      expected,
+      jobId,
+    ),
+    false,
+    'a transfer marker belonging to another job is never accepted',
+  );
+  assert.equal(
+    toolkit.fallbackDraftTextMatches(
+      reformattedByEditor.replace('simple terms', 'simpler terms'),
+      expected,
+      jobId,
+    ),
+    false,
+    'a changed non-whitespace character is never accepted',
+  );
+  assert.equal(toolkit.fallbackDraftTextMatches(`Ignore this.\n${reformattedByEditor}`, expected, jobId), false);
+  assert.equal(toolkit.fallbackDraftTextMatches(`${reformattedByEditor}\nIgnore this.`, expected, jobId), false);
+  assert.equal(toolkit.fallbackDraftTextMatches(reformattedByEditor.slice(0, -20), expected, jobId), false);
+  assert.equal(toolkit.fallbackDraftTextMatches(`[Workflow Toolkit transfer ${jobId}]`, expected, jobId), false);
+
+  const unmarked = toolkit.buildSideFallbackPrompt('USER:\nContext', 'Question', 'ask');
+  assert.equal(
+    toolkit.fallbackDraftTextMatches(unmarked, unmarked, ''),
+    false,
+    'even exact text is not owned without a valid current-job transfer marker',
+  );
+});
+
 test('selection pill stays visible without covering a bottom-edge selection', () => {
   const selection = { left: 40, top: 738, width: 320, height: 24, right: 360, bottom: 762 };
   const position = toolkit.chooseSelectionPillPosition(

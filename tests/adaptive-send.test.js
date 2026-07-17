@@ -337,6 +337,90 @@ test('simple prompt switches High to Instant and replays Send exactly once', asy
   assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
 });
 
+test('fallback-owned draft may be reformatted while its model menu opens and still sends once', async (t) => {
+  const jobId = 'fallback_route_hydration_job_1234';
+  const expected = toolkit.buildSideFallbackPrompt(
+    'USER:\nWhat is mediation?\n\nASSISTANT:\nMediation helps resolve disagreements.',
+    'what is mediation in simple terms',
+    'ask',
+    jobId,
+  );
+  const initiallyHydrated = expected.replace(/\n{2,}/gu, (breaks) => `${breaks}\n`);
+  const harness = await createHarness({ prompt: initiallyHydrated, pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+
+  harness.picker.addEventListener('click', () => {
+    harness.composer.value = expected.replace(/\n/gu, '\n\n');
+  }, { once: true });
+
+  const sent = await harness.app.smartRouteAndSend({
+    composer: harness.composer,
+    routingText: 'what is mediation in simple terms',
+    silent: true,
+    draftValidator: (composer) => toolkit.fallbackDraftTextMatches(composer.value, expected, jobId),
+  });
+
+  assert.equal(sent, true);
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.picker.textContent, 'Instant');
+});
+
+test('fallback-owned composer remount after persistence refreshes the send snapshot', async (t) => {
+  const jobId = 'fallback_persist_remount_job_1234';
+  const expected = toolkit.buildSideFallbackPrompt(
+    'USER:\nQuestion\n\nASSISTANT:\nAnswer',
+    'explain that answer simply',
+    'ask',
+    jobId,
+  );
+  const harness = await createHarness({ prompt: expected, pickerLevel: 'Instant' });
+  t.after(() => harness.cleanup());
+
+  const sent = await harness.app.smartRouteAndSend({
+    composer: harness.composer,
+    routingText: 'explain that answer simply',
+    silent: true,
+    draftValidator: (composer) => toolkit.fallbackDraftTextMatches(composer.value, expected, jobId),
+    beforeReplay: async () => {
+      const replacement = harness.document.createElement('textarea');
+      replacement.id = 'prompt-textarea';
+      replacement.value = expected.replace(/\n/gu, '\n\n');
+      harness.composer.replaceWith(replacement);
+      return { refreshSnapshot: true, composer: replacement };
+    },
+  });
+
+  assert.equal(sent, true);
+  assert.equal(harness.counters.sends, 1);
+});
+
+test('fallback-owned formatting change does not block the delayed native submit permit', async (t) => {
+  const jobId = 'fallback_delayed_submit_job_1234';
+  const expected = toolkit.buildSideFallbackPrompt('USER:\nQuestion', 'answer simply', 'ask', jobId);
+  const harness = await createHarness({
+    prompt: expected,
+    pickerLevel: 'Instant',
+    delayedSubmitAfterClick: 15,
+  });
+  t.after(() => harness.cleanup());
+  harness.sendButton.addEventListener('click', () => {
+    harness.composer.value = expected.replace(/\n/gu, '\n\n');
+  });
+
+  const sent = await harness.app.smartRouteAndSend({
+    composer: harness.composer,
+    routingText: 'answer simply',
+    silent: true,
+    draftValidator: (composer) => toolkit.fallbackDraftTextMatches(composer.value, expected, jobId),
+  });
+  await new Promise((resolve) => harness.window.setTimeout(resolve, 45));
+
+  assert.equal(sent, true);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.counters.submits, 1);
+});
+
 test('claimed-answer challenge switches Instant to High, verifies the premise, and sends once', async (t) => {
   const prompt = "I don't get why the answer is 12V and 4V.";
   const harness = await createHarness({ prompt, pickerLevel: 'Instant' });

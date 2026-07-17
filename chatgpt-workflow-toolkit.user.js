@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.11
+// @version      1.4.12
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.11';
+  const VERSION = '1.4.12';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -925,7 +925,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
   function buildSideFallbackPrompt(transcriptValue, questionValue, kind = 'ask', transferId = '') {
     const transcript = String(transcriptValue == null ? '' : transcriptValue).replace(/\r\n?/gu, '\n').trim();
     const question = String(questionValue == null ? '' : questionValue).replace(/\r\n?/gu, '\n').trim();
-    const marker = isValidJobId(transferId) ? `[Workflow Toolkit transfer ${transferId}]` : '';
+    const marker = fallbackTransferMarker(transferId);
     if (!transcript) return '';
     const rawRequest = question || (kind === 'continue'
       ? 'Continue the conversation from where it stopped.'
@@ -1290,6 +1290,28 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     return Boolean(composer && normalizeComposerPayload(getComposerText(composer)) === normalizeComposerPayload(value));
   }
 
+  function fallbackTransferMarker(transferId) {
+    return isValidJobId(transferId) ? `[Workflow Toolkit transfer ${transferId}]` : '';
+  }
+
+  function fallbackDraftTextMatches(actualValue, expectedValue, transferId) {
+    const rawActual = String(actualValue == null ? '' : actualValue);
+    const rawExpected = String(expectedValue == null ? '' : expectedValue);
+    if (rawExpected.length > SIDE_FALLBACK_PROMPT_MAX_LENGTH ||
+      rawActual.length > SIDE_FALLBACK_PROMPT_MAX_LENGTH * 2 + 4_096) return false;
+    const actual = normalizeComposerPayload(rawActual);
+    const expected = normalizeComposerPayload(rawExpected);
+    if (!actual || !expected) return false;
+    const marker = fallbackTransferMarker(transferId);
+    if (!marker || !actual.includes(marker) || !expected.includes(marker)) return false;
+    if (actual === expected) return true;
+    const editorCanonical = (value) => value
+      .normalize('NFC')
+      .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2060\u2066-\u2069]/gu, '')
+      .replace(/\n(?:[ \t]*\n)+/gu, '\n');
+    return editorCanonical(actual) === editorCanonical(expected);
+  }
+
   function setNativeValue(element, value) {
     let prototype = element;
     while (prototype) {
@@ -1314,7 +1336,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     element.dispatchEvent(event);
   }
 
-  function setComposerText(composer, value, win, maximumLength = QUESTION_MAX_LENGTH) {
+  function setComposerText(composer, value, win, maximumLength = QUESTION_MAX_LENGTH, verifier = null) {
     if (!composer || !win) return false;
     const limit = clampInteger(maximumLength, QUESTION_MAX_LENGTH, 1, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     const text = String(value == null ? '' : value).slice(0, limit);
@@ -1342,11 +1364,14 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     } catch (_error) {
       inserted = false;
     }
-    if (!inserted || getComposerText(composer) !== text) {
+    const insertedTextIsValid = inserted && (typeof verifier === 'function'
+      ? verifier(composer, text) === true
+      : getComposerText(composer) === text);
+    if (!insertedTextIsValid) {
       composer.textContent = text;
     }
     dispatchInput(composer, win, text);
-    return composerTextEquals(composer, text);
+    return typeof verifier === 'function' ? verifier(composer, text) === true : composerTextEquals(composer, text);
   }
 
   function composerScope(composer) {
@@ -3115,7 +3140,17 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     function validateSendSnapshot(snapshot) {
       if (!snapshot || conversationPath() !== snapshot.path) return { ok: false, reason: 'The conversation changed while Auto was choosing.' };
       const composer = findComposer(doc);
-      if (!composer || !composerTextEquals(composer, snapshot.draft)) {
+      let draftMatches = false;
+      if (composer) {
+        try {
+          draftMatches = typeof snapshot.draftValidator === 'function'
+            ? snapshot.draftValidator(composer, snapshot.draft) === true
+            : composerTextEquals(composer, snapshot.draft);
+        } catch (_error) {
+          draftMatches = false;
+        }
+      }
+      if (!composer || !draftMatches) {
         return { ok: false, reason: 'Your draft changed while Auto was choosing.' };
       }
       const attachments = attachmentState(composer);
@@ -3163,13 +3198,14 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       }, 1_500);
     }
 
-    function armSubmitReplayPermit(composer, kind) {
+    function armSubmitReplayPermit(composer, kind, draftValidator = null) {
       const form = composer && composer.closest('form');
       if (!form) return;
       state.submitReplayPermit = {
         form,
         path: conversationPath(),
         draft: getComposerText(composer),
+        draftValidator: typeof draftValidator === 'function' ? draftValidator : null,
         kind,
         expiresAt: Date.now() + 1_500,
       };
@@ -3184,7 +3220,13 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       }
       if (!event || event.target !== permit.form || conversationPath() !== permit.path) return false;
       const currentDraft = getComposerText(composer);
-      if (currentDraft && currentDraft !== permit.draft) return false;
+      if (currentDraft) {
+        let draftMatches = currentDraft === permit.draft;
+        if (!draftMatches && permit.draftValidator) {
+          try { draftMatches = permit.draftValidator(composer, permit.draft) === true; } catch (_error) { draftMatches = false; }
+        }
+        if (!draftMatches) return false;
+      }
       state.submitReplayPermit = null;
       return true;
     }
@@ -3216,6 +3258,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           refreshed.beforeReplay = null;
           refreshed.silent = originalSnapshot.silent;
           refreshed.fallbackToCurrentModel = originalSnapshot.fallbackToCurrentModel;
+          refreshed.draftValidator = originalSnapshot.draftValidator;
           snapshot = refreshed;
         }
         validation = validateSendSnapshot(snapshot);
@@ -3235,13 +3278,13 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           if (!await runBeforeReplay({ composer: validation.composer, sendButton })) return false;
           const currentSendButton = findSendButton(doc, validation.composer);
           if (!currentSendButton || currentSendButton.disabled || currentSendButton.getAttribute('aria-disabled') === 'true') return false;
-          armSubmitReplayPermit(validation.composer, 'adaptive-replay');
+          armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator);
           state.replayingSend = true;
           try { currentSendButton.click(); } finally { state.replayingSend = false; }
           rememberRoute(selectedLevel, decision, manual, reason);
           return true;
         }
-        armSubmitReplayPermit(validation.composer, 'adaptive-replay');
+        armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator);
         state.replayingSend = true;
         try { sendButton.click(); } finally { state.replayingSend = false; }
         rememberRoute(selectedLevel, decision, manual, reason);
@@ -3254,7 +3297,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         }
         const currentForm = validation.composer.closest('form');
         if (!currentForm || !currentForm.isConnected || typeof currentForm.requestSubmit !== 'function') return false;
-        armSubmitReplayPermit(validation.composer, 'adaptive-replay');
+        armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator);
         state.replayingSend = true;
         try { currentForm.requestSubmit(); } catch (_error) { return false; } finally { state.replayingSend = false; }
         rememberRoute(selectedLevel, decision, manual, reason);
@@ -3873,6 +3916,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       const composer = options.composer && options.composer.isConnected ? options.composer : findComposer(doc);
       const snapshot = captureSendSnapshot(composer);
       if (!snapshot) return false;
+      snapshot.draftValidator = typeof options.draftValidator === 'function' ? options.draftValidator : null;
       const suppliedBeforeReplay = typeof options.beforeReplay === 'function' ? options.beforeReplay : null;
       const guardedDraft = options.routingText == null
         ? buildAccuracyGuardedPrompt(snapshot.draft)
@@ -4615,6 +4659,14 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       return true;
     }
 
+    function fallbackComposerHasPrompt(composer, prompt) {
+      return Boolean(composer && fallbackDraftTextMatches(
+        getComposerText(composer),
+        prompt,
+        state.incomingJobId,
+      ));
+    }
+
     async function stageFallbackPrompt(job, prompt) {
       const deadline = Date.now() + branchComposerTimeout;
       let expectedConversation = job.branchConversation || '';
@@ -4629,6 +4681,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       let emptySince = 0;
       let writeAttempts = 0;
       let nextWriteAt = 0;
+      let ownedMismatchSince = 0;
       let trustedInteraction = false;
       const markTrustedInteraction = (event) => {
         if (event && event.isTrusted) trustedInteraction = true;
@@ -4644,7 +4697,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           const inputArmedRouteChange = Date.now() <= insertionArmedUntil &&
             (insertionArmedFromPath === '/' || insertionArmedFromPath === '/new');
           if (!expectedConversation && liveConversation && inputArmedRouteChange &&
-            (!composer || !getComposerText(composer).trim() || composerTextSemanticallyEquals(composer, prompt))) {
+            (!composer || !getComposerText(composer).trim() || fallbackComposerHasPrompt(composer, prompt))) {
             expectedConversation = liveConversation;
           }
 
@@ -4668,9 +4721,19 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           if (attachmentState(composer).count) return { ok: false, reason: 'attachment' };
 
           const existingDraft = getComposerText(composer).trim();
-          if (existingDraft && !composerTextSemanticallyEquals(composer, prompt)) {
+          if (existingDraft && !fallbackComposerHasPrompt(composer, prompt)) {
+            const marker = fallbackTransferMarker(state.incomingJobId);
+            const looksLikeHydratingTransfer = marker && normalizeComposerPayload(existingDraft).includes(marker);
+            if (looksLikeHydratingTransfer) {
+              if (!ownedMismatchSince) ownedMismatchSince = Date.now();
+              if (Date.now() - ownedMismatchSince < 500) {
+                await new Promise((resolve) => win.setTimeout(resolve, 80));
+                continue;
+              }
+            }
             return { ok: false, reason: 'draft' };
           }
+          ownedMismatchSince = 0;
           if (!existingDraft) {
             if (emptyComposer !== composer) {
               emptyComposer = composer;
@@ -4687,15 +4750,21 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             const beforeConversation = conversationIdentity(win.location.href);
             const beforePath = conversationPath();
             const insertedComposer = composer;
-            const accepted = setComposerText(composer, prompt, win, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
+            const accepted = setComposerText(
+              composer,
+              prompt,
+              win,
+              SIDE_FALLBACK_PROMPT_MAX_LENGTH,
+              (candidate) => fallbackComposerHasPrompt(candidate, prompt),
+            );
             writeAttempts += 1;
             insertionArmedUntil = Date.now() + 1_500;
             insertionArmedFromPath = beforeConversation ? '' : beforePath;
             nextWriteAt = Date.now() + Math.min(250 * (2 ** (writeAttempts - 1)), 1_000);
             const afterConversation = conversationIdentity(win.location.href);
             const currentComposer = findComposer(doc);
-            const promptSurvived = composerTextSemanticallyEquals(insertedComposer, prompt) ||
-              composerTextSemanticallyEquals(currentComposer, prompt);
+            const promptSurvived = fallbackComposerHasPrompt(insertedComposer, prompt) ||
+              fallbackComposerHasPrompt(currentComposer, prompt);
             if (!expectedConversation && !beforeConversation && afterConversation &&
               afterConversation !== job.sourceConversation && (accepted || promptSurvived)) {
               expectedConversation = afterConversation;
@@ -4718,7 +4787,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           }
           composer = findComposer(doc);
           if (!composer || attachmentState(composer).count ||
-            !composerTextSemanticallyEquals(composer, prompt)) {
+            !fallbackComposerHasPrompt(composer, prompt)) {
             stableComposer = null;
             stableSince = 0;
             await new Promise((resolve) => win.setTimeout(resolve, 100));
@@ -4815,10 +4884,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         silent: true,
         routingText: job.question,
         fallbackToCurrentModel: true,
+        draftValidator: (candidate) => fallbackComposerHasPrompt(candidate, prompt),
         beforeReplay: async () => {
           const currentComposer = findComposer(doc);
           const currentSendButton = currentComposer && findSendButton(doc, currentComposer);
-          if (!isActiveFallbackDestination(job) || !currentComposer || !composerTextSemanticallyEquals(currentComposer, prompt) ||
+          if (!isActiveFallbackDestination(job) || !currentComposer || !fallbackComposerHasPrompt(currentComposer, prompt) ||
             attachmentState(currentComposer).count || !currentSendButton || currentSendButton.disabled ||
             currentSendButton.getAttribute('aria-disabled') === 'true') return false;
           if (!await bindFallbackConversation(job, job.branchConversation)) return false;
@@ -4827,9 +4897,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           const persistedComposer = findComposer(doc);
           const persistedSendButton = persistedComposer && findSendButton(doc, persistedComposer);
           if (isActiveFallbackDestination(job) && persistedComposer &&
-            composerTextSemanticallyEquals(persistedComposer, prompt) &&
+            fallbackComposerHasPrompt(persistedComposer, prompt) &&
             !attachmentState(persistedComposer).count && persistedSendButton &&
-            !persistedSendButton.disabled && persistedSendButton.getAttribute('aria-disabled') !== 'true') return true;
+            !persistedSendButton.disabled && persistedSendButton.getAttribute('aria-disabled') !== 'true') {
+            return { refreshSnapshot: true, composer: persistedComposer };
+          }
           const restaged = await stageFallbackPrompt(job, prompt);
           return restaged.ok ? { refreshSnapshot: true, composer: restaged.composer } : false;
         },
@@ -5897,6 +5969,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     getComposerText,
     composerTextEquals,
     normalizeComposerPayload,
+    fallbackDraftTextMatches,
     setComposerText,
     findSendButton,
     waitForConversationChange,

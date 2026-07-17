@@ -720,6 +720,87 @@ test('missing native response actions automatically transfer context to a blank 
   }
 });
 
+test('an already-staged fallback draft reformatted by ChatGPT auto-sends exactly once', async () => {
+  const jobId = 'fallback_hydrated_draft_job_1234';
+  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
+  const transcript = 'USER:\nWhat is mediation?\n\nASSISTANT:\nMediation helps people resolve a disagreement.';
+  const question = 'what is mediation in simple terms';
+  const expectedPrompt = toolkit.buildSideFallbackPrompt(transcript, question, 'ask', jobId);
+  const hydratedPrompt = expectedPrompt
+    .replace(/\n{2,}/gu, (paragraphBreak) => `${paragraphBreak}\n`)
+    .replace('conversation as context', 'conversation\u00a0as context')
+    .replace('resolve a disagreement', 'resolve\u200B a disagreement');
+  const stored = new Map([
+    ['chatgptSidecar.settings.v1', { ...toolkit.DEFAULT_SETTINGS, adaptiveRouting: false }],
+    [storageKey, toolkit.sanitizeJob({
+      createdAt: Date.now(),
+      sourceUrl: 'https://chatgpt.com/c/source-chat',
+      kind: 'ask',
+      question,
+      autoSend: true,
+      fallbackMode: true,
+      fallbackTranscript: transcript,
+      branchReloadFrom: 'fallback_source_page_1234',
+      questionInserted: true,
+      baselineUserCount: 0,
+      sendAttempted: false,
+    })],
+  ]);
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: `https://chatgpt.com/#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  const locks = createIfAvailableLockManager();
+  Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
+  const { document } = dom.window;
+  const composer = document.querySelector('#prompt-textarea');
+  composer.value = hydratedPrompt;
+  let sendCount = 0;
+  let sentPrompt = '';
+  document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+    sendCount += 1;
+    sentPrompt = composer.value;
+    composer.value = '';
+    const userTurn = document.createElement('article');
+    userTurn.dataset.testid = 'conversation-turn-0';
+    const role = document.createElement('div');
+    role.dataset.messageAuthorRole = 'user';
+    role.textContent = sentPrompt;
+    userTurn.append(role);
+    document.querySelector('main').insertBefore(userTurn, document.querySelector('form'));
+    dom.window.history.pushState({}, '', `/c/fallback-hydrated-chat#cwt-job=${jobId}`);
+  });
+  const app = toolkit.createApp(document, dom.window, {
+    initialJobId: jobId,
+    pageInstanceId: 'fallback_hydrated_destination_1234',
+    sideSendAckTimeout: 750,
+  });
+
+  try {
+    await app.start();
+    assert.equal(sendCount, 1, 'the already-visible transferred draft is sent without another click');
+    assert.equal(sentPrompt, hydratedPrompt, 'the toolkit sends ChatGPT’s harmlessly reformatted copy unchanged');
+    assert.equal(stored.has(storageKey), false, 'the acknowledged one-shot transfer is removed');
+    assert.equal(document.querySelector('#cgs-recovery-backdrop').hidden, true);
+    assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'fallback-hydrated-chat');
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 100));
+    assert.equal(sendCount, 1, 'completion cannot replay the transferred draft a second time');
+  } finally {
+    if (app.state.observer) app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
+});
+
 test('fallback refuses a navigation no-op and leaves the source composer untouched', async () => {
   const jobId = 'fallback_navigation_guard_1234';
   const dom = new JSDOM(`<!doctype html><html><body><main>
