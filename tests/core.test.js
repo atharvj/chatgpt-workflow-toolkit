@@ -37,6 +37,30 @@ test('selected text is quoted and clipped safely for a side question', () => {
   );
 });
 
+test('selection pill stays visible without covering a bottom-edge selection', () => {
+  const selection = { left: 40, top: 738, width: 320, height: 24, right: 360, bottom: 762 };
+  const position = toolkit.chooseSelectionPillPosition(
+    selection,
+    { width: 112, height: 30 },
+    { width: 400, height: 768 },
+  );
+  const pill = {
+    left: position.left,
+    top: position.top,
+    right: position.left + position.width,
+    bottom: position.top + position.height,
+  };
+
+  assert.notEqual(position.placement, 'below');
+  assert.ok(pill.left >= 8 && pill.top >= 8);
+  assert.ok(pill.right <= 392 && pill.bottom <= 760);
+  assert.equal(
+    pill.left < selection.right && pill.right > selection.left &&
+      pill.top < selection.bottom && pill.bottom > selection.top,
+    false,
+  );
+});
+
 test('composer payload normalization removes editor artifacts without flattening code layout', () => {
   assert.equal(
     toolkit.normalizeComposerPayload('  line one\r\n  indented\u00a0\u200B\r\n'),

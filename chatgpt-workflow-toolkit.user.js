@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.8
+// @version      1.4.9
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.8';
+  const VERSION = '1.4.9';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -63,6 +63,10 @@
   const SIDE_FALLBACK_PROMPT_MAX_LENGTH = SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH + QUESTION_MAX_LENGTH + 2_000;
   const TARGET_FINGERPRINT_MAX_LENGTH = 1_200;
   const SELECTED_QUOTE_MAX_LENGTH = 2_000;
+  const SELECTION_PILL_GAP = 7;
+  const SELECTION_PILL_MARGIN = 8;
+  const SELECTION_PILL_FALLBACK_WIDTH = 112;
+  const SELECTION_PILL_FALLBACK_HEIGHT = 30;
   const UI_ROOT_ID = 'cgs-root';
   const TURN_BUTTON_CLASS = 'cgs-turn-action';
   const HIDDEN_START_WRITING_CLASS = 'cgs-hidden-start-writing';
@@ -325,7 +329,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     #cgs-selection-pill {
       position: fixed;
       z-index: 2147483001;
-      transform: translate(-50%, -100%);
+      transform: none;
+      white-space: nowrap;
       padding: 7px 10px;
       border: 0;
       border-radius: 9px;
@@ -417,6 +422,104 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const number = Number(value);
     if (!Number.isFinite(number)) return fallback;
     return Math.min(maximum, Math.max(minimum, Math.trunc(number)));
+  }
+
+  function chooseSelectionPillPosition(selectionRect, pillSize = {}, viewportSize = {}) {
+    const finite = (value, fallback) => {
+      const number = Number(value);
+      return Number.isFinite(number) ? number : fallback;
+    };
+    const viewportWidth = Math.max(SELECTION_PILL_MARGIN * 2 + 1, finite(viewportSize.width, 0));
+    const viewportHeight = Math.max(SELECTION_PILL_MARGIN * 2 + 1, finite(viewportSize.height, 0));
+    const pillWidth = Math.min(
+      viewportWidth - SELECTION_PILL_MARGIN * 2,
+      Math.max(1, finite(pillSize.width, SELECTION_PILL_FALLBACK_WIDTH)),
+    );
+    const pillHeight = Math.min(
+      viewportHeight - SELECTION_PILL_MARGIN * 2,
+      Math.max(1, finite(pillSize.height, SELECTION_PILL_FALLBACK_HEIGHT)),
+    );
+    const left = finite(selectionRect && selectionRect.left, 0);
+    const top = finite(selectionRect && selectionRect.top, 0);
+    const right = finite(
+      selectionRect && selectionRect.right,
+      left + Math.max(0, finite(selectionRect && selectionRect.width, 0)),
+    );
+    const bottom = finite(
+      selectionRect && selectionRect.bottom,
+      top + Math.max(0, finite(selectionRect && selectionRect.height, 0)),
+    );
+    const selection = {
+      left: Math.min(left, right),
+      top: Math.min(top, bottom),
+      right: Math.max(left, right),
+      bottom: Math.max(top, bottom),
+    };
+    const selectionCenterX = (selection.left + selection.right) / 2;
+    const selectionCenterY = (selection.top + selection.bottom) / 2;
+    const minimumLeft = SELECTION_PILL_MARGIN;
+    const minimumTop = SELECTION_PILL_MARGIN;
+    const maximumLeft = viewportWidth - SELECTION_PILL_MARGIN - pillWidth;
+    const maximumTop = viewportHeight - SELECTION_PILL_MARGIN - pillHeight;
+    const clampLeft = (value) => Math.min(maximumLeft, Math.max(minimumLeft, value));
+    const clampTop = (value) => Math.min(maximumTop, Math.max(minimumTop, value));
+    const candidates = [
+      {
+        placement: 'below',
+        left: clampLeft(selectionCenterX - pillWidth / 2),
+        top: selection.bottom + SELECTION_PILL_GAP,
+      },
+      {
+        placement: 'right',
+        left: selection.right + SELECTION_PILL_GAP,
+        top: clampTop(selectionCenterY - pillHeight / 2),
+      },
+      {
+        placement: 'left',
+        left: selection.left - SELECTION_PILL_GAP - pillWidth,
+        top: clampTop(selectionCenterY - pillHeight / 2),
+      },
+    ];
+    const corners = [
+      { placement: 'corner-top-left', left: minimumLeft, top: minimumTop },
+      { placement: 'corner-top-right', left: maximumLeft, top: minimumTop },
+      { placement: 'corner-bottom-left', left: minimumLeft, top: maximumTop },
+      { placement: 'corner-bottom-right', left: maximumLeft, top: maximumTop },
+    ].sort((first, second) => {
+      const distance = (candidate) => {
+        const centerX = candidate.left + pillWidth / 2;
+        const centerY = candidate.top + pillHeight / 2;
+        return (centerX - selectionCenterX) ** 2 + (centerY - selectionCenterY) ** 2;
+      };
+      return distance(second) - distance(first);
+    });
+    candidates.push(...corners);
+
+    const candidateRect = (candidate) => ({
+      left: candidate.left,
+      top: candidate.top,
+      right: candidate.left + pillWidth,
+      bottom: candidate.top + pillHeight,
+    });
+    const fitsViewport = (candidate) => {
+      const rect = candidateRect(candidate);
+      return rect.left >= minimumLeft && rect.top >= minimumTop &&
+        rect.right <= viewportWidth - SELECTION_PILL_MARGIN &&
+        rect.bottom <= viewportHeight - SELECTION_PILL_MARGIN;
+    };
+    const overlapsSelection = (candidate) => {
+      const rect = candidateRect(candidate);
+      return rect.left < selection.right && rect.right > selection.left &&
+        rect.top < selection.bottom && rect.bottom > selection.top;
+    };
+    const chosen = candidates.find((candidate) => fitsViewport(candidate) && !overlapsSelection(candidate)) || corners[0];
+    return {
+      left: Math.round(chosen.left),
+      top: Math.round(chosen.top),
+      width: Math.round(pillWidth),
+      height: Math.round(pillHeight),
+      placement: chosen.placement,
+    };
   }
 
   function sanitizeSettings(raw) {
@@ -3939,9 +4042,24 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       state.selectedTurn = turn;
       state.selectedQuote = quote.slice(0, SELECTED_QUOTE_MAX_LENGTH);
       const pill = element('#cgs-selection-pill');
-      pill.style.left = `${Math.min(win.innerWidth - 55, Math.max(55, rect.left + rect.width / 2))}px`;
-      pill.style.top = `${Math.max(42, rect.top - 7)}px`;
+      pill.style.visibility = 'hidden';
       pill.hidden = false;
+      const pillRect = pill.getBoundingClientRect();
+      const position = chooseSelectionPillPosition(
+        rect,
+        {
+          width: pillRect.width || pill.offsetWidth || SELECTION_PILL_FALLBACK_WIDTH,
+          height: pillRect.height || pill.offsetHeight || SELECTION_PILL_FALLBACK_HEIGHT,
+        },
+        {
+          width: Number(win.innerWidth) || doc.documentElement.clientWidth,
+          height: Number(win.innerHeight) || doc.documentElement.clientHeight,
+        },
+      );
+      pill.style.left = `${position.left}px`;
+      pill.style.top = `${position.top}px`;
+      pill.dataset.cgsPlacement = position.placement;
+      pill.style.visibility = '';
     }
 
     function openChildWindow(url, mode, jobId) {
@@ -5452,6 +5570,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH,
     SELECTED_QUOTE_MAX_LENGTH,
     normalizeText,
+    chooseSelectionPillPosition,
     sanitizeSettings,
     getTurns,
     roleOfTurn,

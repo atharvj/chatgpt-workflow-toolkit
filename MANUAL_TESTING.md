@@ -33,8 +33,9 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 ## Selected instruction
 
 - Select part of one instruction in an assistant response.
-- Confirm the temporary **Ask in new chat** pill appears near the selection.
+- Confirm ChatGPT's native **Ask ChatGPT** control stays above the selection while the temporary **Ask in new chat** pill remains fully visible below it in light and dark mode.
 - Open it and confirm the selected text is quoted, including multiline selections.
+- Repeat near the left, right, and bottom edges of the viewport and confirm the pill remains visible.
 - Select ordinary text outside an assistant response and confirm no pill appears.
 
 ## Continue in fresh chat

@@ -140,6 +140,50 @@ test('app smoke: installs a single whole-chat, auto-send side-question flow', as
   dom.window.close();
 });
 
+test('selected-response pill stays below the highlight instead of under native Ask ChatGPT', async () => {
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <article data-testid="conversation-turn-0">
+      <div data-message-author-role="assistant"><span id="selected-answer">Right now, the generator voltage is twelve volts.</span></div>
+      <button data-testid="copy-turn-action-button">Copy</button>
+    </article>
+    <button id="native-ask-chatgpt">Ask ChatGPT</button>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/selection-position',
+    pretendToBeVisual: true,
+  });
+
+  const { document } = dom.window;
+  const selectedAnswer = document.querySelector('#selected-answer');
+  const selectionRect = { left: 90, top: 180, width: 220, height: 22, right: 310, bottom: 202 };
+  const nativeRect = { left: 120, top: 132, width: 130, height: 40, right: 250, bottom: 172 };
+  document.querySelector('#native-ask-chatgpt').getBoundingClientRect = () => nativeRect;
+  const range = document.createRange();
+  range.selectNodeContents(selectedAnswer);
+  range.getBoundingClientRect = () => selectionRect;
+  const selection = dom.window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+
+  const app = await toolkit.install(document, dom.window);
+  selectedAnswer.dispatchEvent(new dom.window.MouseEvent('mouseup', { bubbles: true }));
+  const positioned = await waitFor(() => !document.querySelector('#cgs-selection-pill').hidden, dom.window);
+  assert.equal(positioned, true);
+
+  const pill = document.querySelector('#cgs-selection-pill');
+  assert.equal(Number.parseFloat(pill.style.top), selectionRect.bottom + 7);
+  assert.ok(Number.parseFloat(pill.style.top) > nativeRect.bottom, 'the toolkit pill sits below the native bubble');
+  assert.equal(pill.dataset.cgsPlacement, 'below');
+  assert.match(document.querySelector('#cgs-style').textContent, /#cgs-selection-pill\s*\{[^}]*transform:\s*none/su);
+
+  pill.click();
+  assert.equal(document.querySelector('#cgs-dialog-backdrop').hidden, false);
+  assert.match(document.querySelector('#cgs-question').value, /generator voltage is twelve volts/iu);
+
+  app.state.observer.disconnect();
+  dom.window.close();
+});
+
 test('side question from an older answer targets the latest answer and always auto-sends in a child chat', async () => {
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-0"><div data-message-author-role="user">First question</div></article>
