@@ -90,6 +90,44 @@ test('selection pill stays visible without covering a bottom-edge selection', ()
   );
 });
 
+test('floating dock stays above the composer and hides when no safe space remains', () => {
+  const desktop = toolkit.chooseDockPosition(
+    { top: 720, right: 1_100 },
+    { width: 500, height: 48 },
+    { width: 1_200, height: 900 },
+  );
+  assert.deepEqual(desktop, { right: 100, bottom: 192, hidden: false });
+  assert.ok(900 - desktop.bottom <= 720 - 12, 'the dock bottom edge clears the composer');
+
+  const grownComposer = toolkit.chooseDockPosition(
+    { top: 560, right: 1_100 },
+    { width: 500, height: 48 },
+    { width: 1_200, height: 900 },
+  );
+  assert.equal(grownComposer.bottom, 352, 'a taller composer moves the dock upward');
+  assert.ok(grownComposer.bottom > desktop.bottom);
+
+  const narrow = toolkit.chooseDockPosition(
+    { top: 500, right: 395 },
+    { width: 84, height: 48 },
+    { width: 400, height: 700 },
+  );
+  assert.equal(narrow.right, 10, 'the dock stays inside the viewport margin');
+  assert.equal(narrow.hidden, false);
+
+  assert.equal(toolkit.chooseDockPosition({ top: 0, right: 0 }, {}, { width: 0, height: 0 }), null);
+  assert.equal(
+    toolkit.chooseDockPosition({ top: 55, right: 390 }, { width: 84, height: 48 }, { width: 400, height: 700 }).hidden,
+    true,
+    'the dock is suppressed instead of covering a composer with no room above it',
+  );
+  assert.equal(
+    toolkit.chooseDockPosition({ top: 55, right: 390 }, { width: 0, height: 0 }, { width: 400, height: 700 }).hidden,
+    true,
+    'zero-sized transient measurements use the real fallback height',
+  );
+});
+
 test('composer payload normalization removes editor artifacts without flattening code layout', () => {
   assert.equal(
     toolkit.normalizeComposerPayload('  line one\r\n  indented\u00a0\u200B\r\n'),

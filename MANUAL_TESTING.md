@@ -8,6 +8,7 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 
 - Enable the userscript and reload `https://chatgpt.com/`.
 - Confirm the **Continue in fresh chat** dock appears after the first completed response and ordinary scrolling, typing, streaming, copy, edit, retry, and voice controls still work.
+- Grow the message box to several lines and resize the window; confirm the dock stays above the message box instead of covering it.
 - Confirm the continuation action stays hidden on the blank home composer and while a response is streaming.
 - Open DevTools and confirm Workflow Toolkit produces no errors and no network requests.
 

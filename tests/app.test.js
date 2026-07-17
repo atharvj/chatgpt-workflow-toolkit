@@ -140,6 +140,86 @@ test('app smoke: installs a single whole-chat, auto-send side-question flow', as
   dom.window.close();
 });
 
+test('floating dock follows the live composer without covering it', async () => {
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <article data-testid="conversation-turn-1"><div data-message-author-role="assistant">Ready</div></article>
+    <form data-dock-top="680"><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: 'https://chatgpt.com/c/dock-position',
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: 1_200 });
+  Object.defineProperty(dom.window, 'innerHeight', { configurable: true, value: 900 });
+  const nativeRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+  dom.window.HTMLElement.prototype.getBoundingClientRect = function getTestRect() {
+    if (this.id === 'cgs-dock') {
+      return { left: 0, top: 0, right: 500, bottom: 48, width: 500, height: 48 };
+    }
+    if (this.tagName === 'FORM') {
+      const top = Number(this.dataset.dockTop);
+      const height = Number(this.dataset.dockHeight) || 110;
+      return { left: 280, top, right: 1_050, bottom: top + height, width: 770, height };
+    }
+    return nativeRect.call(this);
+  };
+  const resizeObservers = [];
+  class TestResizeObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.observed = [];
+      resizeObservers.push(this);
+    }
+    observe(node) { this.observed.push(node); }
+    disconnect() { this.observed = []; }
+  }
+  Object.defineProperty(dom.window, 'ResizeObserver', { configurable: true, value: TestResizeObserver });
+
+  const app = await toolkit.install(document, dom.window);
+  const dock = document.querySelector('#cgs-dock');
+  await waitFor(() => dock.style.bottom === '232px', dom.window);
+  assert.equal(dock.style.right, '150px');
+  assert.equal(dock.dataset.cgsPositionSuppressed, undefined);
+  assert.ok(900 - parseFloat(dock.style.bottom) <= 680 - 12);
+
+  const form = document.querySelector('form');
+  form.dataset.dockTop = '560';
+  assert.equal(resizeObservers.length, 1);
+  resizeObservers[0].callback();
+  await waitFor(() => dock.style.bottom === '352px', dom.window);
+  assert.ok(900 - parseFloat(dock.style.bottom) <= 560 - 12, 'composer growth moves the dock clear of it');
+
+  const replacement = form.cloneNode(true);
+  replacement.dataset.dockTop = '620';
+  form.replaceWith(replacement);
+  await waitFor(() => app.state.dockObservedSurface === replacement && dock.style.bottom === '292px', dom.window);
+  assert.equal(app.state.dockObservedSurface, replacement, 'a remounted ChatGPT composer is observed');
+
+  replacement.dataset.dockTop = '390';
+  replacement.dataset.dockHeight = '500';
+  resizeObservers[0].callback();
+  await waitFor(() => dock.style.bottom === '522px', dom.window);
+  assert.equal(dock.dataset.cgsPositionSuppressed, undefined, 'a tall composer form remains the avoidance surface');
+
+  replacement.dataset.dockTop = '-40';
+  replacement.dataset.dockHeight = '110';
+  resizeObservers[0].callback();
+  await waitFor(() => dock.dataset.cgsPositionSuppressed === 'true', dom.window);
+  assert.equal(dock.getAttribute('aria-hidden'), 'true', 'an offscreen expanded composer suppresses the dock');
+
+  replacement.dataset.dockTop = 'invalid';
+  resizeObservers[0].callback();
+  await waitFor(() => dock.dataset.cgsPositionSuppressed === 'true', dom.window);
+  replacement.dataset.dockTop = '640';
+  resizeObservers[0].callback();
+  await waitFor(() => dock.style.bottom === '272px' && !dock.dataset.cgsPositionSuppressed, dom.window);
+  assert.equal(app.state.dockObservedSurface, replacement, 'temporary invalid geometry keeps its resize recovery observer');
+
+  app.state.observer.disconnect();
+  if (app.state.dockResizeObserver) app.state.dockResizeObserver.disconnect();
+  dom.window.close();
+});
+
 test('selected-response pill stays below the highlight instead of under native Ask ChatGPT', async () => {
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-0">

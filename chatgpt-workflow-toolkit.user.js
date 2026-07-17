@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.10
+// @version      1.4.11
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.10';
+  const VERSION = '1.4.11';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -69,6 +69,10 @@
   const SELECTION_PILL_MARGIN = 8;
   const SELECTION_PILL_FALLBACK_WIDTH = 112;
   const SELECTION_PILL_FALLBACK_HEIGHT = 30;
+  const DOCK_COMPOSER_GAP = 12;
+  const DOCK_VIEWPORT_MARGIN = 10;
+  const DOCK_FALLBACK_WIDTH = 420;
+  const DOCK_FALLBACK_HEIGHT = 48;
   const UI_ROOT_ID = 'cgs-root';
   const TURN_BUTTON_CLASS = 'cgs-turn-action';
   const HIDDEN_START_WRITING_CLASS = 'cgs-hidden-start-writing';
@@ -194,6 +198,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       box-shadow: 0 8px 28px rgba(0, 0, 0, .14);
       backdrop-filter: blur(12px);
     }
+    #cgs-dock[data-cgs-position-suppressed="true"] { visibility: hidden; pointer-events: none; }
     .cgs-button, .cgs-icon-button, .cgs-primary, .cgs-secondary, .cgs-link-button {
       appearance: none;
       border: 0;
@@ -424,6 +429,40 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const number = Number(value);
     if (!Number.isFinite(number)) return fallback;
     return Math.min(maximum, Math.max(minimum, Math.trunc(number)));
+  }
+
+  function chooseDockPosition(surfaceRect, dockSize = {}, viewportSize = {}) {
+    const finite = (value, fallback = 0) => {
+      const number = Number(value);
+      return Number.isFinite(number) ? number : fallback;
+    };
+    const viewportWidth = finite(viewportSize.width);
+    const viewportHeight = finite(viewportSize.height);
+    const surfaceTop = finite(surfaceRect && surfaceRect.top, -1);
+    const surfaceRight = finite(surfaceRect && surfaceRect.right, -1);
+    if (viewportWidth <= DOCK_VIEWPORT_MARGIN * 2 || viewportHeight <= DOCK_VIEWPORT_MARGIN * 2 ||
+      surfaceTop < 0 || surfaceTop >= viewportHeight || surfaceRight <= 0) return null;
+
+    const positive = (value, fallback) => {
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 ? number : fallback;
+    };
+    const dockWidth = Math.min(
+      viewportWidth - DOCK_VIEWPORT_MARGIN * 2,
+      positive(dockSize.width, DOCK_FALLBACK_WIDTH),
+    );
+    const dockHeight = Math.min(
+      viewportHeight - DOCK_VIEWPORT_MARGIN * 2,
+      positive(dockSize.height, DOCK_FALLBACK_HEIGHT),
+    );
+    const maximumRight = Math.max(DOCK_VIEWPORT_MARGIN, viewportWidth - dockWidth - DOCK_VIEWPORT_MARGIN);
+    const right = Math.min(maximumRight, Math.max(DOCK_VIEWPORT_MARGIN, viewportWidth - surfaceRight));
+    const bottom = viewportHeight - surfaceTop + DOCK_COMPOSER_GAP;
+    return {
+      right: Math.round(right),
+      bottom: Math.round(bottom),
+      hidden: surfaceTop - DOCK_COMPOSER_GAP - dockHeight < DOCK_VIEWPORT_MARGIN,
+    };
   }
 
   function chooseSelectionPillPosition(selectionRect, pillSize = {}, viewportSize = {}) {
@@ -2684,6 +2723,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       lastRouteDecision: null,
       adaptiveCancelled: false,
       dockUpdateTimer: null,
+      dockPositionFrame: null,
+      dockResizeObserver: null,
+      dockObservedSurface: null,
       freshContinuationPromise: null,
       freshTransferPromise: null,
       initialJobId: isValidJobId(options.initialJobId) ? options.initialJobId : '',
@@ -2831,6 +2873,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       if (!dock) return;
       if (isReadOnlyChatPage(win.location.href)) {
         dock.hidden = true;
+        clearDockPosition(dock);
+        observeDockSurface(null);
         removeTurnButtons(doc);
         hideSelectionPill();
         return;
@@ -2841,6 +2885,120 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       dock.hidden = !hasComposer && !hasCompletedResponse;
       const continueButton = dock.querySelector('[data-cgs-action="open-handoff"]');
       if (continueButton) continueButton.hidden = !hasCompletedResponse || generating || Boolean(state.freshContinuationPromise);
+      if (dock.hidden) {
+        clearDockPosition(dock);
+        observeDockSurface(null);
+      } else {
+        scheduleDockPosition();
+      }
+    }
+
+    function clearDockPosition(dock = element('#cgs-dock')) {
+      if (!dock) return;
+      dock.style.removeProperty('right');
+      dock.style.removeProperty('bottom');
+      delete dock.dataset.cgsPositionSuppressed;
+      dock.removeAttribute('aria-hidden');
+    }
+
+    function observeDockSurface(surface) {
+      if (state.dockObservedSurface === surface) return;
+      state.dockObservedSurface = surface || null;
+      if (state.dockResizeObserver) state.dockResizeObserver.disconnect();
+      if (!surface || typeof win.ResizeObserver !== 'function') return;
+      if (!state.dockResizeObserver) {
+        state.dockResizeObserver = new win.ResizeObserver(() => scheduleDockPosition());
+      }
+      try { state.dockResizeObserver.observe(surface); } catch (_error) { /* ignore */ }
+    }
+
+    function dockViewport() {
+      const visual = win.visualViewport;
+      return {
+        width: Number(visual && visual.width) || Number(win.innerWidth) || Number(doc.documentElement.clientWidth) || 0,
+        height: Number(visual && visual.height) || Number(win.innerHeight) || Number(doc.documentElement.clientHeight) || 0,
+        offsetLeft: Number(visual && visual.offsetLeft) || 0,
+        offsetTop: Number(visual && visual.offsetTop) || 0,
+      };
+    }
+
+    function usableDockSurface(composer, viewport) {
+      if (!composer || typeof composer.getBoundingClientRect !== 'function') return null;
+      const candidates = uniqueElements([composer.closest('form'), composer]);
+      for (const candidate of candidates) {
+        let rect;
+        try { rect = candidate.getBoundingClientRect(); } catch (_error) { continue; }
+        const width = Number(rect.width) || Number(rect.right) - Number(rect.left);
+        const height = Number(rect.height) || Number(rect.bottom) - Number(rect.top);
+        const top = Number(rect.top) - viewport.offsetTop;
+        const bottom = Number(rect.bottom) - viewport.offsetTop;
+        const right = Number(rect.right) - viewport.offsetLeft;
+        if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(top) ||
+          !Number.isFinite(bottom) || !Number.isFinite(right) || width <= 0 || height <= 0 ||
+          bottom <= 0 || top >= viewport.height || right <= 0) continue;
+        return { element: candidate, rect: { top: Math.max(0, top), right } };
+      }
+      return null;
+    }
+
+    function updateDockPosition() {
+      state.dockPositionFrame = null;
+      const dock = element('#cgs-dock');
+      if (!dock || dock.hidden) return;
+      const viewport = dockViewport();
+      const composer = findComposer(doc);
+      if (!composer) {
+        clearDockPosition(dock);
+        observeDockSurface(null);
+        return;
+      }
+      const surface = usableDockSurface(composer, viewport);
+      if (!surface) {
+        observeDockSurface(composer.closest('form') || composer);
+        dock.dataset.cgsPositionSuppressed = 'true';
+        dock.setAttribute('aria-hidden', 'true');
+        return;
+      }
+      observeDockSurface(surface.element);
+      let dockRect = null;
+      try { dockRect = dock.getBoundingClientRect(); } catch (_error) { /* ignore */ }
+      const position = chooseDockPosition(surface.rect, {
+        width: dockRect && dockRect.width,
+        height: dockRect && dockRect.height,
+      }, viewport);
+      if (!position) {
+        dock.dataset.cgsPositionSuppressed = 'true';
+        dock.setAttribute('aria-hidden', 'true');
+        return;
+      }
+      dock.style.right = `${position.right}px`;
+      dock.style.bottom = `${position.bottom}px`;
+      if (position.hidden) {
+        dock.dataset.cgsPositionSuppressed = 'true';
+        dock.setAttribute('aria-hidden', 'true');
+      } else {
+        delete dock.dataset.cgsPositionSuppressed;
+        dock.removeAttribute('aria-hidden');
+        try {
+          const placed = dock.getBoundingClientRect();
+          const avoided = surface.element.getBoundingClientRect();
+          const measurable = placed.width > 0 && placed.height > 0 && avoided.width > 0 && avoided.height > 0;
+          const overlaps = measurable && placed.left < avoided.right && placed.right > avoided.left &&
+            placed.top < avoided.bottom && placed.bottom > avoided.top;
+          if (overlaps) {
+            dock.dataset.cgsPositionSuppressed = 'true';
+            dock.setAttribute('aria-hidden', 'true');
+          }
+        } catch (_error) { /* ignore */ }
+      }
+    }
+
+    function scheduleDockPosition() {
+      if (state.dockPositionFrame != null) return;
+      const schedule = typeof win.requestAnimationFrame === 'function'
+        ? win.requestAnimationFrame.bind(win)
+        : (callback) => win.setTimeout(callback, 16);
+      state.dockPositionFrame = schedule(updateDockPosition);
     }
 
     async function ensureInstant(options = {}) {
@@ -5621,10 +5779,16 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       doc.addEventListener('submit', onAdaptiveSubmit, true);
       doc.addEventListener('compositionstart', onCompositionStart, true);
       doc.addEventListener('compositionend', onCompositionEnd, true);
+      doc.addEventListener('input', scheduleDockPosition, true);
       doc.addEventListener('click', onClick, true);
       doc.addEventListener('keydown', onKeyDown, true);
       doc.addEventListener('mouseup', onMouseUp, true);
       state.root.addEventListener('change', (event) => handleSettingChange(event.target));
+      win.addEventListener('resize', scheduleDockPosition, { passive: true });
+      if (win.visualViewport && typeof win.visualViewport.addEventListener === 'function') {
+        win.visualViewport.addEventListener('resize', scheduleDockPosition, { passive: true });
+        win.visualViewport.addEventListener('scroll', scheduleDockPosition, { passive: true });
+      }
       observe();
       registerMenus();
       scheduleScan(doc.body);
@@ -5686,6 +5850,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH,
     SELECTED_QUOTE_MAX_LENGTH,
     normalizeText,
+    chooseDockPosition,
     chooseSelectionPillPosition,
     sanitizeSettings,
     getTurns,
