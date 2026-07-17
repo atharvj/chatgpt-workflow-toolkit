@@ -128,6 +128,62 @@ test('classifyPrompt escalates debugging and rigorous proof work to High', () =>
   assertClassifiesAs('Prove rigorously that the square root of 2 is irrational.', 'high');
 });
 
+test('claimed-answer explanations require High while ordinary why questions stay Instant', () => {
+  for (const prompt of [
+    "I don't get why the answer is 12V and 4V.",
+    "I still don't get why the answer is 12V.",
+    "I really don't get how you got 12V.",
+    "I don't understand why this is 12V.",
+    'I don’t get how you got 12V and 4V.',
+    'How did you get 12V and 4V?',
+    'Why is it 12V?',
+    'Why is B correct?',
+    'Why is B correct here?',
+    'Explain why B is correct in this problem.',
+    'How can 12V be correct?',
+    "Why isn't B correct?",
+    "Why can't B be right?",
+    'Why was 12V the answer?',
+    'Why should the answer be 12V?',
+    'Why should it be 12V?',
+    'Can you tell me how you got 12V?',
+    'Explain why 12V is correct.',
+    `${toolkit.buildSelectedQuestion('The answer is 12V')}Why?`,
+    `${toolkit.buildSelectedQuestion('12V and 4V')}Why?`,
+  ]) {
+    const result = assertClassifiesAs(prompt, 'high');
+    assert.equal(result.strict, true);
+    assert.match(result.reasons.join(' '), /verify a supplied answer/iu);
+  }
+
+  for (const prompt of [
+    'Why is the sky blue?',
+    'I don’t understand why you left.',
+    'Rewrite “I don’t get why the answer is 12” politely.',
+    'Explain how to turn right at the light.',
+    'How do I submit the answer?',
+    'Why did you delete the result?',
+    'Why is it 5 PM?',
+    'How is it 2026 already?',
+    'Why is this 4K monitor expensive?',
+    'Can you tell me how you got into Harvard?',
+    'How did you get 12 tickets?',
+    'Can you tell me how you got 12 followers?',
+    'Why is correct grammar important?',
+    'How is correct posture maintained?',
+    'Why is knowing the answer important?',
+    'Why is guessing the answer bad?',
+    'Why is the right lane closed?',
+    'Why is this correct grammar rule useful?',
+    'Why is knowing the answer to this important?',
+    'Why is guessing the answer in this game bad?',
+    `${toolkit.buildSelectedQuestion('Shakespeare uses a metaphor')}Why?`,
+  ]) {
+    const result = assertClassifiesAs(prompt, 'instant');
+    assert.equal(Boolean(result.strict), false);
+  }
+});
+
 test('classifyPrompt reserves Extra High for independently complex work', () => {
   const result = toolkit.classifyPrompt(
     'Design a production multi-tenant authentication architecture. Include a threat model, concurrency risks, migration steps, rollback plan, tests, and security tradeoffs.',

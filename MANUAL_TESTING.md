@@ -58,6 +58,8 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Ask for an end-to-end repo-scale implementation with security review, exhaustive tests, benchmarks, and a formal correctness argument; confirm it can select a Pro-class option when the account exposes one.
 - Change **Maximum Auto level** to High and confirm even the hardest prompt does not select above High. Repeat with Extra High.
 - Manually choose High, then send `what is 2+2`; confirm Adaptive Auto still changes it to Instant. Hold Alt while sending when you intentionally want to preserve the current manual choice for one message.
+- From Instant, send `I don't get why the answer is 12V and 4V.` Confirm Adaptive Auto selects High or a stronger available level and the sent message tells ChatGPT to verify that result before explaining it.
+- Repeat without an available/confirmable High-or-stronger option and confirm the original draft remains unsent instead of falling back to Instant or Medium.
 - Start a prompt with `!route:high`, send it, and confirm High is selected. Verify the same words later in ordinary prose do not count as an override.
 - Hold Alt while clicking Send and confirm the current model is used without opening the picker.
 - Press Shift+Enter and use an IME composition flow; confirm neither triggers a send. Confirm plain Enter and Ctrl/Cmd+Enter still route and send once.

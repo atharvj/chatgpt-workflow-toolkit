@@ -337,6 +337,116 @@ test('simple prompt switches High to Instant and replays Send exactly once', asy
   assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
 });
 
+test('claimed-answer challenge switches Instant to High, verifies the premise, and sends once', async (t) => {
+  const prompt = "I don't get why the answer is 12V and 4V.";
+  const harness = await createHarness({ prompt, pickerLevel: 'Instant' });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'high');
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(harness.counters.sends, 1);
+  assert.ok(harness.composer.value.startsWith(prompt));
+  assert.match(harness.composer.value, /independently verify the stated answer or result/iu);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'high');
+});
+
+test('claimed-answer challenge never downgrades below High when only weaker levels exist', async (t) => {
+  const prompt = 'How did you get 12V and 4V?';
+  const harness = await createHarness({
+    prompt,
+    pickerLevel: 'Instant',
+    modelLevels: ['Instant', 'Medium'],
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'instant');
+  assert.equal(harness.counters.optionClicks, 0);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.counters.requestSubmits, 0);
+  assert.equal(harness.composer.value, prompt, 'the verification suffix is added only after a safe model is confirmed');
+  assert.equal(harness.app.state.lastRouteDecision, null);
+});
+
+test('claimed-answer challenge stays unsent when the model control is unavailable', async (t) => {
+  const prompt = "I don't get why the answer is 12V and 4V.";
+  const harness = await createHarness({ prompt, includePicker: false });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.counters.requestSubmits, 0);
+  assert.equal(harness.composer.value, prompt);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /requested High level.+not sent/iu);
+});
+
+test('claimed-answer challenge may use a confirmed stronger level when High is unavailable', async (t) => {
+  const harness = await createHarness({
+    prompt: 'How did you get 12V and 4V?',
+    pickerLevel: 'Instant',
+    modelLevels: ['Instant', 'Medium', 'Extra High', 'Pro'],
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'extra-high');
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'extra-high');
+});
+
+test('claimed-answer challenge stays unsent when ChatGPT does not confirm High', async (t) => {
+  const prompt = 'Explain why 12V is correct.';
+  const harness = await createHarness({
+    prompt,
+    pickerLevel: 'Instant',
+    reflectOptionSelection: false,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.ok(harness.counters.optionClicks >= 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.counters.requestSubmits, 0);
+  assert.equal(harness.composer.value, prompt);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /did not confirm High|draft was not sent/iu);
+});
+
+test('claimed-answer challenge never sends after the composer remounts during accuracy staging', async (t) => {
+  const prompt = "I don't get why the answer is 12V and 4V.";
+  const harness = await createHarness({ prompt, pickerLevel: 'Instant' });
+  t.after(() => harness.cleanup());
+  harness.composer.addEventListener('input', () => {
+    const form = harness.document.querySelector('form');
+    form.innerHTML = '<textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
+    form.querySelector('#prompt-textarea').value = prompt;
+  }, { once: true });
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.counters.requestSubmits, 0);
+  assert.equal(harness.document.querySelector('#prompt-textarea').value, prompt);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /message box changed.+not sent/iu);
+});
+
 test('current intelligence-level popover switches High to Instant', async (t) => {
   const dom = new JSDOM(`<!doctype html><html><body><main><form>
     <button type="button" data-testid="intelligence-picker" aria-label="Intelligence level: High" aria-expanded="false">High</button>
@@ -1499,6 +1609,26 @@ test('active Deep Research bypasses model switching and sends once', async (t) =
   assert.equal(harness.counters.optionClicks, 0);
   assert.equal(harness.counters.sends, 1);
   assert.match(harness.app.state.lastRouteDecision.reason, /kept current for Deep Research/iu);
+});
+
+test('active special mode cannot bypass the High minimum for a claimed-answer challenge', async (t) => {
+  const prompt = "I don't get why the answer is 12V and 4V.";
+  const harness = await createHarness({
+    prompt,
+    pickerLevel: 'Instant',
+    activeTool: 'Deep Research',
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.pickerOpens, 0);
+  assert.equal(harness.counters.optionClicks, 0);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.composer.value, prompt);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /did not expose a confirmed High-or-stronger level.+not sent/iu);
 });
 
 test('a delayed native submit after replay consumes its permit without routing again', async (t) => {

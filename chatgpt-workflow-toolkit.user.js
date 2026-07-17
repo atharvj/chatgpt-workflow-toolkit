@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.9
+// @version      1.4.10
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.9';
+  const VERSION = '1.4.10';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -63,6 +63,8 @@
   const SIDE_FALLBACK_PROMPT_MAX_LENGTH = SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH + QUESTION_MAX_LENGTH + 2_000;
   const TARGET_FINGERPRINT_MAX_LENGTH = 1_200;
   const SELECTED_QUOTE_MAX_LENGTH = 2_000;
+  const ACCURACY_GUARD_INSTRUCTION = 'Before explaining, independently verify the stated answer or result. Do not assume it is correct; if it is wrong, say so and give the corrected result.';
+  const ROUTE_OVERRIDE_PATTERN = /^\s*!route\s*:\s*(extra\s*-?\s*high|x\s*-?\s*high|xhigh|pro\s*-?\s*extended|pro\s*-?\s*ultra|pro\s*-?\s*standard|instant|medium|high|ultra|pro|max|highest|auto)(?=\s|:|;|$)/iu;
   const SELECTION_PILL_GAP = 7;
   const SELECTION_PILL_MARGIN = 8;
   const SELECTION_PILL_FALLBACK_WIDTH = 112;
@@ -706,6 +708,61 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return `I have a question about this specific part of the response:\n\n${quote}\n\nMy question:\n`;
   }
 
+  function requiresAnswerVerification(value) {
+    const raw = String(value == null ? '' : value).slice(0, QUESTION_MAX_LENGTH);
+    const withoutBom = raw.replace(/^\uFEFF/u, '');
+    const overrideMatch = withoutBom.match(ROUTE_OVERRIDE_PATTERN);
+    const prompt = overrideMatch
+      ? withoutBom.slice(overrideMatch[0].length).replace(/^\s*(?::|;)?\s*/u, '')
+      : raw;
+    const fullText = lowerText(prompt);
+    if (!fullText || /^(?:rewrite|rephrase|translate|edit|proofread|quote|summari[sz]e)\b/iu.test(fullText)) return false;
+    const questionMarker = 'my question:';
+    const markerIndex = fullText.lastIndexOf(questionMarker);
+    const selectedContext = markerIndex >= 0 ? fullText.slice(0, markerIndex) : '';
+    const text = markerIndex >= 0 ? fullText.slice(markerIndex + questionMarker.length).trim() : fullText;
+    if (!text) return false;
+
+    const claimedAnswer = /\b(?:the\s+)?(?:answer|result|solution|value|output)\s+(?:is|was|equals?|would be|should be|came out(?: to)?)\b/iu;
+    const challengeLead = /^(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:(?:explain|justify|why|how)\b|(?:tell|show) me\s+(?:why|how)\b|help me understand\s+(?:why|how)\b)|^i\s+(?:(?:still|really|just)\s+)?(?:do\s+not|don['’]?t|cannot|can['’]?t)\s+(?:get|understand|see|follow)\b/iu;
+    const reverseClaimedAnswer = /\b(?:why|how)\s+(?:(?:is|was)\s+.{1,80}|(?:would|should|could)\s+.{1,80}\s+be)\s+(?:the\s+)?(?:answer|result|solution|value|output)\b(?:\s+(?:(?:to|for)\s+(?:this|the)\s+(?:question|problem|exercise|equation|case)|in\s+(?:this|the)\s+(?:problem|case|context|key)))?[?.!]*$/iu;
+    const forwardAuxClaim = /\b(?:why|how)\s+(?:should|would|could)\s+(?:the\s+)?(?:answer|result|solution|value|output)\s+be\b/iu;
+    const correctnessChallenge = /\b(?:why|how)\s+(?:(?:is|was|isn['’]?t|wasn['’]?t)\s+.{1,80}?\s+|.{1,80}?\s+(?:is|was|isn['’]?t|wasn['’]?t|would be|could be|should be)\s+|(?:can|could|should|would|can['’]?t|cannot)\s+.{1,80}?\s+be\s+)(?:correct|right|valid)\b(?:\s+(?:here|in (?:this|the) (?:problem|case|context)))?[?.!]*$/iu;
+    const numericAnswerPiece = String.raw`[-+]?(?:\d+(?:[.,]\d+)?|\.\d+)(?:\s*(?:%|°(?:c|f)?|v|mv|kv|volts?|a|ma|ka|amps?|w|mw|kw|watts?|j|kj|n|pa|kpa|mpa|hz|khz|mhz|ghz|ohms?|m|cm|mm|km|in|ft|yd|mi|g|mg|kg|lbs?|oz|l|ml|s|ms|mins?|h|hrs?|(?:m|km)\/(?:s|h)))?`;
+    const answerOnlyValue = new RegExp(String.raw`^${numericAnswerPiece}(?:\s*(?:and|or|,)\s*${numericAnswerPiece})*[?.!]*$`, 'iu');
+    const derivationMatch = text.match(/\b(?:how|why)\b.{0,80}\b(?:(?:(?:did\s+)?(?:you|we|they)\s+)?(?:get|got|find|found|calculate|calculated|compute|computed|derive|derived|conclude|concluded|return|returned|produce|produced)|(?:you|we|they)\s+arrived at)\s+(.+?)$/iu);
+    const derivationValue = derivationMatch && derivationMatch[1] || '';
+    const derivationChallenge = Boolean(derivationValue && (
+      answerOnlyValue.test(derivationValue) ||
+      /^(?:the\s+)?(?:answer|result|solution|value|output)\b/iu.test(derivationValue) ||
+      /^[a-z](?:\s*=.+)?[?.!]*$/iu.test(derivationValue)
+    ));
+    const directDeictic = text.match(/^(?:why|how)\s+(?:(?:is|was)\s+(?:it|that|this)|(?:would|could|should)\s+(?:it|that|this)\s+be)\s+(.+)$/iu);
+    const subordinateDeictic = text.match(/\b(?:why|how)\s+(?:it|that|this)\s+(?:is|was|would be|could be|should be)\s+(.+)$/iu);
+    const deicticValueChallenge = answerOnlyValue.test((directDeictic || subordinateDeictic || [])[1] || '');
+    const selectedHasNumericValue = /(?:^|[^\p{L}\p{N}_])[-+]?(?:\d+(?:[.,]\d+)?|\.\d+)(?:\s*(?:%|°|[a-z]{1,8}))?(?=$|[^\p{L}\p{N}_])/iu.test(selectedContext);
+    const selectedChallenge = markerIndex >= 0 &&
+      /^(?:why|how)(?:\s+so)?[?.!]*$/iu.test(text) &&
+      (claimedAnswer.test(selectedContext) || selectedHasNumericValue);
+    return selectedChallenge || deicticValueChallenge || challengeLead.test(text) && (
+      claimedAnswer.test(text) || reverseClaimedAnswer.test(text) || forwardAuxClaim.test(text) || derivationChallenge || correctnessChallenge.test(text)
+    );
+  }
+
+  function buildAccuracyGuardedPrompt(value, maximumLength = QUESTION_MAX_LENGTH) {
+    const raw = String(value == null ? '' : value);
+    if (!requiresAnswerVerification(raw)) return raw;
+    const lower = lowerText(raw);
+    if (lower.includes(lowerText(ACCURACY_GUARD_INSTRUCTION)) ||
+      /\bindependently verify\b.{0,100}\b(?:answer|result)\b|\b(?:do not|don['’]?t) assume\b.{0,100}\b(?:correct|right)\b/iu.test(lower)) {
+      return raw;
+    }
+    const limit = clampInteger(maximumLength, QUESTION_MAX_LENGTH, 1, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
+    const separator = raw.endsWith('\n') ? '\n' : '\n\n';
+    const guarded = `${raw}${separator}${ACCURACY_GUARD_INSTRUCTION}`;
+    return guarded.length <= limit ? guarded : raw;
+  }
+
   function readableNodeText(root) {
     if (!root) return '';
     const blockTags = new Set([
@@ -831,9 +888,12 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const question = String(questionValue == null ? '' : questionValue).replace(/\r\n?/gu, '\n').trim();
     const marker = isValidJobId(transferId) ? `[Workflow Toolkit transfer ${transferId}]` : '';
     if (!transcript) return '';
-    const request = question || (kind === 'continue'
+    const rawRequest = question || (kind === 'continue'
       ? 'Continue the conversation from where it stopped.'
       : 'Answer the side question using the available conversation context.');
+    const request = kind === 'ask'
+      ? buildAccuracyGuardedPrompt(rawRequest)
+      : rawRequest;
     return `Answer the request at the end using the previous ChatGPT conversation as context. This is a separate chat, so do not merely summarize the transcript and do not ask the user to repeat information already included here.
 
 Files, images, and other attachments are not transferred by this fallback. Use all information available in the transcript. If missing material is truly essential, ask the user to upload it, while making clear that it is okay if they cannot.
@@ -1354,7 +1414,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
   function parseRouteOverride(value) {
     const firstLine = String(value == null ? '' : value).replace(/^\uFEFF/u, '').split(/\r?\n/u, 1)[0];
-    const match = firstLine.match(/^\s*!route\s*:\s*(extra\s*-?\s*high|x\s*-?\s*high|xhigh|pro\s*-?\s*extended|pro\s*-?\s*ultra|pro\s*-?\s*standard|instant|medium|high|ultra|pro|max|highest|auto)(?=\s|:|;|$)/iu);
+    const match = firstLine.match(ROUTE_OVERRIDE_PATTERN);
     if (!match) return null;
     const token = lowerText(match[1]).replace(/\s*-\s*|\s+/gu, '-');
     if (token === 'extra-high' || token === 'x-high' || token === 'xhigh') return 'extra-high';
@@ -1393,6 +1453,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     let debuggingWork = false;
     let longHorizon = false;
     let expertWork = false;
+    const answerVerification = requiresAnswerVerification(raw);
 
     const acknowledgment = /^(?:thanks?(?: you)?|thank you|ok(?:ay)?|got it|cool|great|yes|no|hello|hi|hey|bye)[.!\s]*$/iu;
     const simpleTransform = /^(?:please\s+)?(?:make|rewrite|shorten|translate|format|spell|capitalize|lowercase)\b.{0,160}$/iu;
@@ -1410,6 +1471,12 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     else if (technical.test(lower) || /\b(?:architecture|concurrency|distributed system|security review|threat model)\b/iu.test(lower)) score = 28;
     else if (normalAnalysis.test(lower)) score = 24;
     else score = wordCount > 45 ? 20 : 12;
+
+    if (answerVerification) {
+      score = Math.max(score, 40);
+      reasons.push('verify a supplied answer before explaining');
+      strongGroups.add('supplied-answer verification');
+    }
 
     const attachmentCount = clampInteger(context.attachmentCount, 0, 0, 100);
     if (attachmentCount > 0) {
@@ -1520,6 +1587,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
     if (highStakes && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
     if (debuggingWork && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
+    if (answerVerification && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
     if (modelLevelRank(target) >= ROUTE_LEVEL_RANK['extra-high'] && strongGroups.size < 2) target = 'high';
     if (modelLevelRank(target) >= ROUTE_LEVEL_RANK.pro && (
       strongGroups.size < 3 || !(longHorizon || expertWork || (highStakes && strongGroups.has('source synthesis')))
@@ -1535,6 +1603,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       score,
       confidence,
       explicit: false,
+      strict: answerVerification,
       reasons: reasons.length ? reasons : [score < 20 ? 'short everyday request' : 'general complexity'],
     };
   }
@@ -3038,7 +3107,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     }
 
     function routingIsStrict(decision) {
-      return Boolean(decision.explicit);
+      return Boolean(decision && (decision.explicit || decision.strict));
     }
 
     function programmaticClick(node) {
@@ -3267,6 +3336,10 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       };
 
       if (snapshot.specialMode) {
+        if (routingIsStrict(decision) && modelLevelRank(current) < targetRank) {
+          if (!silent) toast(`${snapshot.specialMode} did not expose a confirmed ${modelLevelLabel(target)}-or-stronger level. Your accuracy-checked draft was not sent.`, 8_000);
+          return false;
+        }
         if (!silent) toast(`Adaptive Auto kept the current model because ${snapshot.specialMode} controls model compatibility.`);
         return replayNativeSend(snapshot, decision, current || 'unknown', manual, `kept current for ${snapshot.specialMode}`);
       }
@@ -3504,6 +3577,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         if (!silent) toast(`${modelLevelLabel(target)} is not available as an exact option in the current picker. Your explicit-route draft was not sent.`, 8_000);
         return false;
       }
+      if (!stagedThinkingChoice && decision.strict && modelLevelRank(choice.level) < targetRank) {
+        closeModelMenu(picker);
+        if (!silent) toast(`${modelLevelLabel(target)} or a stronger level is not available in the current picker. Your accuracy-checked draft was not sent.`, 8_000);
+        return false;
+      }
 
       let selectionConfirmed = choice.level === current;
       if (choice.level !== current) {
@@ -3637,7 +3715,41 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       const composer = options.composer && options.composer.isConnected ? options.composer : findComposer(doc);
       const snapshot = captureSendSnapshot(composer);
       if (!snapshot) return false;
-      snapshot.beforeReplay = typeof options.beforeReplay === 'function' ? options.beforeReplay : null;
+      const suppliedBeforeReplay = typeof options.beforeReplay === 'function' ? options.beforeReplay : null;
+      const guardedDraft = options.routingText == null
+        ? buildAccuracyGuardedPrompt(snapshot.draft)
+        : snapshot.draft;
+      if (guardedDraft !== snapshot.draft) {
+        snapshot.beforeReplay = async (context) => {
+          const liveComposer = context.composer && context.composer.isConnected ? context.composer : findComposer(doc);
+          if (!liveComposer || !composerTextEquals(liveComposer, snapshot.draft) ||
+            !setComposerText(liveComposer, guardedDraft, win) || !composerTextEquals(liveComposer, guardedDraft)) {
+            if (!snapshot.silent) toast('The accuracy check could not be added safely. Your message was not sent.', 8_000);
+            return false;
+          }
+          const activeComposer = findComposer(doc);
+          if (!activeComposer || !activeComposer.isConnected || !composerTextEquals(activeComposer, guardedDraft)) {
+            if (!snapshot.silent) toast('The message box changed while the accuracy check was added. Your message was not sent.', 8_000);
+            return false;
+          }
+          let refreshComposer = activeComposer;
+          if (suppliedBeforeReplay) {
+            const ready = await suppliedBeforeReplay({
+              ...context,
+              composer: activeComposer,
+              sendButton: findSendButton(doc, activeComposer),
+              form: activeComposer.closest('form'),
+            });
+            if (!ready) return false;
+            if (typeof ready === 'object' && ready.composer && ready.composer.isConnected) {
+              refreshComposer = ready.composer;
+            }
+          }
+          return { refreshSnapshot: true, composer: refreshComposer };
+        };
+      } else {
+        snapshot.beforeReplay = suppliedBeforeReplay;
+      }
       snapshot.silent = options.silent === true;
       snapshot.fallbackToCurrentModel = options.fallbackToCurrentModel === true;
       state.adaptiveCancelled = false;
@@ -4622,7 +4734,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       return true;
     }
 
-    async function stageNativeBranchQuestion(job, expectedConversation, baselineUserCount) {
+    async function stageNativeBranchQuestion(job, expectedConversation, baselineUserCount, outgoingQuestion = job.question) {
       const deadline = Date.now() + branchComposerTimeout;
       let stableComposer = null;
       let stableDraft = '';
@@ -4652,7 +4764,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           }
           if (attachmentState(composer).count) return { ok: false, reason: 'attachment' };
           const draft = getComposerText(composer).trim();
-          if (draft && !composerTextEquals(composer, job.question)) return { ok: false, reason: 'draft' };
+          if (draft && !composerTextEquals(composer, outgoingQuestion)) return { ok: false, reason: 'draft' };
 
           if (!draft) {
             if (emptyComposer !== composer) {
@@ -4664,7 +4776,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
               continue;
             }
             if (writeAttempts >= 3) return { ok: false, reason: 'timeout' };
-            setComposerText(composer, job.question, win);
+            setComposerText(composer, outgoingQuestion, win);
             writeAttempts += 1;
             nextWriteAt = Date.now() + Math.min(250 * (2 ** (writeAttempts - 1)), 750);
             emptyComposer = null;
@@ -4721,6 +4833,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         await markSideSendAttempted(job);
         return finishObservedSideSend(job, expectedConversation, baselineUserCount);
       }
+      const outgoingQuestion = job.kind === 'ask'
+        ? buildAccuracyGuardedPrompt(job.question)
+        : job.question;
       if (!job.questionInserted) {
         job.questionInserted = true;
         job.baselineUserCount = baselineUserCount;
@@ -4729,7 +4844,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           return false;
         }
       }
-      let staged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount);
+      let staged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount, outgoingQuestion);
       if (staged.sent) {
         await markSideSendAttempted(job);
         return finishObservedSideSend(job, expectedConversation, baselineUserCount);
@@ -4771,12 +4886,13 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             composer,
             silent: true,
             fallbackToCurrentModel: true,
+            routingText: job.question,
             beforeReplay: async () => {
               const currentComposer = findComposer(doc);
               const currentSendButton = currentComposer && findSendButton(doc, currentComposer);
               if (!isExpectedBranchConversation(job, expectedConversation) ||
                 currentUserCount() > baselineUserCount || hasActiveGeneration(doc) ||
-                !currentComposer || !composerTextEquals(currentComposer, job.question) ||
+                !currentComposer || !composerTextEquals(currentComposer, outgoingQuestion) ||
                 attachmentState(currentComposer).count || !currentSendButton ||
                 currentSendButton.disabled || currentSendButton.getAttribute('aria-disabled') === 'true') return false;
               if (!await markSideSendAttempted(job)) return false;
@@ -4785,10 +4901,10 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
               const persistedSendButton = persistedComposer && findSendButton(doc, persistedComposer);
               if (isExpectedBranchConversation(job, expectedConversation) &&
                 currentUserCount() === baselineUserCount && !hasActiveGeneration(doc) &&
-                persistedComposer && composerTextEquals(persistedComposer, job.question) &&
+                persistedComposer && composerTextEquals(persistedComposer, outgoingQuestion) &&
                 !attachmentState(persistedComposer).count && persistedSendButton &&
                 !persistedSendButton.disabled && persistedSendButton.getAttribute('aria-disabled') !== 'true') return true;
-              const restaged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount);
+              const restaged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount, outgoingQuestion);
               return restaged.ok ? { refreshSnapshot: true, composer: restaged.composer } : false;
             },
           });
@@ -4807,7 +4923,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         const remountedComposer = findComposer(doc);
         if (remountedComposer && (getComposerText(remountedComposer).trim() ||
           activeToolState(remountedComposer).signature !== routingToolSignature)) break;
-        staged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount);
+        staged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount, outgoingQuestion);
         if (staged.sent) {
           await markSideSendAttempted(job);
           return finishObservedSideSend(job, expectedConversation, baselineUserCount);
@@ -5586,6 +5702,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     closestAssistantTurn,
     quoteForPrompt,
     buildSelectedQuestion,
+    requiresAnswerVerification,
+    buildAccuracyGuardedPrompt,
     extractAssistantHandoff,
     assistantTurnFingerprint,
     conversationContextFingerprint,

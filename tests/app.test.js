@@ -930,6 +930,58 @@ test('fallback routing failure sends once with the current model instead of stra
   }
 });
 
+test('fallback never sends a claimed-answer challenge with an unverified weak model', async () => {
+  const jobId = 'fallback_accuracy_guard_1234';
+  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
+  const question = "I don't get why the answer is 12V and 4V.";
+  const stored = new Map([[storageKey, toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    question,
+    fallbackMode: true,
+    fallbackTranscript: 'USER:\nOriginal problem\n\nASSISTANT:\nThe answer is 12V and 4V.',
+    branchReloadFrom: 'fallback_source_page_1234',
+  })]]);
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: `https://chatgpt.com/new#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  const locks = createIfAvailableLockManager();
+  Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
+  let sendCount = 0;
+  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sendCount += 1; });
+  const app = toolkit.createApp(dom.window.document, dom.window, {
+    initialJobId: jobId,
+    pageInstanceId: 'fallback_accuracy_destination_1234',
+    routingDiscoveryTimeout: 100,
+  });
+
+  try {
+    await app.start();
+    const saved = stored.get(storageKey);
+    assert.equal(sendCount, 0);
+    assert.equal(saved.question, question, 'storage and recovery keep the original user question');
+    assert.equal(saved.sendAttempted, false);
+    assert.match(dom.window.document.querySelector('#prompt-textarea').value, /independently verify the stated answer or result/iu);
+    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /interrupted before Send/iu);
+    assert.equal(dom.window.document.querySelector('#cgs-recovery-question').value, question);
+  } finally {
+    if (app.state.observer) app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
+});
+
 test('fallback never turns an explicit-route failure into an unintended current-model Send', async () => {
   const jobId = 'fallback_explicit_route_guard_1234';
   const storageKey = `chatgptSidecar.job.v1.${jobId}`;
@@ -1443,6 +1495,62 @@ test('freshly reloaded branch auto-sends once even when its model control is una
     assert.equal(composerReplacementCount, 1, 'the verified branch restages after a composer hydration');
     assert.equal(sendPersistenceReplacementCount, 1, 'a write-ahead persistence remount is restaged before Send');
     assert.equal(sendSawWriteAheadPhase, true);
+  } finally {
+    app.state.observer.disconnect();
+    if (previousGM === undefined) delete globalThis.GM;
+    else globalThis.GM = previousGM;
+    dom.window.close();
+  }
+});
+
+test('freshly reloaded branch keeps a claimed-answer challenge unsent without High', async () => {
+  const jobId = 'native_accuracy_guard_job_1234';
+  const question = 'How did you get 12V and 4V?';
+  const dom = new JSDOM(`<!doctype html><html><body><main>
+    <article data-testid="conversation-turn-1"><div data-message-author-role="assistant">The answer is 12V and 4V.</div></article>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+  </main></body></html>`, {
+    url: `https://chatgpt.com/c/separate-side-chat#cwt-job=${jobId}`,
+    pretendToBeVisual: true,
+  });
+  const { document } = dom.window;
+  const turn = document.querySelector('article');
+  const stored = new Map();
+  const previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
+    async setValue(key, value) { stored.set(key, value); },
+    async deleteValue(key) { stored.delete(key); },
+  };
+  let sendCount = 0;
+  document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sendCount += 1; });
+  const app = toolkit.createApp(document, dom.window, {
+    pageInstanceId: 'native_accuracy_destination_1234',
+    routingDiscoveryTimeout: 100,
+  });
+  await app.start();
+  app.state.incomingJobId = jobId;
+  const job = toolkit.sanitizeJob({
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/source-chat',
+    kind: 'ask',
+    locator: toolkit.getTurnLocator(turn, document),
+    targetFingerprint: toolkit.assistantTurnFingerprint(turn),
+    question,
+    branchClickAttempted: true,
+    branchConversation: 'separate-side-chat',
+    branchReloadFrom: 'source_page_1234',
+  });
+
+  try {
+    assert.equal(await app.runIncomingJob(job), false);
+    assert.equal(sendCount, 0);
+    assert.equal(job.question, question);
+    assert.equal(job.sendAttempted, false);
+    assert.ok(document.querySelector('#prompt-textarea').value.startsWith(question));
+    assert.match(document.querySelector('#prompt-textarea').value, /independently verify the stated answer or result/iu);
+    assert.match(document.querySelector('#cgs-recovery-reason').textContent, /interrupted before Send/iu);
+    assert.equal(document.querySelector('#cgs-recovery-question').value, question);
   } finally {
     app.state.observer.disconnect();
     if (previousGM === undefined) delete globalThis.GM;

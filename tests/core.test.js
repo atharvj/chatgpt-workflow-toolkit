@@ -37,6 +37,35 @@ test('selected text is quoted and clipped safely for a side question', () => {
   );
 });
 
+test('accuracy guard verifies a claimed answer once without truncating the user question', () => {
+  const question = "I don't get why the answer is 12V and 4V.";
+  const guarded = toolkit.buildAccuracyGuardedPrompt(question);
+  assert.ok(guarded.startsWith(question));
+  assert.match(guarded, /independently verify the stated answer or result/iu);
+  assert.match(guarded, /if it is wrong.+corrected result/iu);
+  assert.equal(toolkit.buildAccuracyGuardedPrompt(guarded), guarded, 'retries do not duplicate the guard');
+  assert.match(
+    toolkit.buildAccuracyGuardedPrompt("!route:high I don't get why the answer is 12V."),
+    /independently verify the stated answer or result/iu,
+    'a same-line route override does not hide the question from the guard',
+  );
+  assert.equal(toolkit.buildAccuracyGuardedPrompt('Why is the sky blue?'), 'Why is the sky blue?');
+  assert.equal(toolkit.buildAccuracyGuardedPrompt(question, question.length + 5), question, 'the original is never truncated to fit the guard');
+
+  const job = toolkit.sanitizeJob({
+    version: 1,
+    createdAt: Date.now(),
+    sourceUrl: 'https://chatgpt.com/c/accuracy-source',
+    kind: 'ask',
+    locator: { turnIndex: 1, assistantIndex: 0 },
+    question,
+  });
+  assert.equal(job.question, question, 'saved and recovery state keeps the user-authored question');
+  const fallback = toolkit.buildSideFallbackPrompt('USER:\nQuestion\n\nASSISTANT:\nThe answer is 12V.', question, 'ask', 'accuracy_guard_job');
+  assert.match(fallback, /independently verify the stated answer or result/iu);
+  assert.equal((fallback.match(/independently verify the stated answer or result/giu) || []).length, 1);
+});
+
 test('selection pill stays visible without covering a bottom-edge selection', () => {
   const selection = { left: 40, top: 738, width: 320, height: 24, right: 360, bottom: 762 };
   const position = toolkit.chooseSelectionPillPosition(
