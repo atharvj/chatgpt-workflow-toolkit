@@ -337,6 +337,20 @@ test('simple prompt switches High to Instant and replays Send exactly once', asy
   assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
 });
 
+test('uncertain boundary prompt switches Instant to the safer Medium level and sends once', async (t) => {
+  const harness = await createHarness({ prompt: 'Write a short poem about rain.', pickerLevel: 'Instant' });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.picker.textContent, 'Medium');
+  assert.equal(harness.app.state.lastRouteDecision.target, 'medium');
+  assert.match(harness.app.state.lastRouteDecision.reason, /uncertainty safety margin/iu);
+});
+
 test('fallback-owned draft may be reformatted while its model menu opens and still sends once', async (t) => {
   const jobId = 'fallback_route_hydration_job_1234';
   const expected = toolkit.buildSideFallbackPrompt(
@@ -436,6 +450,31 @@ test('claimed-answer challenge switches Instant to High, verifies the premise, a
   assert.match(harness.composer.value, /independently verify the stated answer or result/iu);
   assert.equal(harness.app.state.lastRouteDecision.target, 'high');
   assert.equal(harness.app.state.lastRouteDecision.level, 'high');
+});
+
+test('uncertain answer recheck prefers the inherited higher level but accepts the High safety floor', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Are you sure?',
+    pickerLevel: 'High',
+    modelLevels: ['Instant', 'Medium', 'High'],
+  });
+  t.after(() => harness.cleanup());
+  harness.app.state.lastRouteDecision = {
+    path: '/c/adaptive-send',
+    level: 'extra-high',
+    target: 'extra-high',
+    timestamp: Date.now(),
+    manual: false,
+    reason: 'previous complex task',
+  };
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'extra-high');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'high');
+  assert.match(harness.composer.value, /independently verify the stated answer or result/iu);
 });
 
 test('claimed-answer challenge never downgrades below High when only weaker levels exist', async (t) => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.12
+// @version      1.4.13
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.12';
+  const VERSION = '1.4.13';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -755,21 +755,26 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       ? withoutBom.slice(overrideMatch[0].length).replace(/^\s*(?::|;)?\s*/u, '')
       : raw;
     const fullText = lowerText(prompt);
-    if (!fullText || /^(?:rewrite|rephrase|translate|edit|proofread|quote|summari[sz]e)\b/iu.test(fullText)) return false;
+    const laterVerificationClause = /\b(?:but|and|then|first|also)\b.{0,160}\b(?:check|recheck|double-check|verify|confirm|validate|correct|right|wrong|accurate)\b/iu.test(fullText);
+    if (!fullText || !laterVerificationClause && (
+      /^(?:please\s+)?(?:rewrite|rephrase|translate|edit|proofread|quote|summari[sz]e|classify|extract)\b/iu.test(fullText) ||
+      /^what does\b.{0,160}\bmean\b/iu.test(fullText) ||
+      /^(?:define|explain)\s+(?:the\s+)?(?:word|phrase|term)\b/iu.test(fullText)
+    )) return false;
     const questionMarker = 'my question:';
     const markerIndex = fullText.lastIndexOf(questionMarker);
     const selectedContext = markerIndex >= 0 ? fullText.slice(0, markerIndex) : '';
     const text = markerIndex >= 0 ? fullText.slice(markerIndex + questionMarker.length).trim() : fullText;
     if (!text) return false;
 
-    const claimedAnswer = /\b(?:the\s+)?(?:answer|result|solution|value|output)\s+(?:is|was|equals?|would be|should be|came out(?: to)?)\b/iu;
+    const claimedAnswer = /\b(?:(?:the|my|your|our|their|this|that)\s+)?(?:answer|result|solution|value|output)\s+(?:is|was|equals?|would be|should be|could be|might be|came out(?: to)?)\b/iu;
     const challengeLead = /^(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:(?:explain|justify|why|how)\b|(?:tell|show) me\s+(?:why|how)\b|help me understand\s+(?:why|how)\b)|^i\s+(?:(?:still|really|just)\s+)?(?:do\s+not|don['’]?t|cannot|can['’]?t)\s+(?:get|understand|see|follow)\b/iu;
     const reverseClaimedAnswer = /\b(?:why|how)\s+(?:(?:is|was)\s+.{1,80}|(?:would|should|could)\s+.{1,80}\s+be)\s+(?:the\s+)?(?:answer|result|solution|value|output)\b(?:\s+(?:(?:to|for)\s+(?:this|the)\s+(?:question|problem|exercise|equation|case)|in\s+(?:this|the)\s+(?:problem|case|context|key)))?[?.!]*$/iu;
     const forwardAuxClaim = /\b(?:why|how)\s+(?:should|would|could)\s+(?:the\s+)?(?:answer|result|solution|value|output)\s+be\b/iu;
     const correctnessChallenge = /\b(?:why|how)\s+(?:(?:is|was|isn['’]?t|wasn['’]?t)\s+.{1,80}?\s+|.{1,80}?\s+(?:is|was|isn['’]?t|wasn['’]?t|would be|could be|should be)\s+|(?:can|could|should|would|can['’]?t|cannot)\s+.{1,80}?\s+be\s+)(?:correct|right|valid)\b(?:\s+(?:here|in (?:this|the) (?:problem|case|context)))?[?.!]*$/iu;
-    const numericAnswerPiece = String.raw`[-+]?(?:\d+(?:[.,]\d+)?|\.\d+)(?:\s*(?:%|°(?:c|f)?|v|mv|kv|volts?|a|ma|ka|amps?|w|mw|kw|watts?|j|kj|n|pa|kpa|mpa|hz|khz|mhz|ghz|ohms?|m|cm|mm|km|in|ft|yd|mi|g|mg|kg|lbs?|oz|l|ml|s|ms|mins?|h|hrs?|(?:m|km)\/(?:s|h)))?`;
+    const numericAnswerPiece = String.raw`[-+]?(?:(?:\d+\s*\/\s*\d+)|(?:\d+(?:[.,]\d+)?|\.\d+)(?:\s*(?:%|°(?:c|f)?|v|mv|kv|volts?|a|ma|ka|amps?|w|mw|kw|watts?|j|kj|n|pa|kpa|mpa|hz|khz|mhz|ghz|ohms?|m|cm|mm|km|in|ft|yd|mi|g|mg|kg|lbs?|oz|l|ml|s|ms|mins?|h|hrs?|(?:m|km)\/(?:s|h)))?)`;
     const answerOnlyValue = new RegExp(String.raw`^${numericAnswerPiece}(?:\s*(?:and|or|,)\s*${numericAnswerPiece})*[?.!]*$`, 'iu');
-    const derivationMatch = text.match(/\b(?:how|why)\b.{0,80}\b(?:(?:(?:did\s+)?(?:you|we|they)\s+)?(?:get|got|find|found|calculate|calculated|compute|computed|derive|derived|conclude|concluded|return|returned|produce|produced)|(?:you|we|they)\s+arrived at)\s+(.+?)$/iu);
+    const derivationMatch = text.match(/\b(?:how|why)\b.{0,80}\b(?:(?:(?:did\s+)?(?:you|we|they)\s+)?(?:get|got|find|found|reach|reached|calculate|calculated|compute|computed|derive|derived|conclude|concluded|return|returned|produce|produced)|(?:you|we|they)\s+arrived at)\s+(.+?)$/iu);
     const derivationValue = derivationMatch && derivationMatch[1] || '';
     const derivationChallenge = Boolean(derivationValue && (
       answerOnlyValue.test(derivationValue) ||
@@ -783,7 +788,52 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const selectedChallenge = markerIndex >= 0 &&
       /^(?:why|how)(?:\s+so)?[?.!]*$/iu.test(text) &&
       (claimedAnswer.test(selectedContext) || selectedHasNumericValue);
-    return selectedChallenge || deicticValueChallenge || challengeLead.test(text) && (
+    const verificationVerb = /\b(?:check|recheck|double[\s-]?check|verify|confirm|validate)\b/iu;
+    const verifiableSubject = /\b(?:answer|result|solution|value|output|calculation|math|derivation|reasoning|logic|conclusion|determinant|equation|work|proof|choice|option|correct|right|wrong|valid|accurate|mistake|error)\b/iu;
+    const operationalNonAnswer = /\b(?:answer\s+(?:box|button|field|form)|answer\s+(?:was\s+)?(?:submitted|saved|uploaded|received)|(?:answer|result|calculation|determinant)\s+(?:schema|checkbox|field|button|menu|dropdown)|(?:solution\s+file\b.{0,40}\bexists?|proof\s+of\s+concept\b.{0,40}\bbuilds?)|result\s+(?:card|page|object)|(?:api\s+)?result\s+(?:has|contains|includes)|output\s+(?:format|file|directory|folder|path|stream|variable|parameter|field|property)|(?:option|choice)\s+[a-z]{1,4}\b.{0,40}\b(?:menu|dropdown|selected|selection|interface|setting)|(?:this|that|the)\s+(?:[\p{L}\p{N}_-]+\s+){0,2}(?:box|checkbox|button|option|setting|link|dialog)|work\s+(?:schedule|calendar|email)|proof\s+of\s+(?:delivery|identity|address|purchase|insurance)|(?:email|phone number|shipping address|appointment time|booking date|date|coupon code|username|password|file path|url|link|sentence|translation|reservation)\b.{0,60}\b(?:accurate|valid|correct|right)|email\s+(?:address|account)|correct\s+(?:spelling|spellings|grammar|wording|words?)|(?:spelling|spellings|grammar|wording|words?|capitalization|verb tense)\s+(?:is\s+|are\s+)?(?:correct|right)|(?:sentence\b.{0,50}\bgrammatically\s+correct|right\s+word)|(?:css|json|html|xml|yaml|schema|syntax)\s+(?:is\s+)?valid|(?:button|link|control|icon)\b.{0,32}\bon\s+the\s+(?:right|left)|(?:right|left)\s+(?:button|link|control|icon)\b(?:.{0,32}\b(?:works?|opens?|closes?|responds?))?)\b/iu.test(text);
+    const deicticVerification = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:check|recheck|double[\s-]?check|verify|confirm|validate)\s+(?:that|this|it)(?:\s+again)?[?.!]*$/iu.test(text);
+    const certaintyChallenge = /^(?:are\s+you\s+(?:(?:really|absolutely|completely|totally|100\s*%)\s+)?(?:sure|certain|positive|confident)\b.*|(?:you(?:['’]re|\s+are)?|still|really)\s+(?:sure|certain|positive)\b.*|(?:am\s+i|is\s+(?:this|that|it)|are\s+(?:these|those))\s+(?:actually\s+|definitely\s+|really\s+)?(?:correct|right|wrong|valid|accurate))[?.!]*$/iu.test(text);
+    const trailingCertainty = /\b(?:am\s+i|is\s+(?:this|that|it)|are\s+(?:these|those))\s+(?:actually\s+|definitely\s+|really\s+)?(?:correct|right|wrong|valid|accurate)[?.!]*$/iu;
+    const keyClaim = /\b(?:answer\s+key|key)\s+(?:says?|gives?|lists?|marks?)\b/iu;
+    const verificationLead = /^(?:(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?|(?:answer|respond)\s+(?:quickly|briefly)[,:;]?\s+(?:but\s+)?)(?:check|recheck|double[\s-]?check|verify|confirm|validate)\b/iu;
+    const compoundVerification = laterVerificationClause && (
+      verificationVerb.test(text) && verifiableSubject.test(text) ||
+      trailingCertainty.test(text) ||
+      /\b(?:if|whether)\s+(?:it|this|that|the\s+answer|the\s+solution)\s+(?:is|was)\s+(?:correct|right|wrong|valid|accurate)\b/iu.test(text)
+    );
+    const bareRecheck = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:recheck|verify)(?:\s+(?:this|that|it))?|double[\s-]?check(?:\s+(?:this|that|it))?|check\s+(?:again|once\s+more)(?:\s+(?:this|that|it))?)(?:\s+please)?[?.!]*$/iu.test(text);
+    const reasoningRecheck = !operationalNonAnswer && /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:check|recheck|double[\s-]?check|verify|validate|review)\s+(?:(?:my|your|the|this)\s+)?(?:calculation|reasoning|logic|conclusion|derivation|proof|answer|result|solution|work)[?.!]*$|^(?:please\s+)?(?:recalculate|re[\s-]?evaluate)\s+(?:that|this|it|(?:the|my|your)\s+(?:answer|result|calculation|reasoning|work))[?.!]*$/iu.test(text);
+    const directRecheck = !operationalNonAnswer && (certaintyChallenge || deicticVerification || bareRecheck || compoundVerification || reasoningRecheck ||
+      verificationLead.test(text) && verificationVerb.test(text) && verifiableSubject.test(text));
+    const deicticCorrectnessQuestion = !operationalNonAnswer && /^(?:is|was|are|were)\s+(?:this|that|it|these|those)\s+(?:actually\s+|definitely\s+|really\s+)?(?:correct|right|wrong|accurate|valid)[?.!]*$/iu.test(text);
+    const trailingCorrectnessTag = /(?:[,;:]|[—–-])\s*(?:correct|right|wrong)[?.!]*$/iu;
+    const claimThenCheck = !operationalNonAnswer && (claimedAnswer.test(text) || keyClaim.test(text)) && (trailingCertainty.test(text) || trailingCorrectnessTag.test(text));
+    const personalResultCheck = /\bi\s+(?:got|calculated|computed|found|think|believe)\b.{0,100}\b(?:which|what|is\s+(?:this|that|it))\b.{0,80}\b(?:answer|result|option|choice|correct|right|wrong)\b/iu.test(text);
+    const compactAnswerValue = String.raw`(?:[a-z][\p{L}\p{N}_]*\s*=\s*${numericAnswerPiece}|${numericAnswerPiece}|(?:option|choice)\s+[a-z]{1,4}|[a-z])`;
+    const freeformAnswerValue = String.raw`(?:[\p{L}][\p{L}\p{N}'’.\/-]*(?:\s+[\p{L}][\p{L}\p{N}'’.\/-]*){0,3})`;
+    const invertedClaim = new RegExp(String.raw`^(?:is|was|could|should|would|might)\s+(?:(?:the|my|your|our|their)\s+)?(?:answer|result|solution|value|output)\s+(?:(?:actually|definitely|really)\s+)?(?:be\s+)?${compactAnswerValue}[?.!]*$`, 'iu').test(text);
+    const candidateCorrectness = !operationalNonAnswer && new RegExp(String.raw`^(?:is|was)\s+${compactAnswerValue}\s+(?:actually\s+|definitely\s+|really\s+)?(?:correct|right|wrong|valid|accurate)[?.!]*$`, 'iu').test(text);
+    const candidateAsAnswer = new RegExp(String.raw`^(?:is|was)\s+${compactAnswerValue}\s+(?:actually\s+|definitely\s+|really\s+)?(?:the\s+)?(?:correct|right|wrong)\s+(?:answer|result|solution|choice|option)[?.!]*$`, 'iu').test(text);
+    const freeformCandidateAsAnswer = !operationalNonAnswer && new RegExp(String.raw`^(?:is|was)\s+${freeformAnswerValue}\s+(?:actually\s+|definitely\s+|really\s+)?(?:the\s+)?(?:correct|right|wrong)\s+(?:answer|result|solution|choice|option)[?.!]*$`, 'iu').test(text);
+    const mathEquationCorrectness = !operationalNonAnswer && /^(?:is|was)\s+[\d\s()+\-*/^%.]+=[\d\s()+\-*/^%.]+\s+(?:correct|right|wrong|accurate)[?.!]*$/iu.test(text);
+    const answerPredicateCheck = !operationalNonAnswer && /^(?:is|was)\s+(?:(?:the|my|your|our|their)\s+)?(?:answer|result|solution|choice|option|calculation|reasoning|logic|conclusion|derivation|proof|work)\s+(?:actually\s+|definitely\s+|really\s+)?(?:correct|right|wrong|valid|accurate|sound)[?.!]*$/iu.test(text);
+    const tellMeCorrectness = !operationalNonAnswer && /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:tell\s+me|see|check|determine|find\s+out)\s+(?:whether|if)\s+.{1,80}\s+(?:is|was)\s+(?:correct|right|wrong|valid|accurate)[?.!]*$/iu.test(text);
+    const processCorrectness = /^(?:did\s+i\s+(?:calculate|compute|choose|pick|get|solve)\s+.{1,80}\s+(?:correctly|right)|did\s+i\s+(?:choose|pick|get)\s+(?:the\s+)?(?:correct|right|wrong)\s+(?:answer|result|choice|option))[?.!]*$/iu.test(text);
+    const candidateLooksRight = new RegExp(String.raw`^does\s+${compactAnswerValue}\s+look\s+(?:correct|right|wrong|valid)[?.!]*$`, 'iu').test(text);
+    const checkCompactCandidate = new RegExp(String.raw`^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:check|recheck|double[\s-]?check|verify)\s+${compactAnswerValue}(?:\s+for\s+me)?[?.!]*$`, 'iu').test(text);
+    const personalCompactCheck = new RegExp(String.raw`^(?:(?:did\s+i\s+(?:get|choose|pick|select|calculate|find)|i\s+(?:got|chose|picked|selected|calculated|found)|my\s+(?:answer|calculation|result|solution)\s+(?:is|was|gave|gives|came\s+out\s+to))\s+${compactAnswerValue})(?:\s*(?:[.!;,:—–-])?\s*(?:(?:am\s+i|is\s+(?:this|that|it))\s+)?(?:correct|right|wrong))?[?.!]*$`, 'iu').test(text);
+    const personalFreeformCheck = !operationalNonAnswer && new RegExp(String.raw`^(?:i\s+(?:got|chose|picked|selected|found)\s+${freeformAnswerValue})\s*(?:[.!;,:—–-])?\s*(?:(?:am\s+i|is\s+(?:this|that|it))\s+)?(?:correct|right|wrong)[?.!]*$`, 'iu').test(text);
+    const negativeAnswerClaim = new RegExp(String.raw`^why\s+(?:isn['’]?t|is\s+not|wasn['’]?t|was\s+not)\s+(?:(?:the|my|your|our)\s+)?(?:answer|result|solution)\s+${compactAnswerValue}[?.!]*$`, 'iu').test(text);
+    const alternativeCandidate = new RegExp(String.raw`^(?:(?:wouldn['’]?t|shouldn['’]?t|couldn['’]?t|can['’]?t)\s+(?:it|this|that)\s+be\s+${compactAnswerValue}|(?:wouldn['’]?t|shouldn['’]?t|couldn['’]?t)\s+${compactAnswerValue}\s+be\s+(?:the\s+)?(?:answer|result|solution))[?.!]*$`, 'iu').test(text);
+    const conflictCheck = /\b(?:you\s+said|previous\s+answer|answer\s+key|key\s+says?|conflicts?\s+with)\b.{0,180}(?:\b(?:which|what)\s+(?:one\s+)?(?:is|was)\s+(?:right|correct)\b|\bbut\s+i\s+(?:got|chose|picked)\b)|\byour\s+answer\s+and\s+mine\s+disagree\b|\b(?:that|this|it)\s+contradicts?\s+(?:the\s+)?(?:answer\s+)?key\b/iu.test(text);
+    const disagreementChallenge = !operationalNonAnswer && new RegExp(String.raw`^(?:i\s+(?:do\s+not|don['’]?t)\s+think\s+(?:that|this|it)(?:['’]s|\s+is)\s+(?:correct|right)|i\s+think\s+${compactAnswerValue}\s+is\s+(?:wrong|incorrect)|(?:that|this|it|(?:your|the|that)\s+answer)\s+(?:doesn['’]?t\s+look\s+(?:correct|right)|seems?\s+(?:wrong|incorrect)|(?:is|was)\s+(?:wrong|incorrect)|can['’]?t\s+be\s+right)|${compactAnswerValue}\s+can['’]?t\s+be\s+right|no[,]?\s+(?:that|this|it)(?:['’]s|\s+is)\s+wrong|i\s+think\s+it\s+should\s+be\s+${compactAnswerValue}\s*,?\s+not\s+${compactAnswerValue}|what\s+if\s+${compactAnswerValue}\s+is\s+(?:the\s+)?answer\s+instead)[?.!]*$`, 'iu').test(text);
+    const reconsiderationChallenge = !operationalNonAnswer && /^(?:(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?reconsider\s+(?:that|this|the)\s+(?:answer|result|solution)|i\s+(?:doubt|do\s+not\s+trust|don['’]?t\s+trust)\s+(?:that|this|the)\s+(?:answer|result|solution)|(?:that|this)\s+(?:answer|result|solution)\s+looks?\s+suspicious|(?:that|this)\s+(?:cannot|can['’]?t)\s+be\s+correct|(?:that|this)\s+seems?\s+off|(?:that|this)\s+(?:does\s+not|doesn['’]?t)\s+add\s+up)[?.!]*$/iu.test(text);
+    const externalConflict = !operationalNonAnswer && /^(?:the\s+(?:answer\s+)?key\s+has\b.{1,80}\bbut\b.{1,80}\bseems?\s+(?:right|correct)|my\s+teacher\s+says?\b.{1,100}\b(?:wrong|incorrect)|the\s+calculator\s+says?\b.{1,80}\bnot\b.{1,80}|i\s+got\s+something\s+different|my\s+result\s+differs?\s+from\s+yours)[?.!]*$/iu.test(text);
+    const checkedMathStatement = !operationalNonAnswer && verificationLead.test(text) && /\b(?:whether|if)\b.{0,80}(?:[a-z][\p{L}\p{N}_]*\s*=\s*[-+]?\d|\bdeterminant\b|\bzero\b)/iu.test(text);
+    const accuracyRecheck = !operationalNonAnswer && /^(?:(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:make\s+sure|ensure)\s+(?:(?:this|that|the)\s+(?:answer|result)\s+is|(?:this|that|it)\s+is)\s+(?:correct|right|accurate)|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?make\s+(?:this|that|it)\s+more\s+correct|(?:please\s+)?fact[\s-]?check\s+(?:this|that|it))[?.!]*$/iu.test(text);
+    const namedAnswerClaim = !operationalNonAnswer && new RegExp(String.raw`^(?:(?:is|could|would|should|might)\s+(?:the\s+)?answer\s+(?:be\s+)?${freeformAnswerValue}|(?:make\s+sure|ensure)\s+(?:the\s+)?answer\s+is\s+${freeformAnswerValue}|why\s+(?:isn['’]?t|is\s+not)\s+(?:the\s+)?answer\s+${freeformAnswerValue}|(?:wouldn['’]?t|shouldn['’]?t)\s+(?:(?:the\s+)?answer\s+be\s+${freeformAnswerValue}|${freeformAnswerValue}\s+be\s+(?:the\s+)?answer))[?.!]*$`, 'iu').test(text);
+    const conciseCandidateChallenge = new RegExp(String.raw`^(?:(?:why|how\s+come)\s+(?:(?:option\s+)?${compactAnswerValue}|${compactAnswerValue}\s+is\s+(?:the\s+)?answer)|where\s+did\s+${compactAnswerValue}\s+come\s+from|(?:why|how)\s+did\s+you\s+(?:choose|pick|say)\s+${compactAnswerValue}|you\s+(?:chose|picked|selected|said)\s+${compactAnswerValue}\s*(?:[—–-]|[,;:])?\s*why|what\s+makes\s+${compactAnswerValue}\s+(?:correct|right)|[a-z][\p{L}\p{N}_]*\s+is\s+${compactAnswerValue}\s*,?\s+(?:right|correct)|i\s+got\s+(?:[a-z][\p{L}\p{N}_]*\s+as\s+${compactAnswerValue}|${compactAnswerValue}\s+for\s+[a-z][\p{L}\p{N}_]*)\s*,?\s+(?:right|correct))[?.!]*$`, 'iu').test(text);
+    return selectedChallenge || deicticValueChallenge || directRecheck || invertedClaim || deicticCorrectnessQuestion || claimThenCheck || personalResultCheck || candidateCorrectness || candidateAsAnswer || freeformCandidateAsAnswer || mathEquationCorrectness || answerPredicateCheck || tellMeCorrectness || processCorrectness || candidateLooksRight || checkCompactCandidate || personalCompactCheck || personalFreeformCheck || negativeAnswerClaim || alternativeCandidate || conflictCheck || disagreementChallenge || reconsiderationChallenge || externalConflict || checkedMathStatement || accuracyRecheck || namedAnswerClaim || conciseCandidateChallenge || challengeLead.test(text) && (
       claimedAnswer.test(text) || reverseClaimedAnswer.test(text) || forwardAuxClaim.test(text) || derivationChallenge || correctnessChallenge.test(text)
     );
   }
@@ -1506,6 +1556,15 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     }
 
     const lower = normalized.toLocaleLowerCase('en-US');
+    if (/^(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+you\s+to)\s+)?(?:please\s+)?(?:(?:try|attempt)\s+(?:to\s+)?(?:solve|prove|disprove|resolve)|try\s+solving|find\s+a\s+proof\s+of|(?:solve|prove|disprove|resolve))\b.{0,100}\b(?:riemann hypothesis|p\s*(?:versus|vs\.?|=)\s*np|navier[\s-]stokes (?:existence|equations?)|birch and swinnerton-dyer conjecture)\b/iu.test(lower)) {
+      return {
+        target: 'pro',
+        score: 100,
+        confidence: 0.98,
+        explicit: false,
+        reasons: ['named open research problem requires the strongest available reasoning'],
+      };
+    }
     const sample = raw.length <= 24_000 ? raw : `${raw.slice(0, 12_000)}\n${raw.slice(-12_000)}`;
     const sampleLower = sample.toLocaleLowerCase('en-US');
     const wordCount = (sample.match(/[\p{L}\p{N}_]+/gu) || []).length;
@@ -1515,26 +1574,50 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     let score = 12;
     let highStakes = false;
     let debuggingWork = false;
+    let formalReasoning = false;
     let longHorizon = false;
     let expertWork = false;
+    const behaviorPreservation = /\bwithout\s+changing\s+(?:behavior|behaviour|semantics|output)\b|\bpreserve\s+(?:the\s+)?(?:exact\s+)?(?:behavior|behaviour|semantics|output)\b/iu.test(sampleLower);
     const answerVerification = requiresAnswerVerification(raw);
 
     const acknowledgment = /^(?:thanks?(?: you)?|thank you|ok(?:ay)?|got it|cool|great|yes|no|hello|hi|hey|bye)[.!\s]*$/iu;
-    const simpleTransform = /^(?:please\s+)?(?:make|rewrite|shorten|translate|format|spell|capitalize|lowercase)\b.{0,160}$/iu;
-    const continuation = /^(?:why\??|how so\??|continue(?: and (?:finish|complete) it)?[.!]?|go on[.!]?|fix (?:that|it)[.!]?|try again[.!]?|prove it[.!]?|finish (?:that|it)[.!]?)$/iu;
-    const simpleFact = /^(?:what|who|when|where|which|define|explain)\b.{0,180}$/iu;
+    const simpleTransform = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:make|rewrite|rephrase|paraphrase|proofread|shorten|summari[sz]e|translate|format|spell|capitalize|lowercase|edit)\b.{0,160}$/iu;
+    const compoundReasoning = /\b(?:and|but|then|also)\b.{0,100}\b(?:analy[sz]e|assess|evaluate|verify|validate|confirm|check|compare|recommend|justify|explain|flag|identify|find|solve|decide|detect|review|calculate|ensure|audit|inspect|test|tell)\b|\b(?:weakness(?:es)?|risks?|risky|dangerous|secure|security|thread[\s-]?safe|injection|vulnerabilit\w*|trade-?offs?|edge cases?|hidden assumptions?|better|more accurate|riemann hypothesis|p\s+(?:versus|vs\.?)\s+np)\b|\bwithout\s+changing\s+(?:behavior|behaviour|semantics|output)\b|^(?:please\s+)?make\s+sure\b|^(?:please\s+)?make\s+(?:a|an)\s+(?:plan|strategy|argument|recommendation|decision)\b/iu;
+    const continuation = /^(?:why(?:\s+(?:not|though))?|how(?:\s+(?:so|exactly|did\s+you\s+know))?|what\s+do\s+you\s+mean|i(?:['’]m|\s+am)\s+(?:lost|confused)|(?:i\s+)?(?:still\s+)?(?:(?:do\s+not|don['’]?t)\s+(?:follow|understand|get\s+it))|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:elaborate(?:\s+(?:more|on\s+that))?|go\s+deeper|clarify|show\s+(?:me\s+)?the\s+steps)|clarify\s+that|say\s+that\s+another\s+way|put\s+that\s+differently|break\s+that\s+down|go\s+(?:over\s+that\s+again|through\s+it\s+once\s+more)|expand\s+on\s+that|explain\s+(?:further|why|your\s+reasoning)|show\s+your\s+work|walk\s+me\s+through\s+your\s+logic|continue(?: and (?:finish|complete) it)?|continue\s+from\s+there|go on|fix (?:that|it)|try again|prove (?:it|that)|finish (?:that|it)|run\s+through\s+that\s+again|walk\s+me\s+through\s+it\s+again|where\s+did\s+that\s+come\s+from|source\s+for\s+that|cite\s+that|recalculate (?:that|this|it)|re[\s-]?evaluate (?:the\s+)?(?:answer|result|that|this|it)|check your logic|your answer and mine disagree|(?:do\s+not|don['’]?t)\s+make\s+mistakes|answer\s+carefully)[?.!]*$/iu;
+    const simpleFact = /^(?:(?:define\s+[\p{L}\p{N}'’.-]+(?:\s+[\p{L}\p{N}'’.-]+){0,3}|what\s+(?:color\s+is|(?:planet|country|city|animal|element|number|day|month|year)\s+is|is\s+the\s+(?:capital|largest|smallest|tallest|longest)\b)\s*.{1,80}|how\s+(?:many|much|long|far|old)\b.{1,100}|who\s+(?:wrote|created|invented|painted|discovered)\s+.{1,100}|when\s+did\s+.{1,100}\s+(?:end|begin|start|happen|occur)|where\s+is\s+.{1,100})|(?:define|explain|what(?:['’]s|\s+(?:is|are)))\b.{1,120}\b(?:in simple terms|in one sentence)|what\s+does\b.{0,140}\bmean)[?.!]*$/iu;
     const simpleMath = /^(?:what is|calculate|compute)?\s*[\d\s()+\-*/^%.=]+\??$/iu;
-    const shortWriting = /\b(?:one|two|three|\d+)\s+(?:sentence|line|word)s?\b|\bshort\s+(?:email|reply|message|paragraph)\b/iu;
-    const technical = /\b(?:code|program|function|algorithm|python|javascript|typescript|rust|java|sql|regex|api|database|equation|theorem|prove|proof|derive|rigorous(?:ly)?|square root|math|physics|chemistry|research|study|analyze|analysis)\b/iu;
+    const simpleAdministrative = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:confirm\s+(?:the\s+)?proof\s+of\s+delivery|confirm\s+(?:that\s+)?(?:(?:the|my|your|our|their)\s+)?email\s+address|(?:is|are)\s+(?:this|that|these|those)\s+correct\s+(?:spelling|spellings|grammar|wording|words?)|(?:(?:check|recheck|double[\s-]?check|verify|confirm|validate)\b|tell\s+me\s+(?:whether|if)\b).{0,100}\b(?:weather|temperature|email|inbox|work email|phone number|shipping address|address|appointment time|meeting time|meeting room|booking time|train time|train schedule|bus schedule|booking date|date|coupon code|username|password|file path|file name|solution file|url|link|sentence|translation|reservation|spelling|word|capitalization|verb tense|door|grocery list|customer name|order status|calendar|menu|paragraph|box)\b)\b/iu;
+    const shortWriting = /\b(?:one|two|three|\d+)[\s-]+(?:sentence|line|word)s?\b|\bshort\s+(?:email|reply|message|paragraph)\b/iu;
+    const technical = /\b(?:code|program|function|algorithm|python|javascript|typescript|rust|java|sql|regex|api|database|equation|solve|theorem|prove|proof|derive|rigorous(?:ly)?|quantum|relativity|cryptograph\w*|oauth|cors|access[\s-]?control|denial of service|halting problem|riemann hypothesis|p\s+(?:versus|vs\.?)\s+np|square root|math|physics|chemistry|research|study|analyze|analysis)\b/iu;
     const normalAnalysis = /\b(?:compare|contrast|plan|recommend|trade-?offs?|pros and cons|evaluate|analy[sz]e|strategy|outline)\b/iu;
+    const advancedFactTopic = /\b(?:halting problem|riemann hypothesis|p\s+(?:versus|vs\.?|=)\s+np|navier[\s-]stokes|birch and swinnerton-dyer|quantum|relativity|formal verification)\b/iu;
+    const safeSimpleFact = simpleFact.test(lower) && wordCount <= 24 && !advancedFactTopic.test(lower) && !compoundReasoning.test(lower);
+    const safeSimpleTransform = simpleTransform.test(lower) && !compoundReasoning.test(lower) && !technical.test(lower) && !normalAnalysis.test(lower);
+    const safeShortWriting = shortWriting.test(lower) && wordCount <= 35 && !technical.test(lower) && !normalAnalysis.test(lower) && !compoundReasoning.test(lower);
+    const contextualReference = /\b(?:this|that|it|these|those|above|earlier|previous|same|again|sure|here|more|other|different|better|accurate)\b|\b(?:first|second|third|last|next|previous|other)\s+(?:step|part|option|answer|result|one)\b|\bpart\s+[a-z0-9]+\b/iu;
+    const contextualLead = /^(?:(?:can|could|would|will|do|does|did|is|are|should)\b|(?:please\s+)?(?:explain|check|verify|review|fix|help|compare|continue|finish|redo|retry|try|solve|show|tell|change)\b|(?:what|why|how|which)\b)/iu;
+    const simpleUiAction = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:check|uncheck|select|click|tick|press|open|close|copy|confirm)\s+(?:(?:this|that|the)\s+)?(?:[\p{L}\p{N}_-]+\s+){0,2}(?:box|checkbox|button|option|setting|link|dialog|text|menu)|check\s+(?:if|whether)\s+(?:this|that|it)\s+is\s+(?:the\s+)?(?:(?:right|left)\s+)?(?:button|option|link)|confirm\s+(?:this|that|the)?\s*email)\b/iu;
+    const metalinguisticVerification = /^what does\b.{0,160}\b(?:verify|verification|check|confirm|answer)\b.{0,160}\bmean\b/iu.test(lower);
+    const routineOperationalCheck = /\bproof\s+of\s+concept\b.{0,60}\b(?:builds?|runs?|works?)\b/iu.test(lower);
+    const implicitContextFollowUp = /^(?:(?:what\s+(?:should\s+i\s+do|do\s+(?:i|we)\s+do\s+now|now|next)|(?:now|then)\s+what|(?:okay[,]?\s+)?(?:so\s+)?then\s+what|so\s+what\s+now|and\s+then|where\s+do\s+we\s+go\s+from\s+here)|which\s+one|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:explain\s+more|do\s+the\s+next\s+one|continue\s+from\s+there)|(?:please\s+)?try\s+(?:a\s+)?different\s+approach|your answer and mine disagree)[?.!]*$/iu;
+    const genericCheckFollowUp = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:check|recheck|double[\s-]?check|verify|review)\b.{1,100}[?.!]*$/iu;
+    const ambiguousFollowUp = wordCount <= 28 && !safeSimpleTransform && !simpleAdministrative.test(lower) && !simpleUiAction.test(lower) && (
+      contextualReference.test(lower) && contextualLead.test(lower) || implicitContextFollowUp.test(lower) || genericCheckFollowUp.test(lower)
+    );
+    let uncertainBase = false;
 
     if (acknowledgment.test(lower)) score = 4;
     else if (simpleMath.test(lower)) score = 6;
-    else if (simpleTransform.test(lower) || (simpleFact.test(lower) && wordCount <= 24) || (shortWriting.test(lower) && wordCount <= 35)) score = 12;
+    else if (safeSimpleFact) score = 12;
+    else if (safeSimpleTransform || simpleAdministrative.test(lower) || simpleUiAction.test(lower) || safeShortWriting) score = 12;
     else if (/\b(?:write|rewrite|summari[sz]e|translate|draft|edit)\b/iu.test(lower)) score = 18;
     else if (technical.test(lower) || /\b(?:architecture|concurrency|distributed system|security review|threat model)\b/iu.test(lower)) score = 28;
     else if (normalAnalysis.test(lower)) score = 24;
-    else score = wordCount > 45 ? 20 : 12;
+    else {
+      score = wordCount > 80 ? 36 : wordCount > 45 ? 28 : 24;
+      uncertainBase = true;
+      reasons.push('unclear complexity favored the safer level');
+    }
 
     if (answerVerification) {
       score = Math.max(score, 40);
@@ -1553,18 +1636,51 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     }
 
     const previousLevel = extractModelLevel(context.previousLevel || '');
+    let contextualMinimumLevel = '';
+    let inheritedContext = false;
     if (continuation.test(lower)) {
       if (previousLevel) {
+        const inheritedLevel = previousLevel === 'auto' ? 'instant' : previousLevel;
+        const minimumLevel = answerVerification ? 'high' : 'medium';
+        const target = modelLevelRank(inheritedLevel) >= modelLevelRank(minimumLevel) ? inheritedLevel : minimumLevel;
         return {
-          target: previousLevel === 'auto' ? 'instant' : previousLevel,
-          score: Math.max(20, modelLevelRank(previousLevel) * 18),
+          target,
+          score: Math.max(20, modelLevelRank(target) * 18),
           confidence: 0.82,
           explicit: false,
           inherited: true,
-          reasons: ['continuation of the previous task'],
+          strict: answerVerification,
+          minimumLevel: answerVerification ? 'high' : '',
+          reasons: [answerVerification ? 'recheck the previous answer at High or above' : 'continuation of the previous task'],
         };
       }
-      return { target: 'medium', score: 24, confidence: 0.5, explicit: false, reasons: ['short follow-up without routing history'] };
+      return {
+        target: 'high',
+        score: 40,
+        confidence: 0.5,
+        explicit: false,
+        strict: answerVerification,
+        minimumLevel: answerVerification ? 'high' : '',
+        uncertain: true,
+        reasons: [answerVerification ? 'recheck the previous answer at High or above' : 'uncertain follow-up favored the safer higher level'],
+      };
+    }
+    if (ambiguousFollowUp) {
+      const inheritedLevel = previousLevel === 'auto' ? 'instant' : previousLevel;
+      contextualMinimumLevel = answerVerification
+        ? modelLevelRank(inheritedLevel) > ROUTE_LEVEL_RANK.high ? inheritedLevel : 'high'
+        : modelLevelRank(inheritedLevel) > ROUTE_LEVEL_RANK.medium ? inheritedLevel : 'medium';
+      inheritedContext = Boolean(previousLevel);
+      score = Math.max(score, answerVerification ? 40 : 24);
+      reasons.push(answerVerification
+        ? 'recheck the previous answer at High or above'
+        : 'uncertain follow-up kept a safer context level');
+    }
+    if (answerVerification && previousLevel && !contextualMinimumLevel) {
+      const inheritedLevel = previousLevel === 'auto' ? 'instant' : previousLevel;
+      contextualMinimumLevel = modelLevelRank(inheritedLevel) > ROUTE_LEVEL_RANK.high ? inheritedLevel : 'high';
+      inheritedContext = true;
+      reasons.push('recheck kept the previous level with a High minimum');
     }
 
     const addSignal = (pattern, points, code, strong = true) => {
@@ -1576,10 +1692,12 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     };
 
     debuggingWork = addSignal(/\b(?:debug|bug|failing test|failure|exception|stack trace|traceback|segmentation fault|root cause)\b|(?:type|reference|syntax|runtime|value)error\s*:/iu, 14, 'debugging');
-    addSignal(/\b(?:prove|proof|derive|derivation|rigorous(?:ly)?|formal correctness|correctness argument|justify every|theorem)\b/iu, 14, 'formal reasoning');
-    addSignal(/\b(?:architecture|concurren(?:cy|t)|race condition|thread safety|security|threat model|performance|scalab(?:le|ility)|migration|rollback|distributed system|multi-tenant)\b/iu, 14, 'architecture or risk');
+    formalReasoning = addSignal(/\b(?:prove|derive|derivation|rigorous(?:ly)?|formal correctness|correctness argument|justify every)\b|\b(?:write|give|show|construct|explain|review)\b.{0,80}\bproof\b/iu, 14, 'formal reasoning');
+    addSignal(/\b(?:architecture|concurren(?:cy|t)|race condition|thread[\s-]?safe(?:ty)?|secure|security|injection|vulnerabilit\w*|threat model|performance|scalab(?:le|ility)|migration|rollback|distributed system|multi-tenant)\b/iu, 14, 'architecture or risk');
     addSignal(/\b(?:synthesi[sz]e|systematic review|primary sources?|conflicting (?:evidence|studies)|multiple sources?|citations?|cite (?:the )?(?:official|primary))\b/iu, 10, 'source synthesis');
-    addSignal(/\b(?:verify|verification|tests?|test suite|edge cases?|double-check|exhaustive|benchmarks?|every case|correctness)\b/iu, 10, 'verification');
+    if (!metalinguisticVerification && !routineOperationalCheck && !simpleAdministrative.test(lower) && !simpleUiAction.test(lower)) {
+      addSignal(/\b(?:verify|verification|tests?|test suite|edge cases?|double[\s-]?check|exhaustive|benchmarks?|every case|correctness)\b|\bwithout\s+changing\s+(?:behavior|behaviour|semantics|output)\b/iu, 10, 'verification');
+    }
 
     const numberedTasks = (sample.match(/(?:^|\n)\s*(?:\d+[.)]|[-*])\s+/gu) || []).length;
     const taskVerbs = new Set((sampleLower.match(/\b(?:design|implement|review|explain|compare|test|verify|benchmark|migrate|document|optimi[sz]e|debug|prove|specify)\b/gu) || []));
@@ -1609,11 +1727,33 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       strongGroups.add('large input');
     }
 
-    if (/\b(?:my|i|me)\b.{0,80}\b(?:medical|medicine|medication|dose|symptom|diagnosis|legal|lawsuit|contract|tax|investment|financial|warfarin|pregnan|chest pain)\b|\b(?:can i take|should i take)\b/iu.test(sampleLower)) {
+    const personalHighStakes = /\b(?:my|i|me)\b.{0,80}\b(?:medical|medicine|medication|dose|dosage|symptom|diagnosis|legal|lawsuit|contract|tax|investment|financial|stocks?|warfarin|pregnan|chest pain|emergency room|\ber\b|cancer)\b|\b(?:can i take|should i take|can i sue)\b/iu.test(sampleLower);
+    const medicalDecision = /\b(?:dose|dosage|medication|medication list|medicine|drug|symptoms?|diagnosis|lab results?|pregnan\w*|warfarin|ibuprofen|tylenol|acetaminophen|alcohol|chest pain|heart attack|stroke|sepsis|meningitis|blood clot|headache|mole|cancer|ambulance|emergency room|\ber\b)\b/iu.test(sampleLower) &&
+      /\b(?:warning signs?|signs?|symptoms?|safe|serious|cancer|go|call|take|use|stop|start|increase|decrease|mix|combine|summari[sz]e|explain|interpret|review|should|can|could)\b/iu.test(sampleLower);
+    const legalDecision = /\b(?:contract|lease|agreement|lawsuit|legal|tax|lawyer|landlord|employer|evict\w*|arrest\w*|fire[ds]?)\b/iu.test(sampleLower) &&
+      /\b(?:need|rights?|enforceable|valid|legal|liable|liability|landlord|employer|evict\w*|arrest\w*|fire[ds]?|sign|sue|file|owe|should|can|could)\b/iu.test(sampleLower);
+    const financialDecision = /\b(?:stocks?|shares?|investment|portfolio|crypto|bitcoin|nft|fraud|scam|mortgage|loan|retirement)\b/iu.test(sampleLower) &&
+      /\b(?:safe|scam|fraud|report|buy|sell|invest|trade|withdraw|refinance|should|can i|could i)\b/iu.test(sampleLower);
+    const securityAction = /\b(?:safe|sufficient|correct(?:ly)?|uses?|store|commit|expose|prevent|protect|implement|design|encrypt|hash(?:er|ing)?|verif(?:y|ier|ication)|analy[sz]e|assess|review|audit|check|sanitize|escape|cause)\b/iu.test(sampleLower);
+    const coreSecurityTerm = /\b(?:passwords?|credentials?|api keys?|secret keys?|(?:api|access|refresh|auth|session|bearer|secret) tokens?|md5|sha-?1|bcrypt|argon2|jwt|tls|aes(?:-gcm)?|encryption|cryptograph\w*|crypto|authentication|authorization|oauth|openid connect|session cookies?|access[\s-]?control|cors|denial of service|prompt injection|sql injection|xss|csrf|vulnerabilit\w*|security)\b/iu.test(sampleLower);
+    const runtimeSecurityRisk = /\b(?:localstorage|eval)\b/iu.test(sampleLower) &&
+      /\b(?:passwords?|credentials?|tokens?|secrets?|keys?|auth\w*|user input|user data|safe|secure|injection)\b/iu.test(sampleLower);
+    const injectionDefense = /\b(?:html|sql|user input)\b/iu.test(sampleLower) &&
+      /\b(?:sanitize|escape|injection)\b/iu.test(sampleLower);
+    const secureTarget = /\bsecure\b/iu.test(sampleLower) && /\b(?:make|design|implement|keep|ensure|is|are|review|assess)\b/iu.test(sampleLower);
+    const securityDecision = !simpleAdministrative.test(lower) && !simpleUiAction.test(lower) &&
+      (securityAction && (coreSecurityTerm || runtimeSecurityRisk || injectionDefense) || secureTarget);
+    const sensitiveDocumentReview = /\b(?:contract|lease|medical report|lab results?)\b.{0,100}\b(?:flag|identify|find|review|check)\b.{0,80}\b(?:risks?|risky|dangerous|clauses?|findings?)\b|\b(?:flag|identify|find|review|check)\b.{0,80}\b(?:risks?|risky|dangerous|clauses?|findings?)\b.{0,100}\b(?:contract|lease|medical report|lab results?)\b/iu.test(sampleLower);
+    if (personalHighStakes || medicalDecision || legalDecision || financialDecision || /\bcan i sue\b/iu.test(sampleLower) || sensitiveDocumentReview) {
       score += 12;
       highStakes = true;
       reasons.push('personal high-stakes question');
       strongGroups.add('personal high-stakes question');
+    }
+    if (securityDecision) {
+      highStakes = true;
+      reasons.push('security-sensitive work');
+      strongGroups.add('security-sensitive work');
     }
 
     if (/\b(?:end[- ]to[- ]end|production|repo(?:sitory)?[- ]scale|whole (?:repository|codebase)|long[- ]running|from scratch|complete implementation|design and implement|compiler)\b/iu.test(sampleLower)) {
@@ -1634,8 +1774,12 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       strongGroups.add('accuracy priority');
     }
     if (/\b(?:quick answer|answer quickly|don\W?t overthink|do not overthink|least tokens?|be brief|briefly)\b/iu.test(sampleLower)) {
-      score -= 8;
-      reasons.push('speed priority');
+      if (!strongGroups.size && !highStakes && !answerVerification && !debuggingWork) {
+        score -= 8;
+        reasons.push('speed priority');
+      } else {
+        reasons.push('brief response without lowering reasoning');
+      }
     }
 
     score = Math.max(0, Math.min(100, score));
@@ -1649,25 +1793,48 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             ? 'extra-high'
             : 'pro';
 
+    const boundaries = [20, 40, 60, 80];
+    const margin = Math.min(...boundaries.map((boundary) => Math.abs(score - boundary)));
+    const confidence = Math.max(0.45, Math.min(0.94, 0.58 + Math.min(margin, 10) * 0.018 + Math.min(strongGroups.size, 3) * 0.045));
+
     if (highStakes && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
     if (debuggingWork && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
+    if (formalReasoning && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
+    if (behaviorPreservation && technical.test(lower) && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
     if (answerVerification && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
+
+    const targetBeforeUncertainty = target;
+    const upperBoundary = { instant: 20, medium: 40, high: 60, 'extra-high': 80 }[target];
+    const saferTarget = { instant: 'medium', medium: 'high', high: 'extra-high', 'extra-high': 'pro' }[target];
+    const uncertaintyBand = target === 'medium' ? 6 : 4;
+    let uncertaintyPromotionCandidate = false;
+    if (!answerVerification && upperBoundary && saferTarget && upperBoundary - score >= 1 &&
+      upperBoundary - score <= uncertaintyBand) {
+      target = saferTarget;
+      uncertaintyPromotionCandidate = true;
+    }
     if (modelLevelRank(target) >= ROUTE_LEVEL_RANK['extra-high'] && strongGroups.size < 2) target = 'high';
     if (modelLevelRank(target) >= ROUTE_LEVEL_RANK.pro && (
       strongGroups.size < 3 || !(longHorizon || expertWork || (highStakes && strongGroups.has('source synthesis')))
     )) {
       target = 'extra-high';
     }
+    if (contextualMinimumLevel && modelLevelRank(target) < modelLevelRank(contextualMinimumLevel)) {
+      target = contextualMinimumLevel;
+    }
 
-    const boundaries = [20, 40, 60, 80];
-    const margin = Math.min(...boundaries.map((boundary) => Math.abs(score - boundary)));
-    const confidence = Math.max(0.45, Math.min(0.94, 0.58 + Math.min(margin, 10) * 0.018 + Math.min(strongGroups.size, 3) * 0.045));
+    const uncertaintyEscalated = uncertaintyPromotionCandidate &&
+      modelLevelRank(target) > modelLevelRank(targetBeforeUncertainty);
+    if (uncertaintyEscalated) reasons.unshift('uncertainty safety margin chose the higher level');
     return {
       target,
       score,
-      confidence,
+      confidence: inheritedContext ? Math.max(confidence, 0.82) : confidence,
       explicit: false,
+      inherited: inheritedContext,
       strict: answerVerification,
+      minimumLevel: answerVerification ? 'high' : '',
+      uncertain: uncertaintyEscalated || uncertainBase,
       reasons: reasons.length ? reasons : [score < 20 ? 'short everyday request' : 'general complexity'],
     };
   }
@@ -3498,6 +3665,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     async function routeAndReplay(snapshot, decision, manual = false, silent = false, routingStage = 0, pickerAttempt = 0, discoveryDeadline = 0) {
       const target = manual ? decision.target : cappedTarget(decision.target);
       const targetRank = modelLevelRank(target);
+      const strictMinimumRank = routingIsStrict(decision)
+        ? modelLevelRank(decision.minimumLevel || target)
+        : -1;
       const activeDiscoveryDeadline = discoveryDeadline || Date.now() + routingDiscoveryTimeout;
       const routingPickerCandidates = () => {
         const preferred = targetRank >= ROUTE_LEVEL_RANK.pro
@@ -3537,7 +3707,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       };
 
       if (snapshot.specialMode) {
-        if (routingIsStrict(decision) && modelLevelRank(current) < targetRank) {
+        if (routingIsStrict(decision) && modelLevelRank(current) < strictMinimumRank) {
           if (!silent) toast(`${snapshot.specialMode} did not expose a confirmed ${modelLevelLabel(target)}-or-stronger level. Your accuracy-checked draft was not sent.`, 8_000);
           return false;
         }
@@ -3778,7 +3948,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         if (!silent) toast(`${modelLevelLabel(target)} is not available as an exact option in the current picker. Your explicit-route draft was not sent.`, 8_000);
         return false;
       }
-      if (!stagedThinkingChoice && decision.strict && modelLevelRank(choice.level) < targetRank) {
+      if (!stagedThinkingChoice && decision.strict && modelLevelRank(choice.level) < strictMinimumRank) {
         closeModelMenu(picker);
         if (!silent) toast(`${modelLevelLabel(target)} or a stronger level is not available in the current picker. Your accuracy-checked draft was not sent.`, 8_000);
         return false;
