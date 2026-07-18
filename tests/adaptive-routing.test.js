@@ -131,6 +131,329 @@ test('classifyPrompt keeps everyday requests on Instant', () => {
   assertClassifiesAs('What planet is closest to the Sun?', 'instant');
 });
 
+test('attachment profiles distinguish file difficulty and scale with file count', () => {
+  const pdf = toolkit.buildAttachmentProfile([{ name: 'lab-instructions.pdf', size: 900_000 }], 1);
+  const spreadsheet = toolkit.buildAttachmentProfile([{ name: 'measurements.xlsx', size: 2_000_000 }], 1);
+  const archive = toolkit.buildAttachmentProfile([{ name: 'project-source.zip', size: 4_000_000 }], 1);
+  const medicalImage = toolkit.buildAttachmentProfile([{ name: 'scan.png', size: 3_000_000 }], 1);
+  const manyPdfs = toolkit.buildAttachmentProfile(
+    Array.from({ length: 8 }, (_value, index) => ({ name: `paper-${index + 1}.pdf` })),
+    8,
+  );
+
+  assert.deepEqual(pdf.kinds, ['document']);
+  assert.deepEqual(spreadsheet.kinds, ['structured-data']);
+  assert.deepEqual(archive.kinds, ['archive']);
+  assertClassifiesAs('Summarize this file.', 'medium', { attachmentProfile: pdf });
+  assertClassifiesAs('Summarize this file.', 'high', { attachmentProfile: spreadsheet });
+  assertClassifiesAs('Open this attachment.', 'high', { attachmentProfile: archive });
+  assertClassifiesAs('Analyze this radiology scan for abnormalities.', 'extra-high', { attachmentProfile: medicalImage });
+  assertClassifiesAs('Summarize all of these files.', 'extra-high', { attachmentProfile: manyPdfs });
+});
+
+test('attachment metadata recognizes structured, large, and sensitive material conservatively', () => {
+  const json = toolkit.buildAttachmentProfile([{ name: 'records.json' }], 1);
+  const numbers = toolkit.buildAttachmentProfile([{ name: 'forecast.numbers' }], 1);
+  const large = toolkit.buildAttachmentProfile([{ name: 'manual.pdf', size: 15 * 1024 * 1024 }], 1);
+  const sensitive = toolkit.buildAttachmentProfile([{ name: 'lab_results.pdf' }], 1);
+  const sensitiveNames = toolkit.buildAttachmentProfile([
+    { name: 'medications.pdf' },
+    { name: 'bank_statement.pdf' },
+    { name: 'insurance_policy.pdf' },
+  ], 3);
+  const jsonMime = toolkit.buildAttachmentProfile([{ name: 'upload', mime: 'application/json' }], 1);
+  const excelMime = toolkit.buildAttachmentProfile([{
+    name: 'upload',
+    mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  }], 1);
+  const jsMime = toolkit.buildAttachmentProfile([{ name: 'upload', mime: 'text/javascript' }], 1);
+  const unknown = toolkit.buildAttachmentProfile([{ name: 'mystery.bin' }], 1);
+  const five = toolkit.buildAttachmentProfile(
+    Array.from({ length: 5 }, (_value, index) => ({ name: `source-${index}.pdf` })),
+    5,
+  );
+  const six = toolkit.buildAttachmentProfile(
+    Array.from({ length: 6 }, (_value, index) => ({ name: `source-${index}.pdf` })),
+    6,
+  );
+
+  assert.deepEqual(json.kinds, ['structured-data']);
+  assert.deepEqual(numbers.kinds, ['structured-data']);
+  assert.deepEqual(jsonMime.kinds, ['structured-data']);
+  assert.deepEqual(excelMime.kinds, ['structured-data']);
+  assert.deepEqual(jsMime.kinds, ['code']);
+  assert.equal(sensitive.sensitiveCount, 1);
+  assert.equal(sensitiveNames.sensitiveCount, 3);
+  assertClassifiesAs('Summarize this.', 'high', { attachmentProfile: large });
+  assertClassifiesAs('Analyze this attachment.', 'high', { attachmentProfile: unknown });
+  assertClassifiesAs('Explain these files.', 'high', { attachmentProfile: five });
+  assertClassifiesAs('Explain these files.', 'extra-high', { attachmentProfile: six });
+});
+
+test('attachment-only and cross-file requests receive conservative reasoning floors', () => {
+  const onePdf = toolkit.buildAttachmentProfile([{ name: 'worksheet.pdf' }], 1);
+  const unknown = toolkit.buildAttachmentProfile([], 1);
+  const twoPapers = toolkit.buildAttachmentProfile([{ name: 'a.pdf' }, { name: 'b.pdf' }], 2);
+  const tenPapers = toolkit.buildAttachmentProfile(
+    Array.from({ length: 10 }, (_value, index) => ({ name: `source-${index}.pdf` })),
+    10,
+  );
+
+  assertClassifiesAs('', 'medium', { attachmentProfile: onePdf });
+  assertClassifiesAs('', 'high', { attachmentProfile: unknown });
+  assertClassifiesAs('Compare the attached papers and identify contradictions.', 'high', { attachmentProfile: twoPapers });
+  assertClassifiesAs('Why?', 'extra-high', {
+    previousLevel: 'instant',
+    hasPriorConversation: true,
+    attachmentProfile: tenPapers,
+  });
+  assertClassifiesAs('!route:instant', 'instant', { attachmentProfile: tenPapers });
+});
+
+test('context-dependent prompts inherit relevant difficulty without contaminating new easy questions', () => {
+  for (const [prompt, previousLevel, expected] of [
+    ['Summarize it.', 'extra-high', 'high'],
+    ['Translate that to Spanish.', 'high', 'high'],
+    ['Use the same assumptions and solve part C.', 'extra-high', 'extra-high'],
+    ['What is its determinant?', 'high', 'high'],
+    ['Does equation 7 still hold?', 'extra-high', 'extra-high'],
+    ['Explain section 4.', 'extra-high', 'extra-high'],
+    ['Apply that fix.', 'extra-high', 'extra-high'],
+  ]) {
+    const result = assertClassifiesAs(prompt, expected, { previousLevel, hasPriorConversation: true });
+    assert.equal(result.inherited, true);
+  }
+
+  const historical = toolkit.buildAttachmentProfile([{ name: 'calculations.xlsx' }], 1);
+  assertClassifiesAs('What does the second table mean?', 'high', {
+    conversationLevel: 'medium',
+    hasPriorConversation: true,
+    historicalAttachmentProfile: historical,
+  });
+  assertClassifiesAs('what is 2+2', 'instant', {
+    conversationLevel: 'pro',
+    hasPriorConversation: true,
+    historicalAttachmentProfile: toolkit.buildAttachmentProfile([{ name: 'repository.zip' }], 1),
+  });
+  assertClassifiesAs('New question: What is the capital of France?', 'instant', {
+    conversationLevel: 'pro',
+    hasPriorConversation: true,
+  });
+});
+
+test('elliptical follow-ups inherit difficulty while standalone lookalikes do not', () => {
+  for (const prompt of [
+    'Using that, find y.',
+    'Now solve for y.',
+    'What happens when x = 0?',
+    'What if x is negative?',
+    'And for the other one?',
+    'Where did that number come from?',
+    'What assumption did you use?',
+    'Could you show the algebra?',
+    'Which formula did you use?',
+    'How did you know to divide by 2?',
+    'Why did you subtract 4?',
+    'Can you explain where 12 came from?',
+    'What does x represent?',
+    'What about x = 0?',
+    'Could you calculate the next value?',
+    'Based on that, what is y?',
+    'So is x positive?',
+    'Then is y zero?',
+    'Could you do B?',
+    'Can you explain?',
+    'Could you simplify?',
+    'Can you go over it?',
+    'Can you give me another example?',
+    'What about the last example?',
+    'Can you elaborate on the last point?',
+    'Could you revisit your last point?',
+    'Can you explain your last sentence?',
+    'Could you explain the first bullet?',
+    'What about item 3?',
+    'What about aspirin?',
+    'And the second medication?',
+    'What about page 7?',
+    'And on Windows?',
+    'What if the patient is pregnant?',
+    'Does it work on Windows?',
+    'Should I sign it?',
+    'Can I deploy it now?',
+    'Where should I put it?',
+    'What should I do with it?',
+  ]) {
+    const result = assertClassifiesAs(prompt, 'extra-high', {
+      previousLevel: 'extra-high',
+      hasPriorConversation: true,
+    });
+    assert.equal(result.inherited, true, prompt);
+  }
+
+  const historical = toolkit.buildAttachmentProfile([{ name: 'old.zip' }], 1);
+  for (const prompt of [
+    'Create a file named report.pdf.',
+    'What is the function of mitochondria?',
+    'What is still life art?',
+    'Are there better options for renters insurance?',
+    'Does it rain more in Seattle or Portland?',
+    'What is more accurate, a thermometer or your hand?',
+    'When does bus line 4 arrive?',
+    'What is Medicare Part B?',
+    'What is Formula 1?',
+    'Rewrite “Using that, find y.” politely.',
+    'Translate "Where did that number come from?" to Spanish.',
+    'What is the file system?',
+    'What is the Document Object Model?',
+    'What is the table of contents?',
+    'How does the image sensor work?',
+    'What is the spreadsheet software called?',
+    'What is attachment theory?',
+    'How do I use the Document Object Model?',
+    'How do I read a file system path?',
+    'How does an image sensor work?',
+    'How do I create a table of contents?',
+    'Rewrite ‘Using that, find y.’ politely.',
+    'What is the Code of Hammurabi?',
+    'What is the proof of stake?',
+    'What is The Matrix about?',
+    'What is the answer key format?',
+    'Make it rain.',
+    'How do I use files in Python?',
+    'How do I read documents in Java?',
+    'How can I compare tables in SQL?',
+    'How do I analyze images with OpenCV?',
+    'How do I read PDFs on Android?',
+    'Can you check Paris?',
+  ]) {
+    const baseline = toolkit.classifyPrompt(prompt);
+    const contextual = toolkit.classifyPrompt(prompt, {
+      previousLevel: 'pro',
+      hasPriorConversation: true,
+      historicalAttachmentProfile: historical,
+    });
+    assert.equal(canonicalLevel(contextual), canonicalLevel(baseline), prompt);
+    assert.equal(contextual.inherited, false, prompt);
+  }
+});
+
+test('explicit references can recover older attachment difficulty without affecting new questions', () => {
+  const archived = toolkit.buildAttachmentProfile([{ name: 'results.xlsx' }], 1);
+  assertClassifiesAs('What does the table in results.xlsx mean?', 'high', {
+    previousLevel: 'medium',
+    hasPriorConversation: true,
+    archivedAttachmentProfile: archived,
+  });
+  assertClassifiesAs('what is 2+2', 'instant', {
+    previousLevel: 'pro',
+    hasPriorConversation: true,
+    archivedAttachmentProfile: archived,
+  });
+
+  const manyArchived = toolkit.buildAttachmentProfile(
+    Array.from({ length: 8 }, (_value, index) => ({ name: `old${index}.pdf`, key: `id:${index}` })),
+    8,
+  );
+  const current = toolkit.buildAttachmentProfile([{ name: 'new.pdf' }], 1);
+  const currentResult = assertClassifiesAs('Summarize this attached file.', 'medium', {
+    attachmentProfile: current,
+    previousLevel: 'pro',
+    hasPriorConversation: true,
+    archivedAttachmentProfile: manyArchived,
+  });
+  assert.equal(currentResult.inherited, false);
+  for (const prompt of [
+    'Compare this attached file with your previous answer.',
+    'Apply the previous formula to this spreadsheet.',
+    'Use this file to finish the proof above.',
+  ]) {
+    const mixedContextResult = assertClassifiesAs(prompt, 'pro', {
+      attachmentProfile: current,
+      previousLevel: 'pro',
+      hasPriorConversation: true,
+    });
+    assert.equal(mixedContextResult.inherited, true, prompt);
+  }
+  assertClassifiesAs('What does old4.pdf say?', 'medium', {
+    previousLevel: 'instant',
+    hasPriorConversation: true,
+    archivedAttachmentProfile: manyArchived,
+  });
+  assertClassifiesAs('What does `old4.pdf` show?', 'medium', {
+    previousLevel: 'instant',
+    hasPriorConversation: true,
+    archivedAttachmentProfile: manyArchived,
+  });
+  const substring = toolkit.buildAttachmentProfile([{ name: 'data.csv' }], 1);
+  for (const prompt of ['What is metadata.csv?', 'How do I open metadata.csv?', 'Review mydata.csv.']) {
+    const baseline = toolkit.classifyPrompt(prompt);
+    const result = toolkit.classifyPrompt(prompt, {
+      previousLevel: 'pro',
+      hasPriorConversation: true,
+      archivedAttachmentProfile: substring,
+    });
+    assert.equal(canonicalLevel(result), canonicalLevel(baseline), prompt);
+    assert.equal(result.inherited, false, prompt);
+  }
+});
+
+test('attachment-derived answer checks require independent verification', () => {
+  const pdf = toolkit.buildAttachmentProfile([{ name: 'scan.pdf' }], 1);
+  const sheet = toolkit.buildAttachmentProfile([{ name: 'budget.xlsx' }], 1);
+  for (const [prompt, profile] of [
+    ['Are the extracted names correct?', pdf],
+    ['The spreadsheet says $10,000; is that correct?', sheet],
+  ]) {
+    const result = assertClassifiesAs(prompt, 'high', { attachmentProfile: profile });
+    assert.equal(result.strict, true);
+    assert.match(toolkit.buildAccuracyGuardedPrompt(prompt), /independently verify the stated answer or result/iu);
+  }
+});
+
+test('topic resets still independently verify supplied answers and extracted data', () => {
+  for (const prompt of [
+    'New question: I don’t get why the answer is 12V.',
+    'New question. Are the extracted names correct?',
+    'Changing topics: The OCR says 12V—is that correct?',
+    'Verify every extracted number against the PDF.',
+    'Compare the transcribed values with the source image.',
+  ]) {
+    const resetsTopic = /^(?:new question|changing topics)/iu.test(prompt);
+    const result = assertClassifiesAs(prompt, resetsTopic ? 'high' : 'pro', {
+      previousLevel: 'pro',
+      hasPriorConversation: true,
+    });
+    assert.equal(result.strict, true, prompt);
+    if (resetsTopic) assert.equal(result.inherited, false, prompt);
+    assert.match(toolkit.buildAccuracyGuardedPrompt(prompt), /independently verify the stated answer or result/iu);
+  }
+});
+
+test('derivation and doubt follow-ups verify the premise before explaining it', () => {
+  for (const prompt of [
+    'Why was 12 used?',
+    'How was 12 calculated?',
+    'Where does 12 come from?',
+    'What made you choose B?',
+    'Could it be wrong?',
+    'Might that be incorrect?',
+    'Is there a mistake?',
+    'Any mistakes?',
+    'Are there any errors?',
+    'Any chance that is wrong?',
+    'Could your result be wrong?',
+    'What if your answer is wrong?',
+    'Why?',
+  ]) {
+    const result = assertClassifiesAs(prompt, 'extra-high', {
+      previousLevel: 'extra-high',
+      hasPriorConversation: true,
+    });
+    assert.equal(result.strict, true, prompt);
+    assert.match(toolkit.buildAccuracyGuardedPrompt(prompt), /independently verify the stated answer or result/iu);
+  }
+});
+
 test('classifyPrompt chooses the higher level at an uncertain upper boundary', () => {
   const writing = assertClassifiesAs('Write a short poem about rain.', 'medium');
   assert.equal(writing.uncertain, true);
@@ -326,6 +649,7 @@ test('claimed-answer explanations require High without misreading ordinary quest
     'That result looks suspicious.',
     'This cannot be correct.',
     'That seems off.',
+    'That result seems off.',
     'This does not add up.',
     'The key has B, but C seems right.',
     'My teacher says that is wrong.',
@@ -405,7 +729,7 @@ test('claimed-answer explanations require High without misreading ordinary quest
   ]) {
     const result = assertClassifiesAs(prompt, 'medium');
     assert.equal(Boolean(result.strict), false);
-    assert.match(result.reasons.join(' '), /safer context level/iu);
+    assert.match(result.reasons.join(' '), /safer (?:context )?level/iu);
   }
 });
 
@@ -432,7 +756,8 @@ test('classifyPrompt honors hard overrides even when prompt complexity disagrees
 
 test('short context-dependent follow-ups inherit the previous routing level', () => {
   assertClassifiesAs('Why?', 'high', { previousLevel: 'high' });
-  assertClassifiesAs('Why?', 'medium', { previousLevel: 'instant' });
+  const bareWhy = assertClassifiesAs('Why?', 'high', { previousLevel: 'instant' });
+  assert.equal(bareWhy.strict, true);
   assertClassifiesAs('Continue and finish it.', 'extra-high', { previousLevel: 'extra-high' });
   assertClassifiesAs('Can you explain the second step?', 'high', { previousLevel: 'high' });
   assertClassifiesAs('Does this change if x is negative?', 'high', { previousLevel: 'high' });
@@ -456,7 +781,6 @@ test('short context-dependent follow-ups inherit the previous routing level', ()
     'Then what?',
     'Can you make it better?',
     'Can you make it more accurate?',
-    'Can you check Paris?',
     'What do I do now?',
     'So what now?',
     'And then?',

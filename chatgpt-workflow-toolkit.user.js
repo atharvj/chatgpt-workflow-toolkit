@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.13
+// @version      1.4.14
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.13';
+  const VERSION = '1.4.14';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -751,9 +751,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const raw = String(value == null ? '' : value).slice(0, QUESTION_MAX_LENGTH);
     const withoutBom = raw.replace(/^\uFEFF/u, '');
     const overrideMatch = withoutBom.match(ROUTE_OVERRIDE_PATTERN);
-    const prompt = overrideMatch
+    const routedPrompt = overrideMatch
       ? withoutBom.slice(overrideMatch[0].length).replace(/^\s*(?::|;)?\s*/u, '')
       : raw;
+    const topicResetMatch = normalizeText(routedPrompt).match(/^(?:(?:new|unrelated|separate)\s+(?:question|topic)|changing\s+(?:the\s+)?(?:question|topics?)|on\s+(?:an?\s+)?unrelated\s+note)\s*[.:,;!?—–-]\s*(.+)$/iu);
+    const prompt = topicResetMatch ? topicResetMatch[1] : routedPrompt;
     const fullText = lowerText(prompt);
     const laterVerificationClause = /\b(?:but|and|then|first|also)\b.{0,160}\b(?:check|recheck|double-check|verify|confirm|validate|correct|right|wrong|accurate)\b/iu.test(fullText);
     if (!fullText || !laterVerificationClause && (
@@ -833,7 +835,23 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const accuracyRecheck = !operationalNonAnswer && /^(?:(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:make\s+sure|ensure)\s+(?:(?:this|that|the)\s+(?:answer|result)\s+is|(?:this|that|it)\s+is)\s+(?:correct|right|accurate)|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?make\s+(?:this|that|it)\s+more\s+correct|(?:please\s+)?fact[\s-]?check\s+(?:this|that|it))[?.!]*$/iu.test(text);
     const namedAnswerClaim = !operationalNonAnswer && new RegExp(String.raw`^(?:(?:is|could|would|should|might)\s+(?:the\s+)?answer\s+(?:be\s+)?${freeformAnswerValue}|(?:make\s+sure|ensure)\s+(?:the\s+)?answer\s+is\s+${freeformAnswerValue}|why\s+(?:isn['’]?t|is\s+not)\s+(?:the\s+)?answer\s+${freeformAnswerValue}|(?:wouldn['’]?t|shouldn['’]?t)\s+(?:(?:the\s+)?answer\s+be\s+${freeformAnswerValue}|${freeformAnswerValue}\s+be\s+(?:the\s+)?answer))[?.!]*$`, 'iu').test(text);
     const conciseCandidateChallenge = new RegExp(String.raw`^(?:(?:why|how\s+come)\s+(?:(?:option\s+)?${compactAnswerValue}|${compactAnswerValue}\s+is\s+(?:the\s+)?answer)|where\s+did\s+${compactAnswerValue}\s+come\s+from|(?:why|how)\s+did\s+you\s+(?:choose|pick|say)\s+${compactAnswerValue}|you\s+(?:chose|picked|selected|said)\s+${compactAnswerValue}\s*(?:[—–-]|[,;:])?\s*why|what\s+makes\s+${compactAnswerValue}\s+(?:correct|right)|[a-z][\p{L}\p{N}_]*\s+is\s+${compactAnswerValue}\s*,?\s+(?:right|correct)|i\s+got\s+(?:[a-z][\p{L}\p{N}_]*\s+as\s+${compactAnswerValue}|${compactAnswerValue}\s+for\s+[a-z][\p{L}\p{N}_]*)\s*,?\s+(?:right|correct))[?.!]*$`, 'iu').test(text);
-    return selectedChallenge || deicticValueChallenge || directRecheck || invertedClaim || deicticCorrectnessQuestion || claimThenCheck || personalResultCheck || candidateCorrectness || candidateAsAnswer || freeformCandidateAsAnswer || mathEquationCorrectness || answerPredicateCheck || tellMeCorrectness || processCorrectness || candidateLooksRight || checkCompactCandidate || personalCompactCheck || personalFreeformCheck || negativeAnswerClaim || alternativeCandidate || conflictCheck || disagreementChallenge || reconsiderationChallenge || externalConflict || checkedMathStatement || accuracyRecheck || namedAnswerClaim || conciseCandidateChallenge || challengeLead.test(text) && (
+    const passiveCandidateDerivation = !operationalNonAnswer && new RegExp(String.raw`^(?:why\s+(?:was|were)\s+${compactAnswerValue}\s+(?:used|chosen|picked|selected|substituted|added|subtracted|multiplied|divided)|how\s+(?:was|were)\s+${compactAnswerValue}\s+(?:calculated|computed|derived|obtained|found|chosen)|where\s+(?:does|did)\s+${compactAnswerValue}\s+come\s+from|what\s+made\s+you\s+(?:choose|pick|select|use)\s+${compactAnswerValue})[?.!]*$`, 'iu').test(text);
+    const answerDoubt = !operationalNonAnswer && /^(?:(?:could|might|can|would)\s+(?:it|this|that|(?:your|the)\s+(?:answer|result|solution|calculation|conclusion))\s+be\s+(?:wrong|incorrect|mistaken)|is\s+there\s+(?:a|any)\s+(?:mistake|error)|(?:are\s+there\s+)?any\s+(?:mistakes?|errors?)|any\s+chance\s+(?:that|this|it|(?:your|the)\s+(?:answer|result))\s+is\s+(?:wrong|incorrect)|what\s+if\s+(?:your|the)\s+(?:answer|result|solution|calculation|conclusion)\s+is\s+(?:wrong|incorrect))[?.!]*$/iu.test(text);
+    const bareWhy = markerIndex < 0 && /^why[?.!]*$/iu.test(text);
+    const extractedDataCheck = !operationalNonAnswer && (
+      /^(?:are|is|were|was)\s+(?:(?:all|the|these|those)\s+)?(?:extracted|transcribed|identified|calculated|detected)\s+(?:names?|values?|figures?|numbers?|totals?|fields?|dates?|items?|results?)\s+(?:actually\s+|definitely\s+)?(?:correct|right|accurate|complete)[?.!]*$/iu.test(text) ||
+      /\b(?:file|document|pdf|spreadsheet|table|chart|image|scan)\s+(?:says?|shows?|lists?|gives?|reports?)\b.{1,140}\b(?:is\s+(?:that|this|it)\s+|is\s+the\s+(?:value|number|total|result)\s+)?(?:correct|right|accurate)[?.!]*$/iu.test(text) ||
+      /^(?:is|was)\s+(?:the\s+)?(?:ocr|transcription|extraction)\s+(?:actually\s+)?(?:correct|right|accurate|complete)[?.!]*$/iu.test(text) ||
+      /^(?:did\s+(?:it|you)\s+(?:transcribe|extract|copy|identify)\b.{0,100}\b(?:correctly|accurately|completely)|did\s+you\s+extract\s+(?:all|every)\b.{0,100}\b(?:correctly|accurately)?)[?.!]*$/iu.test(text) ||
+      /^(?:are|were)\s+(?:the\s+)?(?:transcribed|extracted|copied|ocr(?:['’]d)?)\s+(?:equations?|names?|values?|figures?|numbers?|totals?|fields?|dates?|items?|results?)\s+(?:correct|right|accurate|complete)[?.!]*$/iu.test(text) ||
+      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:check|verify)\s+(?:whether|if)\s+(?:the\s+)?(?:pdf|file|document|image|table|spreadsheet)\b.{0,100}\b(?:copied|transcribed|extracted)\b.{0,60}\b(?:correctly|accurately)[?.!]*$/iu.test(text) ||
+      /^(?:this|that|the)\s+(?:ocr|transcription|extraction)\s+(?:has|contains)\s+(?:mistakes?|errors?)[?.!]*$/iu.test(text) ||
+      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:compare|cross[\s-]?check|verify)\s+(?:your|the)\s+(?:answer|result|extraction|transcription)\s+(?:against|with)\s+(?:the\s+|this\s+|that\s+)?(?:file|document|pdf|image|source)[?.!]*$/iu.test(text) ||
+      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:check|verify|compare|cross[\s-]?check)\s+(?:(?:all|every|the)\s+)?(?:extracted|transcribed|copied|ocr(?:['’]d)?)\s+(?:equations?|names?|values?|figures?|numbers?|totals?|fields?|dates?|items?|results?)\s+(?:against|with|to)\s+(?:the\s+|this\s+|that\s+)?(?:original\s+)?(?:source\s+(?:file|document|pdf|image|scan)|file|document|pdf|image|scan|source)[?.!]*$/iu.test(text) ||
+      /^(?:the\s+)?(?:ocr|transcription|extraction)\s+(?:says?|shows?|gives?)\b.{1,120}\b(?:is\s+(?:that|this|it)\s+)?(?:correct|right|accurate)[?.!—–-]*$/iu.test(text)
+    );
+    const suspiciousResultCheck = !operationalNonAnswer && /^(?:that|this|the)\s+(?:answer|result|solution|calculation|conclusion|output|value)\s+(?:(?:seems?|looks?)\s+(?:off|wrong|incorrect|suspicious)|(?:does\s+not|doesn['’]?t)\s+(?:add\s+up|look\s+right))[?.!]*$/iu.test(text);
+    return selectedChallenge || deicticValueChallenge || directRecheck || invertedClaim || deicticCorrectnessQuestion || claimThenCheck || personalResultCheck || candidateCorrectness || candidateAsAnswer || freeformCandidateAsAnswer || mathEquationCorrectness || answerPredicateCheck || tellMeCorrectness || processCorrectness || candidateLooksRight || checkCompactCandidate || personalCompactCheck || personalFreeformCheck || negativeAnswerClaim || alternativeCandidate || conflictCheck || disagreementChallenge || reconsiderationChallenge || externalConflict || checkedMathStatement || accuracyRecheck || namedAnswerClaim || conciseCandidateChallenge || passiveCandidateDerivation || answerDoubt || bareWhy || extractedDataCheck || suspiciousResultCheck || challengeLead.test(text) && (
       claimedAnswer.test(text) || reverseClaimedAnswer.test(text) || forwardAuxClaim.test(text) || derivationChallenge || correctnessChallenge.test(text)
     );
   }
@@ -1537,6 +1555,144 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     return token;
   }
 
+  function attachmentByteSizeFromText(value) {
+    const match = String(value == null ? '' : value).match(/\b(\d+(?:\.\d+)?)\s*(bytes?|[kmgt]i?b)\b/iu);
+    if (!match) return 0;
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount) || amount < 0) return 0;
+    const unit = lowerText(match[2]);
+    const multiplier = unit.startsWith('t') ? 1024 ** 4
+      : unit.startsWith('g') ? 1024 ** 3
+        : unit.startsWith('m') ? 1024 ** 2
+          : unit.startsWith('k') ? 1024
+            : 1;
+    return Math.round(amount * multiplier);
+  }
+
+  function attachmentNameFromLabel(value) {
+    const label = normalizeText(value);
+    if (!label) return '';
+    const segments = label.split('|').map((part) => part.trim()).filter(Boolean);
+    for (const rawSegment of segments) {
+      const segment = rawSegment
+        .replace(/^(?:(?:remove|delete|open|preview|download)\s+)?(?:the\s+)?(?:file|attachment)\s*:?\s*/iu, '')
+        .replace(/\s+\(?(?:\d+(?:\.\d+)?\s*(?:bytes?|[kmgt]i?b))\)?$/iu, '')
+        .trim();
+      const match = segment.match(/([\p{L}\p{N}][^/\\|\n]{0,180}\.[a-z0-9]{1,12})$/iu);
+      if (match) return match[1].trim();
+    }
+    return '';
+  }
+
+  function attachmentKind(name, mime = '', label = '') {
+    const lowerName = lowerText(name);
+    const lowerMime = lowerText(mime);
+    const lowerLabel = lowerText(label);
+    const extensionMatch = lowerName.match(/\.([a-z0-9]{1,12})$/iu);
+    const extension = extensionMatch ? extensionMatch[1] : '';
+    if (lowerMime.startsWith('image/') || /^(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|tiff?|webp)$/u.test(extension)) return 'image';
+    if (lowerMime.startsWith('audio/') || /^(?:aac|flac|m4a|mp3|ogg|wav|wma)$/u.test(extension)) return 'audio-video';
+    if (lowerMime.startsWith('video/') || /^(?:avi|m4v|mkv|mov|mp4|mpeg|mpg|webm|wmv)$/u.test(extension)) return 'audio-video';
+    if (/\b(?:zip|compressed|archive)\b/u.test(lowerMime) || /^(?:7z|bz2|gz|rar|tar|tgz|xz|zip)$/u.test(extension)) return 'archive';
+    if (/^(?:csv|db|db3|json|jsonl|ndjson|numbers|ods|parquet|sqlite|sqlite3|sql|tsv|xls|xlsb|xlsm|xlsx)$/u.test(extension) ||
+      /(?:\b(?:json|ndjson|csv|tab-separated|database|sqlite|parquet|excel)\b|spreadsheet)/u.test(`${lowerMime} ${lowerLabel}`)) return 'structured-data';
+    if (/^(?:c|cc|cpp|cs|css|dart|ex|exs|go|h|hpp|html|ipynb|java|js|jsx|kt|kts|lua|m|php|pl|py|r|rb|rs|scala|sh|sol|swift|toml|ts|tsx|vue|xml|ya?ml)$/u.test(extension) ||
+      /\b(?:source code|notebook|javascript|typescript|python|shellscript)\b/u.test(`${lowerMime} ${lowerLabel}`)) return 'code';
+    if (/^(?:doc|docx|epub|key|md|odt|pages|pdf|ppt|pptx|rtf|tex|txt)$/u.test(extension) ||
+      /\b(?:pdf|document|presentation|powerpoint|word processing|plain text)\b/u.test(`${lowerMime} ${lowerLabel}`)) return 'document';
+    return 'unknown';
+  }
+
+  function buildAttachmentProfile(values = [], countHint = 0) {
+    const source = Array.isArray(values) ? values.slice(0, 100) : [];
+    const items = source.map((value) => {
+      const record = value && typeof value === 'object' ? value : { label: value };
+      const label = normalizeText(record.label || record.text || record.name || '');
+      const name = normalizeText(record.name || attachmentNameFromLabel(label)).slice(0, 220);
+      const mime = lowerText(record.mime || record.type || '').slice(0, 120);
+      const numericSize = Number(record.size);
+      const size = Number.isFinite(numericSize) && numericSize >= 0
+        ? Math.round(numericSize)
+        : attachmentByteSizeFromText(`${record.size || ''} ${label}`);
+      return {
+        key: normalizeText(record.key || '').slice(0, 240),
+        name,
+        mime,
+        size,
+        kind: attachmentKind(name, mime, label),
+        label: label.slice(0, 240),
+      };
+    });
+    const count = Math.max(clampInteger(countHint, 0, 0, 100), items.length);
+    const kinds = [...new Set(items.map((item) => item.kind).filter(Boolean))].sort();
+    const complexKinds = new Set(['archive', 'audio-video', 'code', 'structured-data']);
+    const complexCount = items.filter((item) => complexKinds.has(item.kind)).length;
+    const largeCount = items.filter((item) => item.size >= 10 * 1024 * 1024).length;
+    const sensitiveCount = items.filter((item) => /\b(?:contract|lease|legal|medical|diagnos\w*|radiology|lab\s+results?|medications?|prescriptions?|health(?:\s+records?)?|bloodwork|bank(?:\s+statements?)?|mortgage|loans?|investments?|insurance(?:\s+polic(?:y|ies))?|tax|financial|security|audit|patient|payroll|ssn|pii)\b/iu.test(
+      `${item.name} ${item.label}`.replace(/[_-]+/gu, ' '),
+    )).length;
+    return {
+      count,
+      items,
+      kinds,
+      describedCount: items.length,
+      unknownCount: Math.max(0, count - items.filter((item) => item.kind !== 'unknown').length),
+      complexCount,
+      largeCount,
+      sensitiveCount,
+      totalBytes: items.reduce((sum, item) => sum + item.size, 0),
+    };
+  }
+
+  function normalizeAttachmentProfile(context = {}) {
+    const supplied = context.attachmentProfile && typeof context.attachmentProfile === 'object'
+      ? context.attachmentProfile
+      : null;
+    if (supplied && Array.isArray(supplied.items)) {
+      return buildAttachmentProfile(supplied.items, Math.max(
+        clampInteger(context.attachmentCount, 0, 0, 100),
+        clampInteger(supplied.count, 0, 0, 100),
+      ));
+    }
+    return buildAttachmentProfile(context.attachmentLabels || [], context.attachmentCount);
+  }
+
+  function combineAttachmentProfiles(...profiles) {
+    const items = [];
+    const stableKeys = new Set();
+    const fallbackKeys = new Set();
+    let unnamedCount = 0;
+    for (const profile of profiles) {
+      if (!profile || typeof profile !== 'object') continue;
+      const sourceItems = Array.isArray(profile.items) ? profile.items : [];
+      unnamedCount += Math.max(0, clampInteger(profile.count, 0, 0, 100) - sourceItems.length);
+      const currentFallbackKeys = new Set();
+      for (const item of sourceItems) {
+        const stableKey = normalizeText(item.key || '');
+        const fallbackKey = lowerText(item.name || item.label || `${item.mime}|${item.size}`);
+        if (stableKey) {
+          if (stableKeys.has(stableKey)) continue;
+          stableKeys.add(stableKey);
+        } else if (fallbackKey && fallbackKeys.has(fallbackKey)) {
+          continue;
+        }
+        if (fallbackKey) currentFallbackKeys.add(fallbackKey);
+        items.push(item);
+      }
+      for (const key of currentFallbackKeys) fallbackKeys.add(key);
+    }
+    return buildAttachmentProfile(items, Math.min(100, items.length + unnamedCount));
+  }
+
+  function strongerRouteLevel(...values) {
+    let strongest = '';
+    for (const value of values) {
+      const level = extractModelLevel(value || '');
+      if (level && modelLevelRank(level) > modelLevelRank(strongest)) strongest = level;
+    }
+    return strongest;
+  }
+
   function classifyPrompt(value, context = {}) {
     const raw = String(value == null ? '' : value);
     const override = parseRouteOverride(raw);
@@ -1550,8 +1706,26 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       };
     }
 
-    const normalized = normalizeText(raw);
-    if (!normalized) {
+    const originalNormalized = normalizeText(raw);
+    const topicResetMatch = originalNormalized.match(/^(?:(?:new|unrelated|separate)\s+(?:question|topic)|changing\s+(?:the\s+)?(?:question|topics?)|on\s+(?:an?\s+)?unrelated\s+note)\s*[.:,;!?—–-]\s*(.+)$/iu);
+    const normalized = normalizeText(topicResetMatch ? topicResetMatch[1] : originalNormalized);
+    const topicReset = Boolean(topicResetMatch);
+    const currentAttachments = normalizeAttachmentProfile(context);
+    const historicalAttachments = context.historicalAttachmentProfile && typeof context.historicalAttachmentProfile === 'object'
+      ? buildAttachmentProfile(context.historicalAttachmentProfile.items || [], context.historicalAttachmentProfile.count)
+      : buildAttachmentProfile(context.historicalAttachmentLabels || [], context.historicalAttachmentCount);
+    const archivedAttachments = context.archivedAttachmentProfile && typeof context.archivedAttachmentProfile === 'object'
+      ? buildAttachmentProfile(context.archivedAttachmentProfile.items || [], context.archivedAttachmentProfile.count)
+      : buildAttachmentProfile();
+    const hasPriorConversation = context.hasPriorConversation === true || Boolean(
+      context.previousLevel || context.conversationLevel || context.assistantContextLevel,
+    );
+    const previousLevel = strongerRouteLevel(
+      context.previousLevel,
+      context.conversationLevel,
+      context.assistantContextLevel,
+    );
+    if (!normalized && currentAttachments.count === 0) {
       return { target: 'instant', score: 0, confidence: 0.94, explicit: false, reasons: ['empty prompt'] };
     }
 
@@ -1565,7 +1739,10 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         reasons: ['named open research problem requires the strongest available reasoning'],
       };
     }
-    const sample = raw.length <= 24_000 ? raw : `${raw.slice(0, 12_000)}\n${raw.slice(-12_000)}`;
+    const classificationSource = topicReset ? normalized : raw;
+    const sample = classificationSource.length <= 24_000
+      ? classificationSource
+      : `${classificationSource.slice(0, 12_000)}\n${classificationSource.slice(-12_000)}`;
     const sampleLower = sample.toLocaleLowerCase('en-US');
     const wordCount = (sample.match(/[\p{L}\p{N}_]+/gu) || []).length;
     const codeLineCount = sample.split(/\r?\n/u).filter((line) => /^\s{4,}|[{}();]|=>|\b(?:const|let|var|def|class|function|import|SELECT)\b/u.test(line)).length;
@@ -1594,16 +1771,85 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     const safeSimpleFact = simpleFact.test(lower) && wordCount <= 24 && !advancedFactTopic.test(lower) && !compoundReasoning.test(lower);
     const safeSimpleTransform = simpleTransform.test(lower) && !compoundReasoning.test(lower) && !technical.test(lower) && !normalAnalysis.test(lower);
     const safeShortWriting = shortWriting.test(lower) && wordCount <= 35 && !technical.test(lower) && !normalAnalysis.test(lower) && !compoundReasoning.test(lower);
-    const contextualReference = /\b(?:this|that|it|these|those|above|earlier|previous|same|again|sure|here|more|other|different|better|accurate)\b|\b(?:first|second|third|last|next|previous|other)\s+(?:step|part|option|answer|result|one)\b|\bpart\s+[a-z0-9]+\b/iu;
+    // Ignore quoted payloads when deciding whether a prompt refers back to the
+    // conversation. For example, translating “Where did that number come
+    // from?” is a standalone transform, not a follow-up to earlier math.
+    const contextProbe = lower
+      .replace(/[“"][^”"\n]{0,500}[”"]/gu, ' quoted text ')
+      .replace(/‘[^’\n]{0,500}’/gu, ' quoted text ')
+      .replace(/`[^`\n]{0,500}`/gu, ' quoted text ');
+    const contextualReference = /\b(?:this|that|them|their|these|those|above|earlier|previous|same|again)\b|\b(?:first|second|third|last|next|previous|other)\s+(?:step|part|point|example|sentence|bullet|item|message|option|answer|result|paragraph|section|equation|formula|file|document|image|table|chart|one)\b/iu;
     const contextualLead = /^(?:(?:can|could|would|will|do|does|did|is|are|should)\b|(?:please\s+)?(?:explain|check|verify|review|fix|help|compare|continue|finish|redo|retry|try|solve|show|tell|change)\b|(?:what|why|how|which)\b)/iu;
     const simpleUiAction = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:check|uncheck|select|click|tick|press|open|close|copy|confirm)\s+(?:(?:this|that|the)\s+)?(?:[\p{L}\p{N}_-]+\s+){0,2}(?:box|checkbox|button|option|setting|link|dialog|text|menu)|check\s+(?:if|whether)\s+(?:this|that|it)\s+is\s+(?:the\s+)?(?:(?:right|left)\s+)?(?:button|option|link)|confirm\s+(?:this|that|the)?\s*email)\b/iu;
     const metalinguisticVerification = /^what does\b.{0,160}\b(?:verify|verification|check|confirm|answer)\b.{0,160}\bmean\b/iu.test(lower);
     const routineOperationalCheck = /\bproof\s+of\s+concept\b.{0,60}\b(?:builds?|runs?|works?)\b/iu.test(lower);
-    const implicitContextFollowUp = /^(?:(?:what\s+(?:should\s+i\s+do|do\s+(?:i|we)\s+do\s+now|now|next)|(?:now|then)\s+what|(?:okay[,]?\s+)?(?:so\s+)?then\s+what|so\s+what\s+now|and\s+then|where\s+do\s+we\s+go\s+from\s+here)|which\s+one|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:explain\s+more|do\s+the\s+next\s+one|continue\s+from\s+there)|(?:please\s+)?try\s+(?:a\s+)?different\s+approach|your answer and mine disagree)[?.!]*$/iu;
-    const genericCheckFollowUp = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:check|recheck|double[\s-]?check|verify|review)\b.{1,100}[?.!]*$/iu;
-    const ambiguousFollowUp = wordCount <= 28 && !safeSimpleTransform && !simpleAdministrative.test(lower) && !simpleUiAction.test(lower) && (
-      contextualReference.test(lower) && contextualLead.test(lower) || implicitContextFollowUp.test(lower) || genericCheckFollowUp.test(lower)
+    const implicitContextFollowUp = /^(?:(?:what\s+(?:should\s+i\s+(?:do|change\s+here)|do\s+(?:i|we)\s+do\s+now|now|next)|(?:now|then)\s+what|(?:okay[,]?\s+)?(?:so\s+)?then\s+what|so\s+what\s+now|and\s+then|where\s+do\s+we\s+go\s+from\s+here)|which\s+one|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:explain\s+more|do\s+the\s+next\s+one|continue\s+from\s+there)|(?:please\s+)?try\s+(?:a\s+)?different\s+approach|your answer and mine disagree)[?.!]*$/iu;
+    const genericCheckFollowUp = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:check|verify|review)(?:\s+(?:this|that|it|again|once\s+more|(?:my|your|the)\s+(?:answer|result|solution|calculation|reasoning|work|proof)))?|recheck(?:\s+(?:this|that|it))?|double[\s-]?check(?:\s+(?:this|that|it))?)[?.!]*$/iu;
+    const explicitContextTask = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:improve|show|summari[sz]e|translate|rewrite|rephrase|shorten|format|simplify|continue|finish|apply|use|reuse|calculate|recalculate|solve|check|verify|explain|review|fix|change|compare)\b.{0,120}\b(?:this|that|it|them|these|those|above|earlier|previous|same|answer|response|result|solution|code|proof|reasoning|matrix|equation|formula|fix|assumptions?|approach|function)\b/iu;
+    const contextualRevision = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?make\s+(?:this|that|it)\s+(?:better|clearer|shorter|simpler|more\s+(?:accurate|concise|formal|detailed|readable))[?.!]*$/iu;
+    // Indexed references must be phrased as an action/question. A bare “line
+    // 4” or “Part B” may be a bus route or a product name.
+    const indexedContextTask = /^(?:(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:explain|review|check|verify|solve|do|continue|redo|show|use|apply|change|fix)\b.{0,80}\b(?:(?:line|paragraph|section|step|part|equation|formula|figure|table|chart|option|answer|result)\s*(?:number\s*)?(?:[a-z]|\d+|one|two|three|four|five|first|second|third|fourth|fifth)|(?:first|second|third|fourth|fifth|last|next|previous)\s+(?:line|paragraph|section|step|part|equation|formula|figure|table|chart|option|answer|result))|(?:does?|is|are)\s+(?:the\s+)?(?:equation|formula|step|result|answer)\s*(?:number\s*)?(?:[a-z]|\d+)\s+(?:still\s+)?(?:hold|work|apply|change|correct|valid|true|false)\b|what\s+does\s+the\s+(?:(?:first|second|third|fourth|fifth|last|next|previous)\s+(?:line|paragraph|section|step|equation|formula|figure|table|chart|option|answer|result)|(?:line|paragraph|section|step|equation|formula|figure|table|chart|option|answer|result)\s*(?:number\s*)?(?:[a-z]|\d+))\s+mean\b|(?:what|how)\s+about\s+(?:part|option)\s+[a-z0-9]+)\b/iu;
+    const definiteContextObject = /\b(?:that|this|those|these)\s+(?:answer|response|result|solution|calculation|proof|reasoning|code|function|error|fix|approach|assumptions?|equation|formula|matrix|attachments?|files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?|paragraph|section|step)\b|\bthe\s+(?:answer(?!\s+key\b)|response|result|solution|calculation|reasoning|error|fix|approach|assumptions?|equation|formula|paragraph|section|step)\b/iu;
+    const namedMaterialReference = /\b(?:(?:attached|uploaded|earlier|previous|this|that)\s+(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)|the\s+(?:attachments?|uploads?|attached|uploaded|earlier|previous)\s+(?:attachments?|files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)?|(?:open|read|review|analy[sz]e|use|using|summari[sz]e|explain|check|verify|compare|from)\s+(?:the|this|that|those|these|attached|uploaded|earlier|previous)\s+(?:files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)|what\s+do(?:es)?\s+(?:the|this|that|these|those)\s+(?:files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)\s+(?:say|show|contain|mean))\b/iu;
+    const genericMaterialCompound = /\b(?:attachment\s+theory|file\s+system|document\s+object\s+model|table\s+of\s+contents|image\s+sensor|spreadsheet\s+software)\b/iu;
+    const filenameMentioned = (name) => {
+      if (!name || name.length < 3) return false;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+      return new RegExp(`(?:^|[^\\p{L}\\p{N}_.-])${escaped}(?=$|[^\\p{L}\\p{N}_.-])`, 'iu').test(lower);
+    };
+    const exactFilenameAllowed = !safeSimpleTransform ||
+      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:open|read|review|analy[sz]e|use|summari[sz]e|compare|check|verify)\b/iu.test(contextProbe);
+    const matchingKnownAttachments = exactFilenameAllowed
+      ? combineAttachmentProfiles(
+        buildAttachmentProfile(historicalAttachments.items.filter((item) => filenameMentioned(lowerText(item.name)))),
+        buildAttachmentProfile(archivedAttachments.items.filter((item) => filenameMentioned(lowerText(item.name)))),
+      )
+      : buildAttachmentProfile();
+    const mentionsKnownAttachment = matchingKnownAttachments.count > 0;
+    const explicitOlderMaterialReference = /\b(?:earlier|previous|older|original)\s+(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)\b/iu.test(contextProbe);
+    const explicitPriorWorkReference = [
+      /\b(?:previous|earlier|prior|above|last)\s+(?:answers?|responses?|results?|solutions?|calculations?|proofs?|reasoning|code|formulas?|equations?|work|analysis|approaches?|steps?|questions?|instructions?|explanations?|messages?|discussion|context)\b/iu,
+      /\b(?:answers?|responses?|results?|solutions?|calculations?|proofs?|reasoning|code|formulas?|equations?|work|analysis|approaches?|steps?|questions?|instructions?|explanations?|messages?)\s+(?:above|earlier|previously|from\s+before)\b/iu,
+      /\b(?:your|our)\s+(?:(?:previous|earlier|last)\s+)?(?:answers?|responses?|results?|solutions?|calculations?|proofs?|reasoning|code|formulas?|equations?|work|analysis|approaches?|steps?|questions?|instructions?|explanations?)\b/iu,
+      /\b(?:we|you)\s+(?:derived|calculated|proved|solved|wrote|explained|discussed|decided|recommended|used|said)\b/iu,
+      /\bwhat\s+you\s+(?:said|wrote|calculated|explained|recommended)\s+(?:earlier|above|before)\b/iu,
+      /\b(?:finish|continue|complete|extend|revise|correct)\s+(?:the|that|our|your)\s+(?:answer|response|solution|calculation|proof|reasoning|code|formula|equation|work|analysis|approach|step|instructions?|explanation)\b/iu,
+    ].some((pattern) => pattern.test(contextProbe));
+    const materialContextReference = namedMaterialReference.test(contextProbe) && !genericMaterialCompound.test(contextProbe) ||
+      mentionsKnownAttachment;
+    const currentMaterialReference = currentAttachments.count > 0 &&
+      /\b(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)\b/iu.test(contextProbe);
+    const startsCurrentAttachmentTask = currentMaterialReference &&
+      !mentionsKnownAttachment && !explicitOlderMaterialReference && !explicitPriorWorkReference;
+    const ellipticalFollowUp = hasPriorConversation && wordCount <= 40 && [
+      /^(?:(?:using|based on)\s+(?:this|that|these|those)\b|(?:now|then)\s+(?:solve|calculate|find|derive|evaluate|simplify|substitute|continue|do)\b)/iu,
+      /^(?:what\s+(?:happens?\s+when|if|about)|does\s+(?:this|that)\s+change\s+if)\s+[a-z](?:\s*(?:=|==|≠|!=|<=|>=|<|>)\s*[-+]?\w+(?:\.\w+)?|\s+is\s+(?:positive|negative|zero|null|true|false))\b/iu,
+      /^(?:so|then)\s+(?:is|are|does?)\s+[a-z]\s+(?:positive|negative|zero|null|true|false)\b/iu,
+      /^what\s+does\s+[a-z]\s+(?:represent|mean|stand\s+for)\b/iu,
+      /^(?:(?:what|how)\s+about|(?:and|then)\s+for)\s+(?:the\s+)?(?:other|next|previous|first|second|third)\s+(?:one|case|option|part)\b/iu,
+      /^(?:where\s+did\s+(?:this|that)(?:\s+(?:number|value|term|coefficient|factor|formula|assumption))?\s+come\s+from|(?:what|which)\s+(?:assumption|formula|equation|method|rule)\s+did\s+you\s+use)\b/iu,
+      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?show\s+(?:me\s+)?(?:the\s+)?(?:algebra|derivation|calculation|work|steps)\b/iu,
+      /^(?:how\s+did\s+you\s+know\s+to|why\s+did\s+you)\s+(?:divide|multiply|subtract|add|cancel|factor|substitute|differentiate|integrate|choose|use|set)\b/iu,
+      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?explain\s+where\s+(?:the\s+)?(?:number\s+)?[-+]?\d+(?:\.\d+)?\s+came\s+from\b/iu,
+      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:calculate|find|derive|solve|do|explain|check|review)\s+(?:the\s+)?(?:next|other|remaining)\s+(?:value|case|one|part|option)\b/iu,
+      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:do|solve|explain|check|review)\s+(?:(?:part|option)\s+)?[a-z0-9][?.!]*$/iu,
+      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:explain|simplify)(?:\s+(?:this|that|it))?|go\s+over\s+(?:this|that|it)|(?:give|show)\s+(?:me\s+)?(?:another|one\s+more)\s+example|repeat\s+(?:this|that|it))[?.!]*$/iu,
+      /^(?:(?:what|how)\s+about)\s+(?:the\s+)?(?:last|next|other|previous)\s+(?:example|case)\b/iu,
+      /^(?:(?:what|how)\s+about\s+(?:the\s+)?(?:item|bullet|point|example)\s+(?:[a-z]|\d+)|(?:and|what\s+about)\s+(?:if|when)\s+[a-z]\s+(?:is\s+)?(?:positive|negative|zero|null|true|false))\b/iu,
+      /^(?:(?:what|how)\s+about\b.{1,120}|what\s+if\b.{1,120}|and\b.{1,120})[?.!]*$/iu,
+      /^(?:(?:does|will|would|can|could)\s+it\s+work\b.{0,100}|should\s+i\s+(?:sign|take|use|keep|remove)\s+it\b.{0,100}|can\s+i\s+(?:deploy|take|use|move|delete|send)\s+it\b.{0,100}|where\s+should\s+i\s+(?:put|place|save|store)\s+it\b.{0,100}|what\s+should\s+i\s+do\s+with\s+it\b.{0,100}|what\s+is\s+it|how\s+does\s+it\s+work|why\s+is\s+it\s+(?:wrong|incorrect)|what\s+about\s+it)[?.!]*$/iu,
+    ].some((pattern) => pattern.test(contextProbe));
+    const contextDependent = !topicReset && (
+      continuation.test(contextProbe) || implicitContextFollowUp.test(contextProbe) || genericCheckFollowUp.test(contextProbe) ||
+      explicitContextTask.test(contextProbe) || contextualRevision.test(contextProbe) || indexedContextTask.test(contextProbe) || definiteContextObject.test(contextProbe) ||
+      materialContextReference || ellipticalFollowUp || contextualReference.test(contextProbe) && contextualLead.test(contextProbe) ||
+      /^(?:now\s+)?(?:apply|use)\s+(?:that|this|the\s+same)\b|^(?:now\s+)?calculate\s+(?:it|that|this)\b|\b(?:its|their)\s+(?:determinant|value|meaning|effect|result|output)\b/iu.test(contextProbe)
     );
+    const contextualTransform = contextDependent && (
+      safeSimpleTransform || /\b(?:turn|convert)\b.{0,80}\b(?:into|to)\b.{0,40}\b(?:bullets?|table|list|spanish|english)\b/iu.test(contextProbe)
+    );
+    const ambiguousFollowUp = wordCount <= 40 && !simpleAdministrative.test(lower) && !simpleUiAction.test(lower) && contextDependent;
     let uncertainBase = false;
 
     if (acknowledgment.test(lower)) score = 4;
@@ -1625,62 +1871,115 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       strongGroups.add('supplied-answer verification');
     }
 
-    const attachmentCount = clampInteger(context.attachmentCount, 0, 0, 100);
+    const attachmentCount = currentAttachments.count;
+    let attachmentMinimumLevel = '';
     if (attachmentCount > 0) {
       score = Math.max(score, 24);
       reasons.push('attached material');
-      if (attachmentCount > 1) {
-        score += 8;
+      attachmentMinimumLevel = 'medium';
+      if (attachmentCount >= 2) {
+        score = Math.max(score, 34 + Math.min(12, (attachmentCount - 2) * 4));
         strongGroups.add('multiple attachments');
+        reasons.push('multiple attachments');
+      }
+      if (attachmentCount >= 6) {
+        score = Math.max(score, 62);
+        strongGroups.add('many attachments');
+        reasons.push('many attachments');
+        attachmentMinimumLevel = 'extra-high';
+      }
+      if (currentAttachments.complexCount > 0) {
+        score = Math.max(score, 40);
+        strongGroups.add('complex attachment type');
+        reasons.push('complex attachment type');
+        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
+      }
+      if (currentAttachments.complexCount >= 3) {
+        score = Math.max(score, 62);
+        strongGroups.add('several complex attachments');
+        attachmentMinimumLevel = 'extra-high';
+      }
+      if (currentAttachments.kinds.length >= 3) {
+        score += 8;
+        strongGroups.add('mixed attachment types');
+        reasons.push('mixed attachment types');
+      }
+      if (currentAttachments.largeCount > 0 || currentAttachments.totalBytes >= 25 * 1024 * 1024) {
+        score = Math.max(score, 44);
+        strongGroups.add('large attached material');
+        reasons.push('large attached material');
+        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
+      }
+      if (currentAttachments.sensitiveCount > 0) {
+        score = Math.max(score, 44);
+        highStakes = true;
+        strongGroups.add('sensitive attached material');
+        reasons.push('sensitive attached material');
+        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
+      }
+      if (currentAttachments.unknownCount > 0) {
+        score = Math.max(score, 40);
+        strongGroups.add('unknown attachment type');
+        reasons.push('unknown attachment type favored the safer level');
+        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
+      }
+      const difficultAttachmentTask = /\b(?:audit|debug|diagnose|solve|calculate|reconcile|cross[\s-]?reference|compare\s+(?:across|all|the)|resolve\s+(?:conflicts?|contradictions?)|verify\s+(?:the\s+)?(?:calculations?|formulas?|claims?|answers?|data)|find\s+(?:inconsistencies|contradictions|errors)|read\s+(?:handwritten|every)|(?:analy[sz]e|interpret)\s+(?:(?:this|that|the|an?)\s+)?(?:[\p{L}-]+\s+){0,2}(?:chart|diagram|scan|data|results?|x[\s-]?ray|mri|image))\b/iu.test(lower);
+      if (difficultAttachmentTask) {
+        score = Math.max(score + 8, 44);
+        strongGroups.add('difficult attachment analysis');
+        reasons.push('difficult attachment analysis');
+        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
+      }
+      if (!normalized && (currentAttachments.unknownCount > 0 || attachmentCount > 1)) {
+        score = Math.max(score, 40);
+        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
+        reasons.push('attachment-only request favored the safer level');
       }
     }
 
-    const previousLevel = extractModelLevel(context.previousLevel || '');
-    let contextualMinimumLevel = '';
+    let contextualMinimumLevel = attachmentMinimumLevel;
     let inheritedContext = false;
-    if (continuation.test(lower)) {
-      if (previousLevel) {
-        const inheritedLevel = previousLevel === 'auto' ? 'instant' : previousLevel;
-        const minimumLevel = answerVerification ? 'high' : 'medium';
-        const target = modelLevelRank(inheritedLevel) >= modelLevelRank(minimumLevel) ? inheritedLevel : minimumLevel;
-        return {
-          target,
-          score: Math.max(20, modelLevelRank(target) * 18),
-          confidence: 0.82,
-          explicit: false,
-          inherited: true,
-          strict: answerVerification,
-          minimumLevel: answerVerification ? 'high' : '',
-          reasons: [answerVerification ? 'recheck the previous answer at High or above' : 'continuation of the previous task'],
-        };
-      }
-      return {
-        target: 'high',
-        score: 40,
-        confidence: 0.5,
-        explicit: false,
-        strict: answerVerification,
-        minimumLevel: answerVerification ? 'high' : '',
-        uncertain: true,
-        reasons: [answerVerification ? 'recheck the previous answer at High or above' : 'uncertain follow-up favored the safer higher level'],
-      };
-    }
-    if (ambiguousFollowUp) {
-      const inheritedLevel = previousLevel === 'auto' ? 'instant' : previousLevel;
-      contextualMinimumLevel = answerVerification
-        ? modelLevelRank(inheritedLevel) > ROUTE_LEVEL_RANK.high ? inheritedLevel : 'high'
-        : modelLevelRank(inheritedLevel) > ROUTE_LEVEL_RANK.medium ? inheritedLevel : 'medium';
-      inheritedContext = Boolean(previousLevel);
-      score = Math.max(score, answerVerification ? 40 : 24);
+    const useConversationContext = contextDependent && !metalinguisticVerification &&
+      !simpleAdministrative.test(lower) && !simpleUiAction.test(lower) &&
+      (!contextualTransform || hasPriorConversation) && !startsCurrentAttachmentTask;
+    if (useConversationContext || answerVerification && !topicReset) {
+      const baseMinimum = answerVerification ? 'high'
+        : continuation.test(lower) && !hasPriorConversation ? 'high'
+          : 'medium';
+      let inheritedLevel = previousLevel;
+      if (contextualTransform && modelLevelRank(inheritedLevel) > ROUTE_LEVEL_RANK.high) inheritedLevel = 'high';
+      const contextFloor = strongerRouteLevel(baseMinimum, inheritedLevel);
+      contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, contextFloor);
+      inheritedContext = Boolean(previousLevel && hasPriorConversation);
+      score = Math.max(score, answerVerification || continuation.test(lower) && !hasPriorConversation ? 40 : 24);
       reasons.push(answerVerification
         ? 'recheck the previous answer at High or above'
-        : 'uncertain follow-up kept a safer context level');
-    }
-    if (answerVerification && previousLevel && !contextualMinimumLevel) {
-      const inheritedLevel = previousLevel === 'auto' ? 'instant' : previousLevel;
-      contextualMinimumLevel = modelLevelRank(inheritedLevel) > ROUTE_LEVEL_RANK.high ? inheritedLevel : 'high';
-      inheritedContext = true;
-      reasons.push('recheck kept the previous level with a High minimum');
+        : inheritedContext ? 'follow-up inherited relevant conversation difficulty' : 'uncertain follow-up kept a safer context level');
+
+      let historical = historicalAttachments;
+      if (mentionsKnownAttachment) historical = matchingKnownAttachments;
+      else if (explicitOlderMaterialReference) {
+        historical = combineAttachmentProfiles(historicalAttachments, archivedAttachments);
+      } else if (currentMaterialReference) historical = buildAttachmentProfile();
+      else if (materialContextReference && historical.count === 0) historical = archivedAttachments;
+      if (historical.count > 0) {
+        reasons.push('follow-up uses earlier attached material');
+        contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, 'medium');
+        if (historical.count >= 2 || historical.complexCount > 0 || historical.largeCount > 0 || historical.sensitiveCount > 0) {
+          contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, 'high');
+          score = Math.max(score, 44);
+          strongGroups.add('earlier attached material');
+        }
+        if (historical.count >= 6 || historical.complexCount >= 3) {
+          contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, 'extra-high');
+          score = Math.max(score, 62);
+          strongGroups.add('many earlier attachments');
+        }
+      }
+    } else if (ambiguousFollowUp && !contextualTransform && !metalinguisticVerification) {
+      contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, 'medium');
+      score = Math.max(score, 24);
+      reasons.push('uncertain follow-up kept a safer context level');
     }
 
     const addSignal = (pattern, points, code, strong = true) => {
@@ -1728,8 +2027,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     }
 
     const personalHighStakes = /\b(?:my|i|me)\b.{0,80}\b(?:medical|medicine|medication|dose|dosage|symptom|diagnosis|legal|lawsuit|contract|tax|investment|financial|stocks?|warfarin|pregnan|chest pain|emergency room|\ber\b|cancer)\b|\b(?:can i take|should i take|can i sue)\b/iu.test(sampleLower);
-    const medicalDecision = /\b(?:dose|dosage|medication|medication list|medicine|drug|symptoms?|diagnosis|lab results?|pregnan\w*|warfarin|ibuprofen|tylenol|acetaminophen|alcohol|chest pain|heart attack|stroke|sepsis|meningitis|blood clot|headache|mole|cancer|ambulance|emergency room|\ber\b)\b/iu.test(sampleLower) &&
-      /\b(?:warning signs?|signs?|symptoms?|safe|serious|cancer|go|call|take|use|stop|start|increase|decrease|mix|combine|summari[sz]e|explain|interpret|review|should|can|could)\b/iu.test(sampleLower);
+    const medicalDecision = /\b(?:dose|dosage|medication|medication list|medicine|drug|symptoms?|diagnosis|lab results?|radiology|medical imag\w*|x[\s-]?ray|mri|ct scan|pregnan\w*|warfarin|ibuprofen|tylenol|acetaminophen|alcohol|chest pain|heart attack|stroke|sepsis|meningitis|blood clot|headache|mole|cancer|ambulance|emergency room|\ber\b)\b/iu.test(sampleLower) &&
+      /\b(?:warning signs?|signs?|symptoms?|safe|serious|abnormalit\w*|cancer|go|call|take|use|stop|start|increase|decrease|mix|combine|summari[sz]e|analy[sz]e|explain|interpret|review|should|can|could)\b/iu.test(sampleLower);
     const legalDecision = /\b(?:contract|lease|agreement|lawsuit|legal|tax|lawyer|landlord|employer|evict\w*|arrest\w*|fire[ds]?)\b/iu.test(sampleLower) &&
       /\b(?:need|rights?|enforceable|valid|legal|liable|liability|landlord|employer|evict\w*|arrest\w*|fire[ds]?|sign|sue|file|owe|should|can|could)\b/iu.test(sampleLower);
     const financialDecision = /\b(?:stocks?|shares?|investment|portfolio|crypto|bitcoin|nft|fraud|scam|mortgage|loan|retirement)\b/iu.test(sampleLower) &&
@@ -2759,7 +3058,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             <button class="cgs-icon-button" type="button" data-cgs-action="close-settings" aria-label="Close settings">×</button>
           </div>
           <label class="cgs-setting">
-            <span><strong>Adaptive Auto for every message</strong><small>On Send, a fast local heuristic chooses the lowest likely-sufficient level your account exposes—from Instant through the strongest available option. It never sends your draft anywhere else. Hold Alt while sending to bypass it once. ChatGPT’s own automatic switching can still promote Instant to Medium.</small></span>
+            <span><strong>Adaptive Auto for every message</strong><small>On Send, a fast local heuristic uses your message, attachment type/size/count, and relevant conversation context—including older attachments you refer to—to choose the lowest likely-sufficient level your account exposes. It never reads attachment contents or sends anything elsewhere. Hold Alt while sending to bypass it once.</small></span>
             <input type="checkbox" data-cgs-setting="adaptiveRouting" aria-label="Choose a model level for every message">
           </label>
           <label class="cgs-setting">
@@ -2914,6 +3213,12 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       composingComposer: null,
       lastRouteDecision: null,
       adaptiveCancelled: false,
+      conversationMutationVersion: 0,
+      conversationRoutingCache: null,
+      conversationRoutingBuilds: 0,
+      historicalAttachmentCache: new WeakMap(),
+      attachmentScopeIds: new WeakMap(),
+      nextAttachmentScopeId: 1,
       dockUpdateTimer: null,
       dockPositionFrame: null,
       dockResizeObserver: null,
@@ -3007,7 +3312,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           badge.title = route.reason || 'Last per-message routing choice';
         } else {
           badge.textContent = 'Adaptive Auto';
-          badge.title = 'Each send is classified locally; no extra request or transcript scan is used';
+          badge.title = 'Each send is classified locally from the message, attachment metadata, and relevant conversation context; no extra request is used';
         }
       }
     }
@@ -3246,31 +3551,356 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       try { return new URL(String(win.location.href)).pathname; } catch (_error) { return ''; }
     }
 
-    function attachmentState(composer) {
-      const scope = composerScope(composer);
-      if (!scope || typeof scope.querySelectorAll !== 'function') return { count: 0, signature: '' };
+    function attachmentStateFromScope(scope, options = {}) {
+      if (!scope || typeof scope.querySelectorAll !== 'function') {
+        return { count: 0, signature: '', profile: buildAttachmentProfile() };
+      }
       const selectors = [
-        '[data-testid*="attachment"]',
+        '[data-file-id]',
+        '[data-attachment-id]',
         '[data-testid*="file-pill"]',
         '[aria-label*="remove file" i]',
         '[aria-label*="remove attachment" i]',
-        '[data-file-id]',
-        '[data-attachment-id]',
+        '[data-testid*="attachment"]',
       ];
       const rawNodes = uniqueElements(selectors.flatMap((selector) => [...scope.querySelectorAll(selector)]))
-        .filter((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`));
-      const nodes = uniqueElements(rawNodes.map((node) => node.closest(
-        '[data-file-id], [data-attachment-id], [data-testid*="attachment"], [data-testid*="file-pill"]',
-      ) || node));
-      const labels = nodes.map((node) => normalizeText([
-        node.getAttribute('data-file-id'),
-        node.getAttribute('data-attachment-id'),
-        node.getAttribute('data-testid'),
-        node.getAttribute('aria-label'),
-        node.getAttribute('title'),
-        node.textContent,
-      ].filter(Boolean).join('|')).slice(0, 240)).sort();
-      return { count: nodes.length, signature: labels.join('\n') };
+        .filter((node) => (options.includeHidden === true || isProbablyVisible(node)) && !node.closest(`#${UI_ROOT_ID}`))
+        .filter((node) => {
+          const testId = lowerText(node.getAttribute('data-testid'));
+          const ariaLabel = lowerText(node.getAttribute('aria-label'));
+          const title = lowerText(node.getAttribute('title'));
+          if (/\b(?:attachment|file)[-_ ]?(?:add|button|picker|upload)\b|\b(?:add|upload)[-_ ]?(?:attachment|file)\b/iu.test(testId) ||
+            /^(?:add|attach|upload)(?:\s+(?:a|the))?\s+(?:file|files|attachment|attachments)?\b/iu.test(`${ariaLabel} ${title}`.trim())) return false;
+          const ownLabel = normalizeText([
+            ariaLabel,
+            title,
+            node.getAttribute('data-file-name'),
+            node.getAttribute('data-filename'),
+            node.getAttribute('data-name'),
+            [...node.childNodes].filter((child) => child.nodeType === 3).map((child) => child.textContent).join(' '),
+          ].filter(Boolean).join('|'));
+          const label = normalizeText([
+            testId,
+            ownLabel,
+            node.textContent,
+          ].filter(Boolean).join('|'));
+          const stable = node.hasAttribute('data-file-id') || node.hasAttribute('data-attachment-id') ||
+            /file-pill/iu.test(node.getAttribute('data-testid') || '') ||
+            /remove (?:file|attachment)/iu.test(node.getAttribute('aria-label') || '');
+          const genericAttachment = /attachment/iu.test(node.getAttribute('data-testid') || '');
+          if (genericAttachment && !stable && !attachmentNameFromLabel(ownLabel)) {
+            if (node.querySelector('[data-file-id], [data-attachment-id], [data-testid*="file-pill"]')) return false;
+            const fileCardWithPreview = /(?:attachment|file)[-_ ]?(?:card|item|pill)\b/iu.test(testId) &&
+              node.querySelector('img, figure');
+            if (!fileCardWithPreview) return false;
+          }
+          return true;
+        });
+      const stableAnchorSelector = '[data-file-id], [data-attachment-id], [data-testid*="file-pill"]';
+      const genericAnchorSelector = '[data-testid*="attachment"]';
+      const removeSelector = '[aria-label*="remove file" i], [aria-label*="remove attachment" i]';
+      const genericAnchor = (node) => {
+        const ancestors = [];
+        let candidate = node.closest(genericAnchorSelector);
+        while (candidate && (candidate === scope || scope.contains(candidate))) {
+          ancestors.push(candidate);
+          const parent = candidate.parentElement;
+          candidate = parent && parent.closest(genericAnchorSelector);
+        }
+        const removalOwner = ancestors.find((ancestor) => ancestor.querySelector(removeSelector));
+        if (removalOwner) return removalOwner;
+        const scored = ancestors.map((ancestor, index) => {
+          const testId = lowerText(ancestor.getAttribute('data-testid'));
+          let score = /(?:attachment|file)[-_ ]?(?:card|item|pill)\b/iu.test(testId) ? 40 : 0;
+          if (/\b(?:preview|thumbnail|thumb|icon|button|list|tray|menu)\b/iu.test(testId)) score -= 30;
+          return { ancestor, index, score };
+        }).sort((left, right) => right.score - left.score || right.index - left.index);
+        return scored[0] && scored[0].ancestor || node;
+      };
+      const anchors = uniqueElements(rawNodes.map((node) =>
+        node.closest(stableAnchorSelector) || genericAnchor(node) || node));
+      const nodeRecords = [];
+      const seenKeys = new Set();
+      const idlessNames = new Set();
+      const stableNames = new Set();
+      for (const [index, node] of anchors.entries()) {
+        const label = normalizeText([
+          node.getAttribute('data-file-id'),
+          node.getAttribute('data-attachment-id'),
+          node.getAttribute('data-file-name'),
+          node.getAttribute('data-filename'),
+          node.getAttribute('data-name'),
+          node.getAttribute('data-testid'),
+          node.getAttribute('aria-label'),
+          node.getAttribute('title'),
+          node.querySelector('img[alt]') && node.querySelector('img[alt]').getAttribute('alt'),
+          node.textContent,
+        ].filter(Boolean).join('|')).slice(0, 240);
+        const name = normalizeText(
+          node.getAttribute('data-file-name') || node.getAttribute('data-filename') ||
+          node.getAttribute('data-name') || attachmentNameFromLabel(label),
+        ).slice(0, 220);
+        const id = normalizeText(node.getAttribute('data-file-id') || node.getAttribute('data-attachment-id'));
+        const normalizedName = lowerText(name);
+        const key = id ? `id:${id}` : name ? `name:${lowerText(name)}` : `node:${index}`;
+        if (seenKeys.has(key) || !id && normalizedName && (idlessNames.has(normalizedName) || stableNames.has(normalizedName))) continue;
+        seenKeys.add(key);
+        if (normalizedName) {
+          if (id) stableNames.add(normalizedName);
+          else idlessNames.add(normalizedName);
+        }
+        nodeRecords.push({
+          key,
+          name,
+          label,
+          mime: node.getAttribute('data-mime-type') || node.getAttribute('data-file-type') || '',
+          size: node.getAttribute('data-file-size') || node.getAttribute('data-size') || attachmentByteSizeFromText(label),
+        });
+      }
+
+      const fileRecords = [];
+      for (const input of scope.querySelectorAll('input[type="file"]')) {
+        const liveInput = Boolean(normalizeText(input.value)) ||
+          /\b(?:uploading|pending|processing)\b/iu.test(`${input.getAttribute('data-state') || ''} ${input.getAttribute('aria-label') || ''}`) ||
+          input.getAttribute('aria-busy') === 'true';
+        if (!liveInput) continue;
+        let files = [];
+        try { files = [...(input.files || [])]; } catch (_error) { files = []; }
+        for (const file of files.slice(0, 100)) {
+          fileRecords.push({ name: file.name, mime: file.type, size: file.size, label: file.name });
+        }
+      }
+      const combined = [...nodeRecords];
+      const knownNames = new Set(nodeRecords.map((item) => lowerText(item.name)).filter(Boolean));
+      for (const file of fileRecords) {
+        if (nodeRecords.length && file.name && knownNames.has(lowerText(file.name))) {
+          const existing = combined.find((item) => lowerText(item.name) === lowerText(file.name));
+          if (existing) {
+            existing.mime = existing.mime || file.mime;
+            existing.size = Number(existing.size) || file.size;
+          }
+        } else if (!nodeRecords.length) {
+          combined.push(file);
+        }
+      }
+      const profile = buildAttachmentProfile(combined, nodeRecords.length || fileRecords.length);
+      const signature = profile.items.map((item) => [item.key, item.name, item.mime, item.size, item.kind].join('|'))
+        .sort().join('\n');
+      return { count: profile.count, signature, profile };
+    }
+
+    function attachmentState(composer) {
+      const scope = composerScope(composer);
+      return attachmentStateFromScope(scope);
+    }
+
+    function historicalAttachmentState(turn, shouldScan = true) {
+      if (!turn) return buildAttachmentProfile();
+      if (state.historicalAttachmentCache.has(turn)) return state.historicalAttachmentCache.get(turn);
+      let profile = shouldScan
+        ? attachmentStateFromScope(turn, { includeHidden: true }).profile
+        : buildAttachmentProfile();
+      if (profile.items.length) {
+        let scopeId = state.attachmentScopeIds.get(turn);
+        if (!scopeId) {
+          scopeId = state.nextAttachmentScopeId;
+          state.nextAttachmentScopeId += 1;
+          state.attachmentScopeIds.set(turn, scopeId);
+        }
+        profile = buildAttachmentProfile(profile.items.map((item, index) => ({
+          ...item,
+          key: item.key && item.key.startsWith('id:')
+            ? item.key
+            : `turn:${scopeId}:${item.key || index}`,
+        })), profile.count);
+      }
+      state.historicalAttachmentCache.set(turn, profile);
+      return profile;
+    }
+
+    function attachmentProfileFromText(value) {
+      const text = String(value == null ? '' : value).slice(0, 20_000);
+      const filenameAtEnd = /([^/\\|\n]{1,180}\.(?:pdf|docx?|pptx?|xlsx?|xlsm|numbers|csv|tsv|jsonl?|parquet|sql|db|sqlite|ipynb|zip|7z|rar|tar|gz|png|jpe?g|webp|gif|txt|md|py|js|jsx|ts|tsx|java|rs|go))\s*["'’”`)]*[.!?]?\s*$/iu;
+      const cleanCandidate = (raw) => {
+        const source = String(raw == null ? '' : raw)
+          .trim()
+          .replace(/^(?:is|as|named|called)\s+/iu, '')
+          .replace(/^["'‘“`(]+/u, '');
+        const match = source.match(filenameAtEnd);
+        return match ? match[1].trim().slice(0, 220) : '';
+      };
+      const evidencePatterns = [
+        /\b(?:attached|uploaded|provided)\b(?:\s+(?:the\s+)?(?:file|attachment|document|spreadsheet|image|dataset))?\s*(?:is|as|named|called|:|-)?\s*(.+)$/iu,
+        /\b(?:from|inside|in)\s+(?:the\s+|this\s+|that\s+)?(?:file\s+|document\s+|spreadsheet\s+|dataset\s+)?(.+)$/iu,
+        /^(?:please\s+)?(?:remove|delete|open|preview|download|read|review|analy[sz]e|inspect|check|compare|use)\s+(?:the\s+|this\s+|that\s+)?(?:file\s+|attachment\s+|document\s+|spreadsheet\s+|image\s+|dataset\s+)?(.+)$/iu,
+      ];
+      const sentenceLead = /^(?:create|make|write|generate|rename|call|explain|summari[sz]e|translate|what|why|how|when|where|who|i|we|you|they|he|she|it)\b/iu;
+      const names = [];
+      for (const rawLine of text.split(/\r?\n/u)) {
+        const line = rawLine.trim();
+        if (!line || !filenameAtEnd.test(line)) continue;
+        let name = '';
+        for (const pattern of evidencePatterns) {
+          const match = line.match(pattern);
+          if (!match) continue;
+          name = cleanCandidate(match[1]);
+          if (name) break;
+        }
+        if (!name && !sentenceLead.test(line)) name = cleanCandidate(line);
+        if (name) names.push(name);
+      }
+      const uniqueNames = [...new Map(names.map((name) => [lowerText(name), name])).values()].slice(0, 50);
+      return buildAttachmentProfile(uniqueNames.map((name) => ({ name, label: name })), uniqueNames.length);
+    }
+
+    function mergeAttachmentProfiles(...profiles) {
+      return combineAttachmentProfiles(...profiles);
+    }
+
+    function assistantTextContextLevel(value) {
+      const text = String(value == null ? '' : value).slice(-12_000);
+      if (!text) return '';
+      const codeLines = text.split(/\r?\n/u).filter((line) => /^\s{4,}|[{}();]|=>|\b(?:const|let|def|class|function|import|SELECT)\b/u.test(line)).length;
+      if (codeLines >= 25 || /\b(?:formal proof|threat model|race condition|stack trace|diagnosis|contract clause|security vulnerability|derive(?:d|s)? the equation)\b/iu.test(text)) return 'high';
+      if (text.length >= 3_000 || codeLines >= 8 || /\b(?:equation|algorithm|architecture|calculation|proof|source code|lab results?)\b/iu.test(text)) return 'medium';
+      return '';
+    }
+
+    function assistantContextLevel(allTurns = getTurns(doc)) {
+      const assistants = allTurns.filter((turn) => roleOfTurn(turn) === 'assistant');
+      const stopButton = [...doc.querySelectorAll(
+        'button[data-testid="stop-button"], button[data-testid*="stop-generating"], button[aria-label^="Stop generating" i], button[aria-label^="Stop streaming" i]',
+      )].find(isProbablyVisible);
+      const completed = assistants.filter((turn, index) => {
+        const explicitlyStreaming = turn.matches('[data-is-streaming="true"], [data-streaming="true"], .result-streaming') ||
+          turn.querySelector('[data-is-streaming="true"], [data-streaming="true"], .result-streaming');
+        return !explicitlyStreaming && !(stopButton && index === assistants.length - 1);
+      });
+      const assistantAcknowledgment = /^(?:you(?:['’]re|\s+are)\s+welcome|no\s+problem|happy\s+to\s+help|glad\s+(?:that\s+)?helped|sure|okay|ok|of\s+course|anytime)[.!,\s]*$/iu;
+      const meaningful = completed.filter((turn) =>
+        !assistantAcknowledgment.test(normalizeText(extractAssistantHandoff(turn))));
+      const latest = meaningful[meaningful.length - 1] || completed[completed.length - 1];
+      return latest ? assistantTextContextLevel(extractAssistantHandoff(latest)) : '';
+    }
+
+    function transferredConversationRoutingState(value) {
+      const raw = String(value == null ? '' : value);
+      const match = raw.match(/--- PREVIOUS CONVERSATION ---\s*\n([\s\S]*?)\n--- END PREVIOUS CONVERSATION ---/u);
+      if (!match) return null;
+      const transcript = match[1].slice(0, SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH);
+      const blocks = [...transcript.matchAll(/(?:^|\n\n)(USER|ASSISTANT):\s*\n([\s\S]*?)(?=\n\n(?:USER|ASSISTANT):\s*\n|$)/gu)]
+        .map((entry) => ({ role: lowerText(entry[1]), text: entry[2].trim() }));
+      const allUsers = blocks.filter((block) => block.role === 'user');
+      if (!allUsers.length) return null;
+      const archivedMaterials = mergeAttachmentProfiles(
+        ...allUsers.map((block) => attachmentProfileFromText(block.text)),
+      );
+      let level = '';
+      let materials = buildAttachmentProfile();
+      let hasMeaningfulTurn = false;
+      const acknowledgment = /^(?:thanks?(?: you)?|thank you|ok(?:ay)?|got it|cool|great|yes|no|hello|hi|hey|bye)[.!\s]*$/iu;
+      const users = allUsers.filter((block) =>
+        !acknowledgment.test(normalizeText(block.text)) || attachmentProfileFromText(block.text).count > 0)
+        .slice(-6);
+      for (const block of users) {
+        const attachments = attachmentProfileFromText(block.text);
+        const decision = classifyPrompt(block.text.slice(0, 16_000), {
+          previousLevel: level,
+          attachmentProfile: attachments,
+          hasPriorConversation: hasMeaningfulTurn,
+          historicalAttachmentProfile: materials,
+        });
+        if (acknowledgment.test(normalizeText(block.text))) {
+          materials = mergeAttachmentProfiles(materials, attachments);
+          continue;
+        }
+        materials = decision.inherited ? mergeAttachmentProfiles(materials, attachments) : attachments;
+        const target = decision.target === 'max' ? 'pro' : extractModelLevel(decision.target);
+        if (target) level = target;
+        hasMeaningfulTurn = true;
+      }
+      const assistantAcknowledgment = /^(?:you(?:['’]re|\s+are)\s+welcome|no\s+problem|happy\s+to\s+help|glad\s+(?:that\s+)?helped|sure|okay|ok|of\s+course|anytime)[.!,\s]*$/iu;
+      const assistants = blocks.filter((block) => block.role === 'assistant');
+      const latestAssistant = [...assistants].reverse().find((block) =>
+        !assistantAcknowledgment.test(normalizeText(block.text))) || assistants[assistants.length - 1];
+      return {
+        hasPriorConversation: true,
+        conversationLevel: level,
+        assistantContextLevel: latestAssistant ? assistantTextContextLevel(latestAssistant.text) : '',
+        historicalAttachmentProfile: materials,
+        archivedAttachmentProfile: archivedMaterials,
+      };
+    }
+
+    function conversationRoutingState() {
+      const path = conversationPath();
+      const cached = state.conversationRoutingCache;
+      if (cached && cached.path === path && cached.version === state.conversationMutationVersion) {
+        return cached.value;
+      }
+      state.conversationRoutingBuilds += 1;
+      const allTurns = getTurns(doc);
+      const turns = allTurns.filter((turn) => roleOfTurn(turn) === 'user');
+      const turnSet = new Set(turns);
+      const attachmentCandidateSelector = [
+        '[data-file-id]', '[data-attachment-id]', '[data-testid*="file-pill"]',
+        '[aria-label*="remove file" i]', '[aria-label*="remove attachment" i]',
+        '[data-testid*="attachment"]',
+      ].join(', ');
+      const attachmentCandidates = new Set();
+      for (const node of doc.querySelectorAll(attachmentCandidateSelector)) {
+        const primary = node.closest(TURN_SELECTOR);
+        const roleNode = primary ? null : node.closest(ROLE_SELECTOR);
+        const turn = primary || roleNode && (roleNode.closest('article') || roleNode);
+        if (turnSet.has(turn)) attachmentCandidates.add(turn);
+      }
+      const attachmentProfiles = new Map(turns.map((turn) => [
+        turn,
+        historicalAttachmentState(turn, attachmentCandidates.has(turn)),
+      ]));
+      const archivedMaterials = mergeAttachmentProfiles(...attachmentProfiles.values());
+      let level = '';
+      let materials = buildAttachmentProfile();
+      let hasMeaningfulTurn = false;
+      const acknowledgment = /^(?:thanks?(?: you)?|thank you|ok(?:ay)?|got it|cool|great|yes|no|hello|hi|hey|bye)[.!\s]*$/iu;
+      const recent = [];
+      for (let index = turns.length - 1; index >= 0 && recent.length < 6; index -= 1) {
+        const turn = turns[index];
+        const prompt = readableNodeText(turn).slice(0, 16_000);
+        const attachments = attachmentProfiles.get(turn) || buildAttachmentProfile();
+        if (!prompt || acknowledgment.test(normalizeText(prompt)) && attachments.count === 0) continue;
+        recent.unshift({ prompt, attachments });
+      }
+      for (const { prompt, attachments } of recent) {
+        const decision = classifyPrompt(prompt, {
+          previousLevel: level,
+          attachmentProfile: attachments,
+          hasPriorConversation: hasMeaningfulTurn,
+          historicalAttachmentProfile: materials,
+        });
+        if (acknowledgment.test(normalizeText(prompt))) {
+          materials = mergeAttachmentProfiles(materials, attachments);
+          continue;
+        }
+        if (decision.inherited) materials = mergeAttachmentProfiles(materials, attachments);
+        else materials = attachments;
+        const target = decision.target === 'max' ? 'pro' : extractModelLevel(decision.target);
+        if (target) level = target;
+        hasMeaningfulTurn = true;
+      }
+      const value = {
+        hasPriorConversation: turns.length > 0,
+        conversationLevel: level,
+        assistantContextLevel: assistantContextLevel(allTurns),
+        historicalAttachmentProfile: materials,
+        archivedAttachmentProfile: archivedMaterials,
+      };
+      state.conversationRoutingCache = {
+        path,
+        version: state.conversationMutationVersion,
+        value,
+      };
+      return value;
     }
 
     function activeToolState(composer) {
@@ -3294,11 +3924,19 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       if (!composer) return null;
       const attachments = attachmentState(composer);
       const tools = activeToolState(composer);
+      const conversation = conversationRoutingState();
       return {
         path: conversationPath(),
+        conversationVersion: state.conversationMutationVersion,
         draft: getComposerText(composer),
         attachmentCount: attachments.count,
         attachmentSignature: attachments.signature,
+        attachmentProfile: attachments.profile,
+        hasPriorConversation: conversation.hasPriorConversation,
+        conversationLevel: conversation.conversationLevel,
+        assistantContextLevel: conversation.assistantContextLevel,
+        historicalAttachmentProfile: conversation.historicalAttachmentProfile,
+        archivedAttachmentProfile: conversation.archivedAttachmentProfile,
         toolSignature: tools.signature,
         specialMode: tools.special,
       };
@@ -3306,6 +3944,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
     function validateSendSnapshot(snapshot) {
       if (!snapshot || conversationPath() !== snapshot.path) return { ok: false, reason: 'The conversation changed while Auto was choosing.' };
+      if (snapshot.conversationVersion !== state.conversationMutationVersion) {
+        return { ok: false, reason: 'The conversation changed while Auto was choosing.' };
+      }
       const composer = findComposer(doc);
       let draftMatches = false;
       if (composer) {
@@ -3714,9 +4355,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         if (!silent) toast(`Adaptive Auto kept the current model because ${snapshot.specialMode} controls model compatibility.`);
         return replayNativeSend(snapshot, decision, current || 'unknown', manual, `kept current for ${snapshot.specialMode}`);
       }
-      if (!snapshot.draft.trim()) {
-        return replayNativeSend(snapshot, decision, current || 'unknown', manual, 'attachment-only message kept the current model');
-      }
       if (picker && target !== 'max' && (
         current === target || target === 'instant' && current === 'auto' || modelLevelRank(current) === targetRank && targetRank === 0
       )) {
@@ -4084,7 +4722,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       if (state.replayingSend) return false;
       if (state.adaptiveSendPromise) return state.adaptiveSendPromise;
       const composer = options.composer && options.composer.isConnected ? options.composer : findComposer(doc);
-      const snapshot = captureSendSnapshot(composer);
+      const snapshot = options.snapshot && options.snapshot.path === conversationPath()
+        ? options.snapshot
+        : captureSendSnapshot(composer);
       if (!snapshot) return false;
       snapshot.draftValidator = typeof options.draftValidator === 'function' ? options.draftValidator : null;
       const suppliedBeforeReplay = typeof options.beforeReplay === 'function' ? options.beforeReplay : null;
@@ -4127,9 +4767,26 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       state.adaptiveCancelled = false;
 
       const task = Promise.resolve().then(async () => {
+        const transferredContext = options.routingText != null && !snapshot.hasPriorConversation
+          ? transferredConversationRoutingState(snapshot.draft)
+          : null;
+        const inferredConversationLevel = strongerRouteLevel(
+          snapshot.conversationLevel,
+          transferredContext && transferredContext.conversationLevel,
+        );
         const explicitDecision = classifyPrompt(options.routingText == null ? snapshot.draft : options.routingText, {
-          previousLevel: previousRouteLevel(),
+          previousLevel: inferredConversationLevel ? '' : previousRouteLevel(),
           attachmentCount: snapshot.attachmentCount,
+          attachmentProfile: snapshot.attachmentProfile,
+          hasPriorConversation: transferredContext ? true : snapshot.hasPriorConversation,
+          conversationLevel: inferredConversationLevel,
+          assistantContextLevel: strongerRouteLevel(snapshot.assistantContextLevel, transferredContext && transferredContext.assistantContextLevel),
+          historicalAttachmentProfile: transferredContext
+            ? mergeAttachmentProfiles(snapshot.historicalAttachmentProfile, transferredContext.historicalAttachmentProfile)
+            : snapshot.historicalAttachmentProfile,
+          archivedAttachmentProfile: transferredContext
+            ? mergeAttachmentProfiles(snapshot.archivedAttachmentProfile, transferredContext.archivedAttachmentProfile)
+            : snapshot.archivedAttachmentProfile,
         });
         const decision = explicitDecision;
         if (!state.settings.adaptiveRouting && !explicitDecision.explicit) {
@@ -5799,7 +6456,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         event.stopImmediatePropagation();
       }
       if (!state.adaptiveSendPromise) {
-        smartRouteAndSend({ composer }).catch((error) => {
+        smartRouteAndSend({ composer, snapshot }).catch((error) => {
           if (win.console && typeof win.console.error === 'function') win.console.error('[ChatGPT Workflow Toolkit] Adaptive send failed:', error);
           toast('Adaptive Auto hit an unexpected error. Your draft was kept; press Alt+Send to bypass it.', 8_000);
         });
@@ -5985,21 +6642,123 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       win.requestAnimationFrame(updateSelectionPill);
     }
 
+    function mutationElement(node) {
+      if (!node) return null;
+      return node.nodeType === 1 ? node : node.parentElement;
+    }
+
+    function isToolkitMutationNode(node) {
+      const target = mutationElement(node);
+      return Boolean(target && (
+        target.matches(`#${UI_ROOT_ID}, .${TURN_BUTTON_CLASS}, .cgs-turn-fallback-row`) ||
+        target.closest(`#${UI_ROOT_ID}, .${TURN_BUTTON_CLASS}, .cgs-turn-fallback-row`)
+      ));
+    }
+
+    function nodeIsInsideConversation(node) {
+      const target = mutationElement(node);
+      if (!target || isToolkitMutationNode(target)) return false;
+      return Boolean(
+        target.matches(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`) ||
+        target.closest(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`),
+      );
+    }
+
+    function nodeTouchesConversation(node) {
+      const target = mutationElement(node);
+      return Boolean(target && !isToolkitMutationNode(target) && (
+        nodeIsInsideConversation(target) || target.querySelector(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`)
+      ));
+    }
+
+    function nodeTouchesGenerationControl(node) {
+      const target = mutationElement(node);
+      if (!target) return false;
+      const selector = 'button[data-testid="stop-button"], button[data-testid*="stop-generating"], button[aria-label^="Stop generating" i], button[aria-label^="Stop streaming" i]';
+      return target.matches(selector) || Boolean(target.querySelector(selector));
+    }
+
+    function conversationTurnForNode(node, allowArticleFallback = false) {
+      const target = mutationElement(node);
+      if (!target) return null;
+      const primary = target.matches(TURN_SELECTOR) ? target : target.closest(TURN_SELECTOR);
+      if (primary) return primary;
+      const roleNode = target.matches(ROLE_SELECTOR) ? target : target.closest(ROLE_SELECTOR);
+      if (roleNode) return roleNode.closest('article') || roleNode;
+      return allowArticleFallback ? target.closest('article') || target : null;
+    }
+
+    function nodeLooksLikeAttachment(node) {
+      const target = mutationElement(node);
+      if (!target) return false;
+      const selector = '[data-file-id], [data-attachment-id], [data-testid*="attachment"], [data-testid*="file-pill"], [aria-label*="file" i], [aria-label*="attachment" i]';
+      return target.matches(selector) || Boolean(target.closest(selector));
+    }
+
+    function evictHistoricalAttachmentCache(mutation) {
+      const roleChanged = mutation.type === 'attributes' &&
+        ['data-message-author-role', 'data-turn'].includes(mutation.attributeName);
+      const nodes = [mutation.target, ...mutation.addedNodes, ...mutation.removedNodes];
+      for (const node of nodes) {
+        const turn = conversationTurnForNode(node, roleChanged && node === mutation.target);
+        if (turn) state.historicalAttachmentCache.delete(turn);
+      }
+    }
+
+    function mutationChangesConversation(mutation) {
+      if (!mutation || isToolkitMutationNode(mutation.target)) return false;
+      if (mutation.type === 'characterData') return nodeIsInsideConversation(mutation.target);
+      if (mutation.type === 'attributes') {
+        const name = mutation.attributeName || '';
+        if (name === 'data-message-author-role' || name === 'data-turn') return true;
+        if (['data-is-streaming', 'data-streaming', 'data-file-id', 'data-attachment-id', 'data-file-name',
+          'data-filename', 'data-name', 'data-mime-type', 'data-file-type', 'data-file-size', 'data-size'].includes(name)) {
+          return nodeIsInsideConversation(mutation.target);
+        }
+        if (name === 'data-testid') {
+          return nodeIsInsideConversation(mutation.target) || /^conversation-turn-/u.test(String(mutation.oldValue || ''));
+        }
+        if (name === 'aria-label' || name === 'title') {
+          return nodeIsInsideConversation(mutation.target) && nodeLooksLikeAttachment(mutation.target);
+        }
+        return false;
+      }
+      const changed = [...mutation.addedNodes, ...mutation.removedNodes]
+        .filter((node) => !isToolkitMutationNode(node));
+      if (!changed.length) return false;
+      return nodeIsInsideConversation(mutation.target) || changed.some((node) =>
+        nodeTouchesConversation(node) || nodeTouchesGenerationControl(node));
+    }
+
     function observe() {
       state.observer = new win.MutationObserver((mutations) => {
+        let conversationChanged = false;
         for (const mutation of mutations) {
+          if (!conversationChanged && mutationChangesConversation(mutation)) conversationChanged = true;
           if (mutation.type === 'attributes') scheduleScan(mutation.target);
           else {
             for (const node of mutation.addedNodes) scheduleScan(node);
             if (mutation.removedNodes.length) scheduleScan(mutation.target);
           }
         }
+        if (conversationChanged) {
+          for (const mutation of mutations) evictHistoricalAttachmentCache(mutation);
+          state.conversationMutationVersion += 1;
+          state.conversationRoutingCache = null;
+        }
       });
       state.observer.observe(doc.body, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label', 'data-message-author-role', 'data-turn', 'data-testid'],
+        attributeOldValue: true,
+        characterData: true,
+        attributeFilter: [
+          'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label', 'title',
+          'data-message-author-role', 'data-turn', 'data-testid', 'data-is-streaming', 'data-streaming',
+          'data-file-id', 'data-attachment-id', 'data-file-name', 'data-filename', 'data-name',
+          'data-mime-type', 'data-file-type', 'data-file-size', 'data-size',
+        ],
       });
     }
 
@@ -6047,6 +6806,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       state,
       ensureInstant,
       smartRouteAndSend,
+      captureSendSnapshot,
+      attachmentProfileFromText,
       launchBranch,
       runIncomingJob,
       processRoot,
@@ -6149,6 +6910,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     modelLevelRank,
     modelLevelLabel,
     parseRouteOverride,
+    buildAttachmentProfile,
     classifyPrompt,
     chooseModelOption,
     findModelPicker,

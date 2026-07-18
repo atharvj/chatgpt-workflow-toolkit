@@ -2,7 +2,7 @@
 
 A small userscript that adds better conversation tools to ChatGPT.
 
-Its main feature, **Adaptive Auto for every message**, chooses the lowest likely-sufficient available intelligence level for each prompt—Instant for simple questions and stronger levels for harder work. This can reduce wait time and unnecessary reasoning-token use. When a question challenges a supplied answer, it requires a confirmed High-or-stronger level and tells ChatGPT to verify the answer before explaining it.
+Its main feature, **Adaptive Auto for every message**, uses the prompt, attachment type/size/count, and relevant conversation context to choose the lowest likely-sufficient intelligence level. This can reduce wait time and unnecessary reasoning-token use. Answer checks require a confirmed High-or-stronger level and independent verification.
 
 ## Features
 

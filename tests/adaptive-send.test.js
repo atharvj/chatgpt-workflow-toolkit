@@ -18,6 +18,8 @@ async function createHarness(options = {}) {
     delayedSubmitAfterClick = null,
     disableSendOnOptionClick = false,
     reflectOptionSelection = true,
+    attachmentMarkup = '',
+    conversationMarkup = '',
   } = options;
   const pickerMarkup = includePicker
     ? `<button type="button" data-testid="model-switcher" aria-controls="model-menu" aria-expanded="false">${pickerLevel}</button>`
@@ -26,9 +28,11 @@ async function createHarness(options = {}) {
     ? `<button type="button" aria-pressed="true">${activeTool}</button>`
     : '';
   const dom = new JSDOM(`<!doctype html><html><body><main>
+    ${conversationMarkup}
     <form>
       ${pickerMarkup}
       ${toolMarkup}
+      ${attachmentMarkup}
       <textarea id="prompt-textarea"></textarea>
       <button type="button" data-testid="send-button">Send</button>
     </form>
@@ -337,6 +341,302 @@ test('simple prompt switches High to Instant and replays Send exactly once', asy
   assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
 });
 
+test('composer attachment profiling counts logical files instead of nested controls', async (t) => {
+  const harness = await createHarness({
+    attachmentMarkup: `
+      <button type="button" data-testid="attachment-button" aria-label="Attach files">Attach files</button>
+      <div data-testid="attachment-card" data-file-id="file-1" data-file-name="lab.pdf">
+        <span data-testid="attachment-preview">lab.pdf</span>
+        <button type="button" aria-label="Remove file lab.pdf">Remove</button>
+      </div>
+      <div data-testid="attachment-card" data-file-id="file-2" data-file-name="results.xlsx">
+        <button type="button" aria-label="Remove attachment results.xlsx">Remove</button>
+      </div>`,
+  });
+  t.after(() => harness.cleanup());
+
+  const snapshot = harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(snapshot.attachmentCount, 2);
+  assert.deepEqual(snapshot.attachmentProfile.kinds, ['document', 'structured-data']);
+  assert.match(snapshot.attachmentSignature, /lab\.pdf/iu);
+  assert.match(snapshot.attachmentSignature, /results\.xlsx/iu);
+  assert.doesNotMatch(snapshot.attachmentSignature, /Attach files/iu);
+});
+
+test('attachment DOM profiling preserves distinct files and rejects nested UI containers', async (t) => {
+  const harness = await createHarness({
+    attachmentMarkup: `
+      <button type="button" data-testid="attachment-button" aria-label="Attach files"><img alt="attachment icon"></button>
+      <div data-testid="attachment-tray"><img alt="attachment icon"></div>
+      <div data-testid="attachment-tray">
+        <div data-testid="attachment-card" data-file-id="file-3" data-file-name="nested.pdf">
+          <button type="button" aria-label="Remove file nested.pdf">Remove</button>
+        </div>
+      </div>
+      <div data-testid="attachment-card" data-file-id="file-1" data-file-name="same.pdf">
+        <span data-testid="attachment-preview">same.pdf</span>
+      </div>
+      <div data-testid="attachment-card" data-file-id="file-2" data-file-name="same.pdf">
+        <span data-testid="attachment-preview">same.pdf</span>
+      </div>
+      <div data-testid="attachment-card">
+        <div data-file-id="file-4" data-file-name="wrapped.pdf"><img alt="wrapped.pdf"></div>
+      </div>
+      <div data-testid="attachment-card"><div data-testid="attachment-preview"><img alt="page preview"></div></div>`,
+  });
+  t.after(() => harness.cleanup());
+
+  const snapshot = harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(snapshot.attachmentCount, 5, 'four stable files plus one nameless card, without counting wrappers or trays');
+  assert.equal(snapshot.attachmentProfile.items.filter((item) => item.name === 'same.pdf').length, 2);
+  assert.doesNotMatch(snapshot.attachmentSignature, /attachment-(?:button|tray)/iu);
+});
+
+test('stale file input entries do not resurrect a removed composer attachment', async (t) => {
+  const harness = await createHarness({
+    attachmentMarkup: `
+      <input id="file-input" type="file" multiple>
+      <div data-file-id="current-file" data-file-name="current.pdf">
+        <button type="button" aria-label="Remove file current.pdf">Remove</button>
+      </div>`,
+  });
+  t.after(() => harness.cleanup());
+  const fileInput = harness.document.querySelector('#file-input');
+  Object.defineProperty(fileInput, 'files', {
+    configurable: true,
+    value: [{ name: 'removed.pdf', type: 'application/pdf', size: 1000 }],
+  });
+
+  const snapshot = harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(snapshot.attachmentCount, 1);
+  assert.match(snapshot.attachmentSignature, /current\.pdf/iu);
+  assert.doesNotMatch(snapshot.attachmentSignature, /removed\.pdf/iu);
+});
+
+test('a stale file input cannot resurrect the last removed attachment', async (t) => {
+  const harness = await createHarness({
+    attachmentMarkup: '<input id="file-input" type="file" multiple>',
+  });
+  t.after(() => harness.cleanup());
+  const fileInput = harness.document.querySelector('#file-input');
+  Object.defineProperty(fileInput, 'files', {
+    configurable: true,
+    value: [{ name: 'removed.xlsx', type: 'application/vnd.ms-excel', size: 1000 }],
+  });
+
+  const snapshot = harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(snapshot.attachmentCount, 0);
+  assert.doesNotMatch(snapshot.attachmentSignature, /removed\.xlsx/iu);
+});
+
+test('upload progress text does not make an unchanged attachment look replaced', async (t) => {
+  const harness = await createHarness({
+    attachmentMarkup: `
+      <div data-file-id="file-1" data-file-name="notes.pdf">
+        <span id="progress">Uploading 10%</span>
+        <button type="button" aria-label="Remove file notes.pdf">Remove</button>
+      </div>`,
+  });
+  t.after(() => harness.cleanup());
+  const before = harness.app.captureSendSnapshot(harness.composer);
+  harness.document.querySelector('#progress').textContent = 'Uploading 90%';
+  const after = harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(after.attachmentSignature, before.attachmentSignature);
+});
+
+test('attachment-only send switches to the level required by the file profile', async (t) => {
+  const harness = await createHarness({
+    prompt: '',
+    pickerLevel: 'High',
+    attachmentMarkup: `
+      <div data-file-id="file-1" data-file-name="worksheet.pdf">
+        <button type="button" aria-label="Remove file worksheet.pdf">Remove</button>
+      </div>`,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.picker.textContent, 'Medium');
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'medium');
+});
+
+test('same-count attachment replacement cancels a captured send safely', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Summarize this file.',
+    pickerLevel: 'High',
+    attachmentMarkup: `
+      <div id="attachment-card" data-file-id="file-1" data-file-name="first.pdf">
+        <button type="button" aria-label="Remove file first.pdf">Remove</button>
+      </div>`,
+  });
+  t.after(() => harness.cleanup());
+  const snapshot = harness.app.captureSendSnapshot(harness.composer);
+  const card = harness.document.querySelector('#attachment-card');
+  card.dataset.fileId = 'file-2';
+  card.dataset.fileName = 'replacement.xlsx';
+  card.querySelector('button').setAttribute('aria-label', 'Remove file replacement.xlsx');
+
+  const sent = await harness.app.smartRouteAndSend({ composer: harness.composer, snapshot, silent: true });
+
+  assert.equal(sent, false);
+  assert.equal(harness.counters.pickerOpens, 0);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+});
+
+test('recent conversation difficulty is inherited only by a referential follow-up', async (t) => {
+  const conversationMarkup = `
+    <article data-testid="conversation-turn-0"><div data-message-author-role="user">Prove rigorously that this concurrent algorithm is correct.</div></article>
+    <article data-testid="conversation-turn-1"><div data-message-author-role="assistant">Proof with invariants and a race-condition analysis.</div></article>`;
+  const followUp = await createHarness({
+    prompt: 'Explain section 4.',
+    pickerLevel: 'Instant',
+    conversationMarkup,
+  });
+  t.after(() => followUp.cleanup());
+
+  followUp.sendButton.click();
+  await finishAdaptiveSend(followUp);
+  assert.equal(followUp.picker.textContent, 'Extra High');
+  assert.equal(followUp.app.state.lastRouteDecision.target, 'extra-high');
+
+  const standalone = await createHarness({
+    prompt: 'what is 2+2',
+    pickerLevel: 'High',
+    conversationMarkup,
+  });
+  t.after(() => standalone.cleanup());
+  standalone.sendButton.click();
+  await finishAdaptiveSend(standalone);
+  assert.equal(standalone.picker.textContent, 'Instant');
+  assert.equal(standalone.app.state.lastRouteDecision.target, 'instant');
+});
+
+test('conversation routing is cached until a conversation turn changes', async (t) => {
+  const harness = await createHarness({
+    conversationMarkup: `
+      <article data-testid="conversation-turn-0"><div data-message-author-role="user">Explain this equation.</div></article>
+      <article data-testid="conversation-turn-1"><div data-message-author-role="assistant">Here is the calculation.</div></article>`,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.app.captureSendSnapshot(harness.composer);
+  const firstBuilds = harness.app.state.conversationRoutingBuilds;
+  harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(harness.app.state.conversationRoutingBuilds, firstBuilds);
+
+  const unrelated = harness.document.createElement('div');
+  unrelated.setAttribute('role', 'menu');
+  unrelated.textContent = 'Unrelated menu';
+  harness.document.body.append(unrelated);
+  await wait(harness.window, 0);
+  harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(harness.app.state.conversationRoutingBuilds, firstBuilds, 'unrelated UI must not invalidate the cache');
+
+  harness.document.querySelector('[data-message-author-role="user"]').textContent = 'Prove this equation rigorously.';
+  await wait(harness.window, 0);
+  harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(harness.app.state.conversationRoutingBuilds, firstBuilds + 1);
+});
+
+test('acknowledgments do not evict the last meaningful hard task from routing context', async (t) => {
+  const hardTask = 'Design and implement a production compiler end to end with a parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument.';
+  const conversationMarkup = [
+    `<article data-testid="conversation-turn-0"><div data-message-author-role="user">${hardTask}</div></article>`,
+    '<article data-testid="conversation-turn-1"><div data-message-author-role="assistant">Here is the compiler architecture and formal proof.</div></article>',
+    ...Array.from({ length: 7 }, (_value, index) =>
+      `<article data-testid="conversation-turn-${index + 2}"><div data-message-author-role="user">Thanks!</div></article>`),
+    '<article data-testid="conversation-turn-9"><div data-message-author-role="assistant">You’re welcome!</div></article>',
+  ].join('');
+  const harness = await createHarness({
+    prompt: 'Continue and finish it.',
+    pickerLevel: 'Instant',
+    conversationMarkup,
+  });
+  t.after(() => harness.cleanup());
+
+  const snapshot = harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(snapshot.conversationLevel, 'pro');
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+  assert.equal(harness.picker.textContent, 'Pro');
+  assert.equal(harness.app.state.lastRouteDecision.target, 'pro');
+});
+
+test('two nameless attachments in separate turns remain two archived attachments', async (t) => {
+  const conversationMarkup = [0, 1].map((index) => `
+    <article data-testid="conversation-turn-${index}">
+      <div data-message-author-role="user">See this image.
+        <div data-testid="attachment-card"><img alt="page preview"></div>
+      </div>
+    </article>`).join('');
+  const harness = await createHarness({ conversationMarkup });
+  t.after(() => harness.cleanup());
+
+  const snapshot = harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(snapshot.archivedAttachmentProfile.count, 2);
+});
+
+test('removing a fallback turn role invalidates the conversation cache', async (t) => {
+  const harness = await createHarness({
+    conversationMarkup: '<article><div id="role-node" data-message-author-role="user">Question</div></article>',
+  });
+  t.after(() => harness.cleanup());
+  const before = harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(before.hasPriorConversation, true);
+  const builds = harness.app.state.conversationRoutingBuilds;
+
+  harness.document.querySelector('#role-node').removeAttribute('data-message-author-role');
+  await wait(harness.window, 0);
+  const after = harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(after.hasPriorConversation, false);
+  assert.equal(harness.app.state.conversationRoutingBuilds, builds + 1);
+});
+
+test('a conversation mutation cancels a previously captured routing snapshot', async (t) => {
+  const harness = await createHarness({
+    conversationMarkup: `
+      <article data-testid="conversation-turn-0"><div data-message-author-role="user">Explain this equation.</div></article>
+      <article data-testid="conversation-turn-1"><div id="answer" data-message-author-role="assistant">Here is the answer.</div></article>`,
+  });
+  t.after(() => harness.cleanup());
+  const snapshot = harness.app.captureSendSnapshot(harness.composer);
+  harness.document.querySelector('#answer').textContent = 'A changed answer.';
+  await wait(harness.window, 0);
+
+  const sent = await harness.app.smartRouteAndSend({ composer: harness.composer, snapshot, silent: true });
+  assert.equal(sent, false);
+  assert.equal(harness.counters.pickerOpens, 0);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('an explicitly referenced old attachment survives beyond the recent-turn window', async (t) => {
+  const olderTurns = Array.from({ length: 8 }, (_value, index) => index === 0
+    ? `<article data-testid="conversation-turn-${index}"><div data-message-author-role="user">Use the attached spreadsheet.<div data-file-id="sheet-1" data-file-name="results.xlsx"><button aria-label="Remove file results.xlsx">Remove</button></div></div></article>`
+    : `<article data-testid="conversation-turn-${index}"><div data-message-author-role="user">Unrelated question ${index}.</div></article>`)
+    .join('');
+  const harness = await createHarness({
+    prompt: 'What does the table in results.xlsx mean?',
+    pickerLevel: 'Instant',
+    conversationMarkup: olderTurns,
+  });
+  t.after(() => harness.cleanup());
+
+  const snapshot = harness.app.captureSendSnapshot(harness.composer);
+  assert.equal(snapshot.historicalAttachmentProfile.count, 0);
+  assert.equal(snapshot.archivedAttachmentProfile.count, 1);
+  assert.equal(snapshot.archivedAttachmentProfile.items[0].name, 'results.xlsx');
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+  assert.equal(harness.picker.textContent, 'High');
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+});
+
 test('uncertain boundary prompt switches Instant to the safer Medium level and sends once', async (t) => {
   const harness = await createHarness({ prompt: 'Write a short poem about rain.', pickerLevel: 'Instant' });
   t.after(() => harness.cleanup());
@@ -378,6 +678,129 @@ test('fallback-owned draft may be reformatted while its model menu opens and sti
   assert.equal(harness.counters.optionClicks, 1);
   assert.equal(harness.counters.sends, 1);
   assert.equal(harness.picker.textContent, 'Instant');
+});
+
+test('fallback transcript supplies difficulty for a context-dependent side question', async (t) => {
+  const jobId = 'fallback_context_route_job_1234';
+  const expected = toolkit.buildSideFallbackPrompt(
+    'USER:\nProve rigorously that this concurrent algorithm is correct.\n\nASSISTANT:\nHere is the proof, including invariants and a race-condition analysis.',
+    'Explain section 4.',
+    'ask',
+    jobId,
+  );
+  const harness = await createHarness({ prompt: expected, pickerLevel: 'Instant' });
+  t.after(() => harness.cleanup());
+
+  const sent = await harness.app.smartRouteAndSend({
+    composer: harness.composer,
+    routingText: 'Explain section 4.',
+    silent: true,
+    draftValidator: (composer) => toolkit.fallbackDraftTextMatches(composer.value, expected, jobId),
+  });
+
+  assert.equal(sent, true);
+  assert.equal(harness.picker.textContent, 'Extra High');
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'extra-high');
+});
+
+test('fallback transcript retains an explicitly referenced attachment older than six user turns', async (t) => {
+  const jobId = 'fallback_archived_attachment_job_1234';
+  const transcript = [
+    'USER:\nAttached file: results.xlsx',
+    ...Array.from({ length: 7 }, (_value, index) => `USER:\nUnrelated question ${index + 1}.`),
+    'ASSISTANT:\nOkay.',
+  ].join('\n\n');
+  const expected = toolkit.buildSideFallbackPrompt(
+    transcript,
+    'What does the table in results.xlsx mean?',
+    'ask',
+    jobId,
+  );
+  const harness = await createHarness({ prompt: expected, pickerLevel: 'Instant' });
+  t.after(() => harness.cleanup());
+
+  const sent = await harness.app.smartRouteAndSend({
+    composer: harness.composer,
+    routingText: 'What does the table in results.xlsx mean?',
+    silent: true,
+    draftValidator: (composer) => toolkit.fallbackDraftTextMatches(composer.value, expected, jobId),
+  });
+
+  assert.equal(sent, true);
+  assert.equal(harness.picker.textContent, 'High');
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+});
+
+test('fallback text attachment parsing requires real attachment evidence and keeps the basename', async (t) => {
+  const harness = await createHarness();
+  t.after(() => harness.cleanup());
+  assert.equal(harness.app.attachmentProfileFromText('Create report.pdf').count, 0);
+  assert.equal(harness.app.attachmentProfileFromText('report.pdf').items[0].name, 'report.pdf');
+  for (const text of [
+    'Attached file: results.xlsx',
+    'I attached results.xlsx',
+    'The file I uploaded is results.xlsx',
+    'Use data from results.xlsx',
+  ]) {
+    const profile = harness.app.attachmentProfileFromText(text);
+    assert.equal(profile.count, 1, text);
+    assert.equal(profile.items[0].name, 'results.xlsx', text);
+  }
+});
+
+test('fallback attachment evidence keeps the exact trailing filename', async (t) => {
+  for (const [index, evidence] of [
+    'I attached results.xlsx',
+    'The file I uploaded is results.xlsx',
+    'Use data from results.xlsx',
+  ].entries()) {
+    const jobId = `fallback_filename_evidence_${index}_1234`;
+    const transcript = [
+      `USER:\n${evidence}`,
+      ...Array.from({ length: 7 }, (_value, turn) => `USER:\nUnrelated question ${turn + 1}.`),
+      'ASSISTANT:\nOkay.',
+    ].join('\n\n');
+    const expected = toolkit.buildSideFallbackPrompt(
+      transcript,
+      'What does results.xlsx show?',
+      'ask',
+      jobId,
+    );
+    const harness = await createHarness({ prompt: expected, pickerLevel: 'Instant' });
+    t.after(() => harness.cleanup());
+
+    const sent = await harness.app.smartRouteAndSend({
+      composer: harness.composer,
+      routingText: 'What does results.xlsx show?',
+      silent: true,
+      draftValidator: (composer) => toolkit.fallbackDraftTextMatches(composer.value, expected, jobId),
+    });
+    assert.equal(sent, true, evidence);
+    assert.equal(harness.picker.textContent, 'High', evidence);
+  }
+});
+
+test('fallback acknowledgments preserve the last meaningful hard task', async (t) => {
+  const jobId = 'fallback_meaningful_context_job_1234';
+  const hardTask = 'Design and implement a production compiler end to end with a parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument.';
+  const transcript = [
+    `USER:\n${hardTask}`,
+    'ASSISTANT:\nHere is the compiler architecture and formal proof.',
+    ...Array.from({ length: 7 }, () => 'USER:\nThanks!\n\nASSISTANT:\nYou’re welcome!'),
+  ].join('\n\n');
+  const expected = toolkit.buildSideFallbackPrompt(transcript, 'Continue and finish it.', 'ask', jobId);
+  const harness = await createHarness({ prompt: expected, pickerLevel: 'Instant' });
+  t.after(() => harness.cleanup());
+
+  const sent = await harness.app.smartRouteAndSend({
+    composer: harness.composer,
+    routingText: 'Continue and finish it.',
+    silent: true,
+    draftValidator: (composer) => toolkit.fallbackDraftTextMatches(composer.value, expected, jobId),
+  });
+  assert.equal(sent, true);
+  assert.equal(harness.picker.textContent, 'Pro');
 });
 
 test('fallback-owned composer remount after persistence refreshes the send snapshot', async (t) => {
