@@ -135,6 +135,44 @@ test('findSendButton honors selector priority and ignores hidden buttons', () =>
   assert.equal(toolkit.findSendButton(document), document.querySelector('#aria'));
 });
 
+test('findSendButton resolves tightly scoped edited-message controls without choosing Cancel or the bottom Send', () => {
+  const { document } = createDom(`
+    <main>
+      <article data-testid="conversation-turn-user" data-message-author-role="user">
+        <form id="edit-form">
+          <textarea id="edit-composer">edited prompt</textarea>
+          <button type="button">Cancel</button>
+          <button type="submit" id="edit-send">Save &amp; submit</button>
+        </form>
+      </article>
+      <form><textarea id="prompt-textarea"></textarea><button data-testid="send-button" id="bottom-send">Send</button></form>
+    </main>
+  `).window;
+
+  const editComposer = document.querySelector('#edit-composer');
+  assert.equal(toolkit.findComposer(document), document.querySelector('#prompt-textarea'));
+  assert.equal(toolkit.findSendButton(document, editComposer), document.querySelector('#edit-send'));
+  assert.equal(toolkit.findSendButton(document), document.querySelector('#bottom-send'));
+});
+
+test('findSendButton supports no-form and externally form-associated edit Send controls', () => {
+  const noForm = createDom(`
+    <main><article data-testid="conversation-turn-user" data-message-author-role="user">
+      <div id="edit-composer" class="ProseMirror" contenteditable="true" role="textbox">edited</div>
+      <button type="button">Cancel</button><button type="button" id="edit-send">Send</button>
+    </article><form><textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></form></main>
+  `).window.document;
+  assert.equal(toolkit.findSendButton(noForm, noForm.querySelector('#edit-composer')), noForm.querySelector('#edit-send'));
+
+  const external = createDom(`
+    <main><article data-testid="conversation-turn-user" data-message-author-role="user">
+      <form id="edit-form"><textarea id="edit-composer">edited</textarea></form>
+      <button type="submit" form="edit-form" id="edit-send">Submit</button>
+    </article><form><textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></form></main>
+  `).window.document;
+  assert.equal(toolkit.findSendButton(external, external.querySelector('#edit-composer')), external.querySelector('#edit-send'));
+});
+
 test('model levels are extracted from exact and descriptive labels', () => {
   assert.equal(toolkit.extractModelLevel('Instant'), 'instant');
   assert.equal(toolkit.extractModelLevel('GPT-5 · Pro Extended thinking'), 'pro-extended');

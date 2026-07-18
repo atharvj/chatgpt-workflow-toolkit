@@ -241,6 +241,42 @@ test('context-dependent prompts inherit relevant difficulty without contaminatin
   });
 });
 
+test('short confirmations inherit only when the latest assistant invited the next step', () => {
+  for (const prompt of [
+    'Yes.', 'Okay.', 'Sure.', 'Sure thing.', 'Definitely.', 'Of course.',
+    'That works.', 'Sounds good to me.', 'Yes, do it.', 'Yes, go ahead.',
+    'Okay, continue.', 'Go ahead.',
+  ]) {
+    const result = assertClassifiesAs(prompt, 'pro', {
+      previousLevel: 'pro',
+      hasPriorConversation: true,
+      awaitingConfirmation: true,
+    });
+    assert.equal(result.inherited, true, prompt);
+  }
+
+  assertClassifiesAs('Yes.', 'instant', {
+    previousLevel: 'pro',
+    hasPriorConversation: true,
+    awaitingConfirmation: false,
+  });
+
+  for (const prompt of [
+    'Yes, and add tests.',
+    'Sure, add tests.',
+    'Yes, but use Python.',
+    'Okay, use the first approach.',
+    'Go ahead and implement it.',
+  ]) {
+    const result = assertClassifiesAs(prompt, 'pro', {
+      previousLevel: 'pro',
+      hasPriorConversation: true,
+      awaitingConfirmation: true,
+    });
+    assert.equal(result.inherited, true, prompt);
+  }
+});
+
 test('elliptical follow-ups inherit difficulty while standalone lookalikes do not', () => {
   for (const prompt of [
     'Using that, find y.',
@@ -282,6 +318,21 @@ test('elliptical follow-ups inherit difficulty while standalone lookalikes do no
     'Can I deploy it now?',
     'Where should I put it?',
     'What should I do with it?',
+    'Really?',
+    'Seriously?',
+    'Correct?',
+    'Right?',
+    'Wrong?',
+    'Source?',
+    'Sources?',
+    'Evidence?',
+    'Proof?',
+    'Examples?',
+    'Meaning?',
+    'Where did you get that?',
+    'No, use Python instead.',
+    'No, do the other option.',
+    'Pick the second one.',
   ]) {
     const result = assertClassifiesAs(prompt, 'extra-high', {
       previousLevel: 'extra-high',
@@ -325,6 +376,19 @@ test('elliptical follow-ups inherit difficulty while standalone lookalikes do no
     'How do I analyze images with OpenCV?',
     'How do I read PDFs on Android?',
     'Can you check Paris?',
+    'What was the first file in Unix?',
+    'What is the first image sensor?',
+    'What is the first table in SQL?',
+    'What is the first step in photosynthesis?',
+    'What is the last section of the Constitution?',
+    'Explain the first step of mitosis.',
+    'What is the same-origin policy?',
+    'How does the same-origin policy work?',
+    'What is Above & Beyond?',
+    'How do I install previous versions of Windows?',
+    'What is the previous version of iOS?',
+    'Explain earlier English literature.',
+    'What is Again by Noah Cyrus?',
   ]) {
     const baseline = toolkit.classifyPrompt(prompt);
     const contextual = toolkit.classifyPrompt(prompt, {
@@ -384,6 +448,55 @@ test('explicit references can recover older attachment difficulty without affect
     hasPriorConversation: true,
     archivedAttachmentProfile: manyArchived,
   });
+  for (const prompt of [
+    'Compare all files.',
+    'Review all attachments.',
+    'Analyze every PDF so far.',
+    'Summarize all uploaded documents.',
+    'Compare the files from the whole conversation.',
+    'Explain the first file.',
+    'Review the earliest attachment.',
+    'Use the original PDF.',
+    'Compare the first and last files.',
+    'What was in the first uploaded document?',
+  ]) {
+    assertClassifiesAs(prompt, 'extra-high', {
+      previousLevel: 'instant',
+      conversationLevel: 'instant',
+      hasPriorConversation: true,
+      archivedAttachmentProfile: manyArchived,
+    });
+  }
+  const resetAllFiles = assertClassifiesAs('New question: Compare all files.', 'extra-high', {
+    previousLevel: 'pro',
+    conversationLevel: 'pro',
+    hasPriorConversation: true,
+    archivedAttachmentProfile: manyArchived,
+  });
+  assert.equal(resetAllFiles.inherited, false);
+
+  for (const prompt of [
+    'How do I select all files on Windows?',
+    'Delete all files in this directory.',
+    'Compare all files in a folder with Python.',
+    'Write a script that reviews every PDF in /tmp.',
+    'Find every document on my computer.',
+    'Upload all files to S3.',
+    'What was the first file in Unix?',
+    'What is the original PDF specification?',
+    'Where is the earliest document from ancient Egypt?',
+    'Explain the oldest spreadsheet format.',
+    'Who made the first image sensor?',
+  ]) {
+    const baseline = toolkit.classifyPrompt(prompt);
+    const result = toolkit.classifyPrompt(prompt, {
+      previousLevel: 'pro',
+      hasPriorConversation: true,
+      archivedAttachmentProfile: manyArchived,
+    });
+    assert.equal(canonicalLevel(result), canonicalLevel(baseline), prompt);
+    assert.equal(result.inherited, false, prompt);
+  }
   const substring = toolkit.buildAttachmentProfile([{ name: 'data.csv' }], 1);
   for (const prompt of ['What is metadata.csv?', 'How do I open metadata.csv?', 'Review mydata.csv.']) {
     const baseline = toolkit.classifyPrompt(prompt);
@@ -395,6 +508,207 @@ test('explicit references can recover older attachment difficulty without affect
     assert.equal(canonicalLevel(result), canonicalLevel(baseline), prompt);
     assert.equal(result.inherited, false, prompt);
   }
+});
+
+test('exact retained filenames remain attachment references inside quotes and topic resets', () => {
+  const spreadsheet = toolkit.buildAttachmentProfile([{ name: 'results.xlsx' }], 1);
+  const papers = toolkit.buildAttachmentProfile([{ name: 'old1.pdf' }, { name: 'old2.pdf' }], 2);
+  const spreadsheetContext = {
+    previousLevel: 'medium',
+    hasPriorConversation: true,
+    archivedAttachmentProfile: spreadsheet,
+  };
+
+  for (const prompt of [
+    'Summarize results.xlsx.',
+    'Translate results.xlsx to Spanish.',
+    'Review `results.xlsx`.',
+    'What does the table in `results.xlsx` mean?',
+  ]) {
+    assertClassifiesAs(prompt, 'high', spreadsheetContext);
+  }
+  const reset = assertClassifiesAs('New question: Summarize results.xlsx.', 'high', {
+    ...spreadsheetContext,
+    previousLevel: 'pro',
+  });
+  assert.equal(reset.inherited, false);
+  assertClassifiesAs('Compare `old1.pdf` and `old2.pdf`.', 'high', {
+    previousLevel: 'medium',
+    hasPriorConversation: true,
+    archivedAttachmentProfile: papers,
+  });
+
+  const literal = assertClassifiesAs('Translate the text “results.xlsx” to Spanish.', 'instant', {
+    ...spreadsheetContext,
+    previousLevel: 'pro',
+  });
+  assert.equal(literal.inherited, false, 'an explicitly quoted text payload is not a file request');
+});
+
+test('common material nouns retain attachment count and difficulty', () => {
+  const workbooks = toolkit.buildAttachmentProfile(
+    Array.from({ length: 8 }, (_value, index) => ({ name: `workbook-${index}.xlsx` })),
+    8,
+  );
+  for (const prompt of [
+    'Compare the workbooks.',
+    'Compare the CSVs.',
+    'Analyze the dataset.',
+    'Review the slide deck.',
+    'Check the presentation.',
+    'Use the uploads.',
+  ]) {
+    const result = assertClassifiesAs(prompt, 'extra-high', {
+      previousLevel: 'medium',
+      hasPriorConversation: true,
+      historicalAttachmentProfile: workbooks,
+    });
+    assert.equal(result.inherited, true, prompt);
+  }
+});
+
+test('terse revisions inherit the task they modify', () => {
+  for (const prompt of [
+    'Same but for x=5',
+    'Same for second one',
+    'Repeat for x=5',
+    'This one too',
+    'Based on above',
+    'Refactor it same way',
+    'Actually, do it in Python',
+    'Use TypeScript',
+    'Add error handling',
+    'Try other method',
+    'The second one',
+    'Part 2 please',
+    'In Python',
+    'With comments',
+    'Be more specific',
+    'One more example',
+    'Can you expand',
+    'Shorter.',
+    'More concise.',
+    'More detail.',
+    'More detailed.',
+    'Again.',
+    'Without comments.',
+    'Now with tests.',
+    'The other way.',
+    'Fix the errors.',
+    'Simpler please.',
+    'How come?',
+    'More examples.',
+    'One more.',
+    'Next.',
+    'Keep going.',
+    'Try once more.',
+    'Same thing.',
+    'Formal tone.',
+    'Use bullets.',
+    'As a table.',
+    'No citations.',
+    'Remove the tests.',
+    'Only show the code.',
+    'Do the rest.',
+    'Finish the rest.',
+  ]) {
+    const result = assertClassifiesAs(prompt, 'pro', {
+      previousLevel: 'pro',
+      hasPriorConversation: true,
+    });
+    assert.equal(result.inherited, true, prompt);
+  }
+  const styleOnly = assertClassifiesAs('Make it formal.', 'high', {
+    previousLevel: 'pro',
+    hasPriorConversation: true,
+  });
+  assert.equal(styleOnly.inherited, true);
+});
+
+test('long-range references use archived difficulty without confusing ordinary numbered tasks', () => {
+  const context = {
+    conversationLevel: 'medium',
+    archivedConversationLevel: 'pro',
+    previousLevel: 'medium',
+    hasPriorConversation: true,
+  };
+  for (const prompt of [
+    'Go back to message 3 and finish that task.',
+    'Use the method near the top of this chat.',
+    'Continue the task from the beginning.',
+    'Finish the proof from 20 messages ago.',
+    'Go back to the third message and finish it.',
+    'Use our second question and continue.',
+    'Continue the tenth message.',
+    'Go back three messages.',
+    'Use the message before last.',
+    'Use the third message from this chat.',
+    'Continue the earlier task.',
+    'Resume the previous task.',
+    'Finish our old task.',
+    'Go back to that earlier problem.',
+    'Use the earlier instructions.',
+    'Continue what we were doing before.',
+    'Return to the prior question.',
+    'Revisit the old problem.',
+    'Finish the previous request.',
+    'Summarize our entire conversation.',
+    'Summarize the whole chat.',
+    'Review the full conversation.',
+    'Use everything we have discussed so far.',
+    'Consider everything above.',
+    'Based on all earlier messages, decide.',
+    'Give me a recap of this chat.',
+    'Continue using the full context.',
+    'Look at the conversation history.',
+  ]) {
+    assertClassifiesAs(prompt, 'pro', context);
+  }
+  for (const [prompt, expected] of [
+    ['Solve question 3.', 'medium'],
+    ['Do task 2.', 'medium'],
+    ['What does error message 3 mean?', 'instant'],
+    ['Rewrite prompt 4.', 'instant'],
+  ]) {
+    const result = assertClassifiesAs(prompt, expected, context);
+    assert.equal(result.inherited, false, prompt);
+  }
+
+  for (const prompt of [
+    'What is a full conversation?',
+    'Define conversation history.',
+    'What does entire conversation mean?',
+    'Write a story containing an entire conversation.',
+    'Give an example of a whole conversation in Spanish.',
+    'How do I export my chat history?',
+    'Who sent the first message over the internet?',
+    'What is the first question on the exam?',
+    'Write an original prompt for an image generator.',
+    'Repeat the song from the beginning.',
+    'Continue the video from the start.',
+    'Use recursion from the beginning.',
+    'Go back to the first chapter.',
+  ]) {
+    const baseline = toolkit.classifyPrompt(prompt);
+    const result = toolkit.classifyPrompt(prompt, context);
+    assert.equal(canonicalLevel(result), canonicalLevel(baseline), prompt);
+    assert.equal(result.inherited, false, prompt);
+  }
+
+  assertClassifiesAs('Summarize our entire conversation.', 'high', {
+    conversationLevel: 'instant',
+    archivedConversationLevel: 'instant',
+    hasPriorConversation: true,
+    archivedMeaningfulTurnCount: 30,
+    archivedSampledTextLength: 30_000,
+  });
+  assertClassifiesAs('Summarize our entire conversation.', 'extra-high', {
+    conversationLevel: 'instant',
+    archivedConversationLevel: 'instant',
+    hasPriorConversation: true,
+    archivedMeaningfulTurnCount: 100,
+    archivedSampledTextLength: 100_000,
+  });
 });
 
 test('attachment-derived answer checks require independent verification', () => {
@@ -443,6 +757,13 @@ test('derivation and doubt follow-ups verify the premise before explaining it', 
     'Any chance that is wrong?',
     'Could your result be wrong?',
     'What if your answer is wrong?',
+    "I don't understand why B.",
+    'Explain why B.',
+    "I don't get where 12 came from.",
+    "I don't understand how you chose B.",
+    "I don't see why you used 12.",
+    'That makes no sense.',
+    'How come?',
     'Why?',
   ]) {
     const result = assertClassifiesAs(prompt, 'extra-high', {
@@ -452,6 +773,78 @@ test('derivation and doubt follow-ups verify the premise before explaining it', 
     assert.equal(result.strict, true, prompt);
     assert.match(toolkit.buildAccuracyGuardedPrompt(prompt), /independently verify the stated answer or result/iu);
   }
+});
+
+test('candidate-answer explanations verify the premise before rationalizing it', () => {
+  for (const prompt of [
+    'I got 12, why?',
+    'I think the answer is B. Explain.',
+    'The answer key says B. Why?',
+    'My teacher says it is B. Why?',
+    'It says B. Why?',
+    'Help me understand 12V.',
+    'Why would it be B?',
+    'Why should it be B?',
+    'B is the answer. Explain why.',
+    'The answer is B because x. Is that true?',
+    'Why not B?',
+    'Why B instead of C?',
+    'I do not get 12V.',
+    'Explain the 12V.',
+    'Walk me through why it is B.',
+    'Show why B is correct.',
+    'I got negative twelve volts, why?',
+    'I think the answer is sodium chloride. Explain.',
+    'Why would it be kinetic energy?',
+    'The solution says x=5. How?',
+    'They got 12V. How?',
+    'According to the key, it is B. Why?',
+    'B? Why?',
+    'Answer: B. Why?',
+    'Correct answer: B. Explain.',
+    'The answer key says photosynthesis. Why?',
+    'My teacher says kinetic energy.',
+    'Explain negative voltage.',
+    'Is photosynthesis correct?',
+    'Could photosynthesis be correct?',
+    'Photosynthesis, right?',
+    'Can you explain your last answer?',
+    'Show reasoning behind that.',
+    'How did you arrive at that answer?',
+    'Justify it.',
+    'Prove that.',
+    'Really?',
+    'Seriously?',
+    'Correct?',
+    'Right?',
+    'Wrong?',
+    'Where did you get that?',
+  ]) {
+    const result = assertClassifiesAs(prompt, 'high');
+    assert.equal(result.strict, true, prompt);
+    assert.equal(toolkit.requiresAnswerVerification(prompt), true, prompt);
+    assert.match(toolkit.buildAccuracyGuardedPrompt(prompt), /independently verify the stated answer or result/iu);
+  }
+});
+
+test('deictic candidate explanations verify only when the candidate appears in the prior answer', () => {
+  const context = {
+    hasPriorConversation: true,
+    latestAssistantText: 'After checking the choices, the answer is photosynthesis.',
+  };
+  for (const prompt of ['Why is it photosynthesis?', 'How is it photosynthesis?']) {
+    const result = assertClassifiesAs(prompt, 'high', context);
+    assert.equal(result.strict, true, prompt);
+    assert.equal(toolkit.requiresAnswerVerification(prompt, context), true, prompt);
+    assert.match(
+      toolkit.buildAccuracyGuardedPrompt(prompt, 30_000, context),
+      /independently verify the stated answer or result/iu,
+    );
+  }
+
+  assert.equal(toolkit.requiresAnswerVerification('Why is it photosynthesis?'), false);
+  assert.equal(toolkit.requiresAnswerVerification('Why is it 5 PM?', context), false);
+  assert.equal(toolkit.requiresAnswerVerification('Why is the sky blue?', context), false);
 });
 
 test('classifyPrompt chooses the higher level at an uncertain upper boundary', () => {
@@ -1012,6 +1405,19 @@ test('accuracy wording cannot lower reasoning and verification false positives s
     'Check the bus schedule.',
     'Check my inbox.',
     'Verify the meeting room.',
+    'Explain photosynthesis.',
+    'Explain the first step.',
+    'Explain the process.',
+    'Explain the attached file.',
+    'Explain this sentence.',
+    'Explain why leaves are green.',
+    'Explain why Python is popular.',
+    'Explain why the sky is blue.',
+    'Help me understand photosynthesis.',
+    'Why not go outside?',
+    'Why not use Python?',
+    'Explain the answer key format.',
+    'Explain your recommendation.',
   ]) {
     assert.equal(toolkit.requiresAnswerVerification(prompt), false, prompt);
   }

@@ -44,7 +44,7 @@ async function createHarness(options = {}) {
 
   const { document } = dom.window;
   const composer = document.querySelector('#prompt-textarea');
-  const sendButton = document.querySelector('[data-testid="send-button"]');
+  const sendButton = composer.closest('form').querySelector('[data-testid="send-button"]');
   const picker = document.querySelector('[data-testid="model-switcher"]');
   const menu = document.querySelector('#model-menu');
   const form = composer.closest('form');
@@ -131,6 +131,55 @@ async function createHarness(options = {}) {
       dom.window.close();
     },
   };
+}
+
+async function createEditHarness(options = {}) {
+  const {
+    draft = 'what is 2+2',
+    pickerLevel = 'High',
+    prefixMarkup = '',
+    suffixMarkup = '',
+    sourceText = 'Original message that is being replaced.',
+    sourceAttachmentMarkup = '',
+    contenteditable = false,
+    formless = false,
+    sendMarkup = '<button type="button" id="edit-send" data-testid="send-button">Send</button>',
+    menuDelay = 0,
+  } = options;
+  const editorMarkup = contenteditable
+    ? '<div id="edit-composer" class="ProseMirror" contenteditable="true" role="textbox"></div>'
+    : '<textarea id="edit-composer"></textarea>';
+  const editSurfaceMarkup = formless
+    ? `<div id="edit-region">${editorMarkup}<button type="button" id="edit-cancel">Cancel</button>${sendMarkup}</div>`
+    : `<form id="edit-form">${editorMarkup}<button type="button" id="edit-cancel">Cancel</button>${sendMarkup}</form>`;
+  const harness = await createHarness({
+    prompt: 'Bottom composer must stay untouched.',
+    pickerLevel,
+    menuDelay,
+    conversationMarkup: `
+      ${prefixMarkup}
+      <article data-testid="conversation-turn-edit-source" data-message-author-role="user">
+        <div data-message-content>${sourceText}</div>
+        ${sourceAttachmentMarkup}
+        ${editSurfaceMarkup}
+      </article>
+      ${suffixMarkup}
+    `,
+  });
+  const editComposer = harness.document.querySelector('#edit-composer');
+  const editForm = harness.document.querySelector('#edit-form');
+  const editSend = harness.document.querySelector('#edit-send');
+  if (editComposer.tagName === 'TEXTAREA') editComposer.value = draft;
+  else editComposer.textContent = draft;
+  const editCounters = { sends: 0, submits: 0 };
+  editSend.addEventListener('click', () => { editCounters.sends += 1; });
+  if (editForm) {
+    editForm.addEventListener('submit', (event) => {
+      editCounters.submits += 1;
+      event.preventDefault();
+    });
+  }
+  return { ...harness, editComposer, editCounters, editForm, editSend };
 }
 
 async function createProductionIntelligenceHarness(options = {}) {
@@ -323,6 +372,17 @@ async function finishAdaptiveSend(harness) {
   await Promise.resolve();
 }
 
+async function finishAllAdaptiveSends(harness) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await Promise.resolve();
+    const pending = harness.app.state.adaptiveSendPromise;
+    if (pending) await pending;
+    await wait(harness.window, 0);
+    if (!harness.app.state.adaptiveSendPromise && !harness.app.state.pendingAdaptiveSend) return;
+  }
+  assert.fail('adaptive resend queue did not settle');
+}
+
 function wait(win, milliseconds) {
   return new Promise((resolve) => win.setTimeout(resolve, milliseconds));
 }
@@ -339,6 +399,1113 @@ test('simple prompt switches High to Instant and replays Send exactly once', asy
   assert.equal(harness.counters.optionClicks, 1);
   assert.equal(harness.counters.sends, 1, 'the captured click itself must not reach ChatGPT');
   assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('edited historical message click adapts its own editor and never sends the bottom composer', async (t) => {
+  const harness = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'instant');
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.composer.value, 'Bottom composer must stay untouched.');
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+});
+
+test('a no-form edited-message surface still adapts only its local exact Send control', async (t) => {
+  const harness = await createEditHarness({
+    draft: 'what is 2+2',
+    pickerLevel: 'High',
+    contenteditable: true,
+    formless: true,
+    sendMarkup: '<button type="button" id="edit-send">Send</button>',
+  });
+  t.after(() => harness.cleanup());
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('edited-message double click sends once, Alt bypass stays native, and disabled Auto stays native', async (t) => {
+  const doubled = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High' });
+  t.after(() => doubled.cleanup());
+  doubled.editSend.click();
+  doubled.editSend.click();
+  await finishAllAdaptiveSends(doubled);
+  assert.equal(doubled.editCounters.sends, 1);
+  assert.equal(doubled.counters.sends, 0);
+
+  const bypassed = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High' });
+  t.after(() => bypassed.cleanup());
+  bypassed.editSend.dispatchEvent(new bypassed.window.MouseEvent('click', {
+    altKey: true, bubbles: true, cancelable: true,
+  }));
+  assert.equal(bypassed.editCounters.sends, 1);
+  assert.equal(bypassed.app.state.adaptiveSendPromise, null);
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(bypassed.picker)), 'high');
+
+  const disabled = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High' });
+  t.after(() => disabled.cleanup());
+  disabled.app.state.settings.adaptiveRouting = false;
+  disabled.editSend.click();
+  assert.equal(disabled.editCounters.sends, 1);
+  assert.equal(disabled.app.state.adaptiveSendPromise, null);
+  assert.equal(disabled.counters.sends, 0);
+});
+
+test('a changed edited draft and immediate resend replaces the stale routing task', async (t) => {
+  const harness = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'Instant', menuDelay: 60 });
+  t.after(() => harness.cleanup());
+  const proTask = 'Design and implement a production compiler end to end. Specify the parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument for every optimization.';
+
+  harness.editSend.click();
+  harness.editComposer.value = proTask;
+  harness.editSend.click();
+  await finishAllAdaptiveSends(harness);
+
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'pro');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'pro');
+});
+
+test('Escape followed by an immediate unchanged edited resend retries exactly once', async (t) => {
+  const harness = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High', menuDelay: 60 });
+  t.after(() => harness.cleanup());
+
+  harness.editSend.click();
+  await Promise.resolve();
+  harness.document.dispatchEvent(new harness.window.KeyboardEvent('keydown', {
+    key: 'Escape', bubbles: true, cancelable: true,
+  }));
+  harness.editSend.click();
+  await finishAllAdaptiveSends(harness);
+
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('the same edited draft is reclassified if its retained conversation changes mid-route', async (t) => {
+  const harness = await createEditHarness({
+    draft: 'Continue and finish it.',
+    pickerLevel: 'Instant',
+    menuDelay: 60,
+    prefixMarkup: `
+      <article data-testid="conversation-turn-changing-prefix" data-message-author-role="user"><div id="changing-prefix">Thanks!</div></article>
+      <article data-testid="conversation-turn-changing-prefix-answer" data-message-author-role="assistant"><div class="markdown">You are welcome.</div></article>`,
+  });
+  t.after(() => harness.cleanup());
+  const proTask = 'Design and implement a production compiler end to end with architecture, concurrency, a security review, migration, exhaustive tests, benchmarks, and a formal correctness proof.';
+
+  harness.editSend.click();
+  harness.document.querySelector('#changing-prefix').textContent = proTask;
+  await wait(harness.window, 0);
+  harness.editSend.click();
+  await finishAllAdaptiveSends(harness);
+
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'pro');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'pro');
+});
+
+test('an unrelated selected popup option does not block Enter in an edited message', async (t) => {
+  const harness = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+  const unrelated = harness.document.createElement('div');
+  unrelated.setAttribute('role', 'option');
+  unrelated.setAttribute('aria-selected', 'true');
+  unrelated.textContent = 'Unrelated global option';
+  harness.document.body.append(unrelated);
+
+  const enter = new harness.window.KeyboardEvent('keydown', {
+    key: 'Enter', bubbles: true, cancelable: true,
+  });
+  assert.equal(harness.editComposer.dispatchEvent(enter), false);
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('edited contenteditable supports local Enter, form submit, Shift+Enter, and IME safely', async (t) => {
+  const harness = await createEditHarness({
+    draft: 'what is 2+2',
+    pickerLevel: 'High',
+    contenteditable: true,
+    sendMarkup: '<button type="submit" id="edit-send">Save &amp; submit</button>',
+  });
+  t.after(() => harness.cleanup());
+
+  const shifted = new harness.window.KeyboardEvent('keydown', {
+    key: 'Enter', shiftKey: true, bubbles: true, cancelable: true,
+  });
+  assert.equal(harness.editComposer.dispatchEvent(shifted), true);
+  harness.editComposer.dispatchEvent(new harness.window.CompositionEvent('compositionstart', { bubbles: true }));
+  const composing = new harness.window.KeyboardEvent('keydown', {
+    key: 'Enter', bubbles: true, cancelable: true,
+  });
+  assert.equal(harness.editComposer.dispatchEvent(composing), true);
+  harness.editComposer.dispatchEvent(new harness.window.CompositionEvent('compositionend', { bubbles: true }));
+  assert.equal(harness.app.state.adaptiveSendPromise, null);
+
+  const enter = new harness.window.KeyboardEvent('keydown', {
+    key: 'Enter', bubbles: true, cancelable: true,
+  });
+  assert.equal(harness.editComposer.dispatchEvent(enter), false);
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.editCounters.submits, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('a direct edited-message form submit is adapted and replayed once', async (t) => {
+  const harness = await createEditHarness({
+    draft: 'what is 2+2',
+    pickerLevel: 'High',
+    sendMarkup: '<button type="submit" id="edit-send">Send</button>',
+  });
+  t.after(() => harness.cleanup());
+
+  const submit = new harness.window.Event('submit', { bubbles: true, cancelable: true });
+  assert.equal(harness.editForm.dispatchEvent(submit), false);
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.editCounters.submits, 1, 'only the replayed native submit reaches the form listener');
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+});
+
+test('editing an earlier message excludes its obsolete text and every discarded later turn', async (t) => {
+  const proTask = 'Design and implement a production compiler end to end. Specify the parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument for every optimization.';
+  const harness = await createEditHarness({
+    draft: 'what is 2+2',
+    pickerLevel: 'High',
+    sourceText: proTask,
+    suffixMarkup: `
+      <article data-testid="conversation-turn-discarded-a" data-message-author-role="assistant"><div class="markdown">A long formal proof and security architecture response with equations.</div></article>
+      <article data-testid="conversation-turn-discarded-u" data-message-author-role="user"><div>${proTask}</div></article>
+    `,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('editing a follow-up inherits only the retained prefix difficulty', async (t) => {
+  const proTask = 'Design and implement a production compiler end to end. Specify the parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument for every optimization.';
+  const harness = await createEditHarness({
+    draft: 'Continue and finish it.',
+    pickerLevel: 'Instant',
+    prefixMarkup: `
+      <article data-testid="conversation-turn-prefix-u" data-message-author-role="user"><div>${proTask}</div></article>
+      <article data-testid="conversation-turn-prefix-a" data-message-author-role="assistant"><div class="markdown">Compiler architecture, proof obligations, threat model, and migration plan.</div></article>
+    `,
+    suffixMarkup: `
+      <article data-testid="conversation-turn-future-a" data-message-author-role="assistant"><div class="markdown">Thanks!</div></article>
+      <article data-testid="conversation-turn-future-u" data-message-author-role="user"><div>what is 2+2</div></article>
+    `,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.app.state.lastRouteDecision.target, 'pro');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'pro');
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('an edited resend that explicitly references the start of a long chat inherits that older difficulty', async (t) => {
+  const proTask = 'Design and implement a production compiler end to end. Specify the parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument for every optimization.';
+  const intervening = Array.from({ length: 8 }, (_value, index) => `
+    <article data-testid="conversation-turn-filler-u-${index}" data-message-author-role="user"><div>Thanks ${index}.</div></article>
+    <article data-testid="conversation-turn-filler-a-${index}" data-message-author-role="assistant"><div class="markdown">You are welcome.</div></article>`).join('');
+  const harness = await createEditHarness({
+    draft: 'Use the rigorous method from our first message and continue it.',
+    pickerLevel: 'Instant',
+    prefixMarkup: `
+      <article data-testid="conversation-turn-old-pro" data-message-author-role="user"><div>${proTask}</div></article>
+      <article data-testid="conversation-turn-old-pro-answer" data-message-author-role="assistant"><div class="markdown">Compiler design response.</div></article>
+      ${intervening}`,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.app.state.lastRouteDecision.target, 'pro');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'pro');
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('the first step means the recent answer and does not inherit an unrelated old maximum', async (t) => {
+  const proTask = 'Design and implement a production compiler end to end. Specify the parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument for every optimization.';
+  const intervening = Array.from({ length: 8 }, (_value, index) => `
+    <article data-testid="conversation-turn-recent-u-${index}" data-message-author-role="user"><div>Give me desk organization tip ${index + 1}.</div></article>
+    <article data-testid="conversation-turn-recent-a-${index}" data-message-author-role="assistant"><div class="markdown">Put one item away at a time.</div></article>`).join('');
+  const harness = await createEditHarness({
+    draft: 'Explain the first step.',
+    pickerLevel: 'Instant',
+    prefixMarkup: `
+      <article data-testid="conversation-turn-unrelated-old-pro" data-message-author-role="user"><div>${proTask}</div></article>
+      <article data-testid="conversation-turn-unrelated-old-pro-answer" data-message-author-role="assistant"><div class="markdown">Compiler design response.</div></article>
+      ${intervening}`,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.app.state.lastRouteDecision.target, 'medium');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'medium');
+  assert.equal(harness.editCounters.sends, 1);
+});
+
+test('attachments retained on the edited message are current while later attachments are excluded', async (t) => {
+  const laterFiles = Array.from({ length: 8 }, (_value, index) =>
+    `<div data-file-id="later-${index}" data-file-name="later-${index}.pdf">later-${index}.pdf</div>`).join('');
+  const harness = await createEditHarness({
+    draft: 'Summarize it.',
+    pickerLevel: 'Instant',
+    sourceAttachmentMarkup: '<div data-file-id="current-sheet" data-file-name="results.xlsx"><span>results.xlsx</span><button type="button" aria-label="Remove file results.xlsx">Remove</button></div>',
+    suffixMarkup: `<article data-testid="conversation-turn-later-files" data-message-author-role="user"><div>Old files</div>${laterFiles}</article>`,
+  });
+  t.after(() => harness.cleanup());
+
+  const snapshot = harness.app.captureSendSnapshot(harness.editComposer);
+  assert.equal(snapshot.attachmentCount, 1);
+  assert.deepEqual(snapshot.attachmentProfile.kinds, ['structured-data']);
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('accuracy verification is staged in the edited message, never the bottom composer', async (t) => {
+  const harness = await createEditHarness({
+    draft: "I don't get why the answer is 12V and 4V.",
+    pickerLevel: 'Instant',
+  });
+  t.after(() => harness.cleanup());
+  let sentDraft = '';
+  harness.editSend.addEventListener('click', () => { sentDraft = toolkit.getComposerText(harness.editComposer); });
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.match(sentDraft, /independently verify the stated answer or result/iu);
+  assert.equal(harness.composer.value, 'Bottom composer must stay untouched.');
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('an edited deictic explanation verifies a candidate found in the retained answer', async (t) => {
+  const harness = await createEditHarness({
+    draft: 'Why is it photosynthesis?',
+    pickerLevel: 'Instant',
+    prefixMarkup: `
+      <article data-testid="conversation-turn-candidate-user" data-message-author-role="user"><div>Which process converts light energy?</div></article>
+      <article data-testid="conversation-turn-candidate-assistant" data-message-author-role="assistant"><div class="markdown">The answer is photosynthesis.</div></article>`,
+  });
+  t.after(() => harness.cleanup());
+  let sentDraft = '';
+  harness.editSend.addEventListener('click', () => { sentDraft = toolkit.getComposerText(harness.editComposer); });
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.match(sentDraft, /independently verify the stated answer or result/iu);
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('an edited-message editor remount is reacquired only inside its original turn', async (t) => {
+  const harness = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High', menuDelay: 40 });
+  t.after(() => harness.cleanup());
+  let replacementSends = 0;
+  harness.picker.addEventListener('click', () => {
+    if (!harness.document.querySelector('#edit-form')) return;
+    const replacement = harness.document.createElement('form');
+    replacement.id = 'edit-form-remounted';
+    replacement.innerHTML = '<textarea id="edit-composer-remounted">what is 2+2</textarea><button type="button" data-testid="send-button" id="edit-send-remounted">Send</button>';
+    replacement.querySelector('#edit-send-remounted').addEventListener('click', () => { replacementSends += 1; });
+    harness.editForm.replaceWith(replacement);
+  }, { once: true });
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(replacementSends, 1);
+  assert.equal(harness.editCounters.sends, 0);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('a changed or closed edited message fails safely without falling through to the bottom Send', async (t) => {
+  const changed = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High', menuDelay: 40 });
+  t.after(() => changed.cleanup());
+  changed.picker.addEventListener('click', () => { changed.editComposer.value = 'changed after Send'; }, { once: true });
+
+  changed.editSend.click();
+  await finishAdaptiveSend(changed);
+  assert.equal(changed.editCounters.sends, 0);
+  assert.equal(changed.counters.sends, 0);
+  assert.equal(changed.editComposer.value, 'changed after Send');
+
+  const closed = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High', menuDelay: 40 });
+  t.after(() => closed.cleanup());
+  closed.picker.addEventListener('click', () => { closed.editForm.remove(); }, { once: true });
+
+  closed.editSend.click();
+  await finishAdaptiveSend(closed);
+  assert.equal(closed.editCounters.sends, 0);
+  assert.equal(closed.counters.sends, 0);
+  assert.equal(closed.composer.value, 'Bottom composer must stay untouched.');
+});
+
+test('structural changes are checked against the retained branch, not discarded future turns', async (t) => {
+  const future = await createEditHarness({
+    draft: 'what is 2+2',
+    pickerLevel: 'High',
+    menuDelay: 40,
+    suffixMarkup: '<article id="discarded-future" data-testid="conversation-turn-discarded-future" data-message-author-role="user"><div>Discarded future message.</div></article>',
+  });
+  t.after(() => future.cleanup());
+  future.editSend.click();
+  future.document.querySelector('#discarded-future').remove();
+  await wait(future.window, 0);
+  await finishAdaptiveSend(future);
+  assert.equal(future.editCounters.sends, 1, 'removing a discarded future turn must not cancel the edited resend');
+  assert.equal(future.counters.sends, 0);
+
+  const retained = await createEditHarness({
+    draft: 'Continue and finish it.',
+    pickerLevel: 'Instant',
+    menuDelay: 40,
+    prefixMarkup: '<article id="retained-prefix" data-testid="conversation-turn-retained-prefix" data-message-author-role="user"><div>Explain this algorithm.</div></article>',
+  });
+  t.after(() => retained.cleanup());
+  retained.editSend.click();
+  retained.document.querySelector('#retained-prefix').remove();
+  await wait(retained.window, 0);
+  await finishAdaptiveSend(retained);
+  assert.equal(retained.editCounters.sends, 0, 'removing retained context must cancel the captured resend');
+  assert.equal(retained.counters.sends, 0);
+});
+
+test('edited resend waits for active generation and never hijacks another control', async (t) => {
+  const harness = await createEditHarness({
+    draft: 'what is 2+2',
+    pickerLevel: 'High',
+    suffixMarkup: '<button type="button" data-testid="stop-button">Stop generating</button>',
+  });
+  t.after(() => harness.cleanup());
+
+  harness.editSend.click();
+  await Promise.resolve();
+
+  assert.equal(harness.app.state.adaptiveSendPromise, null);
+  assert.equal(harness.editCounters.sends, 0);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+});
+
+test('edited resend stops if generation begins while Auto is choosing', async (t) => {
+  const harness = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High', menuDelay: 40 });
+  t.after(() => harness.cleanup());
+  harness.picker.addEventListener('click', () => {
+    const stop = harness.document.createElement('button');
+    stop.type = 'button';
+    stop.dataset.testid = 'stop-button';
+    stop.textContent = 'Stop generating';
+    harness.document.querySelector('main').append(stop);
+  }, { once: true });
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.editCounters.sends, 0);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /started generating/iu);
+});
+
+test('unrelated modal text forms are never intercepted as edited-message resends', async (t) => {
+  const harness = await createHarness({ prompt: 'Bottom draft', pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+  const dialog = harness.document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  dialog.innerHTML = `
+    <form id="feedback-form">
+      <textarea id="feedback-text">save these notes</textarea>
+      <button type="button">Cancel</button>
+      <button type="submit">Save</button>
+    </form>`;
+  harness.document.body.append(dialog);
+  const feedbackForm = dialog.querySelector('form');
+  let reachedForm = 0;
+  feedbackForm.addEventListener('submit', () => { reachedForm += 1; });
+
+  const submit = new harness.window.Event('submit', { bubbles: true, cancelable: true });
+  assert.equal(feedbackForm.dispatchEvent(submit), true);
+  await Promise.resolve();
+
+  assert.equal(reachedForm, 1);
+  assert.equal(harness.app.state.adaptiveSendPromise, null);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('a failed Edit launch cannot bind a later unrelated Cancel and Save form', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Bottom draft',
+    pickerLevel: 'High',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-edit-session-source" data-message-author-role="user">
+        <div data-message-content>Original source message.</div>
+        <button type="button" id="native-edit">Edit message</button>
+      </article>`,
+  });
+  t.after(() => harness.cleanup());
+  harness.document.querySelector('#native-edit').click();
+
+  const unrelated = harness.document.createElement('form');
+  unrelated.id = 'edit-profile';
+  unrelated.innerHTML = `
+    <textarea id="unrelated-notes">save these notes</textarea>
+    <button type="button">Cancel</button>
+    <button type="submit">Submit</button>`;
+  harness.document.body.append(unrelated);
+  let reachedForm = 0;
+  unrelated.addEventListener('submit', () => { reachedForm += 1; });
+  await wait(harness.window, 1);
+
+  const submit = new harness.window.Event('submit', { bubbles: true, cancelable: true });
+  assert.equal(unrelated.dispatchEvent(submit), true);
+  await Promise.resolve();
+
+  assert.equal(reachedForm, 1);
+  assert.equal(harness.app.state.adaptiveSendPromise, null);
+  assert.equal(harness.app.state.pendingEditSession.composerRef, null);
+});
+
+test('a portaled edited-message resend survives Escape retry and reuses prompt-textarea safely', async (t) => {
+  const proTask = 'Design and implement a production compiler end to end with a formal proof, security review, migration, exhaustive tests, and benchmarks.';
+  const harness = await createHarness({
+    prompt: 'Bottom draft that must disappear.',
+    pickerLevel: 'Instant',
+    menuDelay: 60,
+    conversationMarkup: `
+      <article data-testid="conversation-turn-portal-source" data-message-author-role="user">
+        <div data-message-content>Original source message.</div>
+        <div data-file-id="portal-source-file" data-file-name="notes.pdf">notes.pdf</div>
+        <button type="button" id="native-portal-edit" aria-controls="edit-portal">Edit message</button>
+      </article>
+      <article data-testid="conversation-turn-discarded-assistant" data-message-author-role="assistant">
+        <div class="markdown">A later response that belongs to the discarded branch.</div>
+      </article>
+      <article data-testid="conversation-turn-discarded-pro" data-message-author-role="user">
+        <div>${proTask}</div>
+      </article>`,
+  });
+  t.after(() => harness.cleanup());
+  const editAction = harness.document.querySelector('#native-portal-edit');
+  let portalSends = 0;
+  let portalComposer = null;
+  let portalSend = null;
+  editAction.addEventListener('click', () => {
+    harness.document.body.append(harness.picker);
+    harness.composer.closest('form').remove();
+    const portal = harness.document.createElement('div');
+    portal.id = 'edit-portal';
+    portal.setAttribute('role', 'dialog');
+    portal.setAttribute('data-testid', 'message-edit-dialog');
+    portal.innerHTML = `
+      <form id="portal-edit-form">
+        <textarea id="prompt-textarea">Original source message.</textarea>
+        <button type="button">Cancel</button>
+        <button type="button" id="portal-edit-send">Send</button>
+      </form>`;
+    harness.document.body.append(portal);
+    portalComposer = portal.querySelector('textarea');
+    portalSend = portal.querySelector('#portal-edit-send');
+    portalSend.addEventListener('click', () => { portalSends += 1; });
+  }, { once: true });
+
+  editAction.click();
+  await wait(harness.window, 0);
+  assert.equal(harness.app.state.pendingEditSession.composerRef, portalComposer);
+  const unrelatedCancel = harness.document.createElement('button');
+  unrelatedCancel.type = 'button';
+  unrelatedCancel.textContent = 'Cancel';
+  harness.document.body.append(unrelatedCancel);
+  unrelatedCancel.click();
+  assert.equal(harness.app.state.pendingEditSession.composerRef, portalComposer, 'an unrelated Cancel must not clear the edit session');
+
+  portalComposer.value = 'Continue and finish it.';
+  portalSend.click();
+  await Promise.resolve();
+  harness.document.dispatchEvent(new harness.window.KeyboardEvent('keydown', {
+    key: 'Escape', bubbles: true, cancelable: true,
+  }));
+  portalSend.click();
+  await finishAllAdaptiveSends(harness);
+
+  assert.equal(portalSends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'high');
+});
+
+test('a portaled edit may move the existing composer node without inheriting discarded turns', async (t) => {
+  const proTask = 'Design and implement a production compiler end to end with a formal proof, security review, migration, exhaustive tests, and benchmarks.';
+  const harness = await createHarness({
+    prompt: 'Bottom draft before Edit.',
+    pickerLevel: 'Instant',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-moved-source" data-message-author-role="user">
+        <div data-message-content>Original moved source.</div>
+        <button type="button" id="move-composer-edit" aria-controls="moved-edit-portal">Edit message</button>
+      </article>
+      <article data-testid="conversation-turn-moved-future" data-message-author-role="user"><div>${proTask}</div></article>`,
+  });
+  t.after(() => harness.cleanup());
+  harness.document.querySelector('#move-composer-edit').addEventListener('click', () => {
+    const form = harness.composer.closest('form');
+    const portal = harness.document.createElement('div');
+    portal.id = 'moved-edit-portal';
+    portal.setAttribute('role', 'dialog');
+    portal.setAttribute('data-testid', 'message-edit-dialog');
+    const cancel = harness.document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    form.insertBefore(cancel, harness.sendButton);
+    portal.append(form);
+    harness.document.body.append(portal);
+    harness.composer.value = 'Original moved source.';
+  }, { once: true });
+
+  harness.document.querySelector('#move-composer-edit').click();
+  await wait(harness.window, 0);
+  assert.equal(harness.app.state.pendingEditSession.composerRef, harness.composer);
+  harness.composer.value = 'Continue and finish it.';
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'high');
+});
+
+test('an in-place bottom composer that becomes an edit surface adapts with the source cutoff', async (t) => {
+  const proTask = 'Design a production compiler with formal verification, a threat model, migrations, concurrency analysis, exhaustive tests, and benchmarks.';
+  const harness = await createHarness({
+    prompt: 'Bottom draft before Edit.',
+    pickerLevel: 'High',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-morphed-source" data-message-author-role="user">
+        <div data-message-content>Original morphed source.</div>
+        <button type="button" id="morph-composer-edit">Edit message</button>
+      </article>
+      <article data-testid="conversation-turn-morphed-future" data-message-author-role="user"><div>${proTask}</div></article>`,
+  });
+  t.after(() => harness.cleanup());
+  harness.document.querySelector('#morph-composer-edit').addEventListener('click', () => {
+    const form = harness.composer.closest('form');
+    form.setAttribute('data-testid', 'message-edit-form');
+    const cancel = harness.document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    form.insertBefore(cancel, harness.sendButton);
+    harness.composer.value = 'Original morphed source.';
+  }, { once: true });
+
+  harness.document.querySelector('#morph-composer-edit').click();
+  await wait(harness.window, 0);
+  assert.equal(harness.app.state.pendingEditSession.composerRef, harness.composer);
+  harness.composer.value = 'what is 2+2';
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('an uncontrolled portaled editor binds by source text and exact edit controls', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Bottom draft',
+    pickerLevel: 'High',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-uncontrolled-portal" data-message-author-role="user">
+        <div data-message-content>Original portal source.</div>
+        <button type="button" id="open-uncontrolled-edit">Edit message</button>
+      </article>`,
+  });
+  t.after(() => harness.cleanup());
+  let portalSends = 0;
+  harness.document.querySelector('#open-uncontrolled-edit').addEventListener('click', () => {
+    const portal = harness.document.createElement('div');
+    portal.setAttribute('role', 'dialog');
+    portal.setAttribute('data-testid', 'message-edit-dialog');
+    portal.innerHTML = `
+      <form><textarea>Original portal source.\n</textarea>
+        <button type="button">Cancel</button>
+        <button type="button" id="uncontrolled-send" aria-label="Send message">↑</button>
+      </form>`;
+    harness.document.body.append(portal);
+    portal.querySelector('#uncontrolled-send').addEventListener('click', () => { portalSends += 1; });
+  }, { once: true });
+
+  harness.document.querySelector('#open-uncontrolled-edit').click();
+  await wait(harness.window, 0);
+  const portalComposer = harness.document.querySelector('[data-testid="message-edit-dialog"] textarea');
+  assert.equal(harness.app.state.pendingEditSession.composerRef, portalComposer);
+  portalComposer.value = 'what is 2+2';
+  harness.document.querySelector('#uncontrolled-send').click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(portalSends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('portaled edit controls associated from an external footer still adapt', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Bottom draft',
+    pickerLevel: 'High',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-external-footer" data-message-author-role="user">
+        <div data-message-content>External footer source.</div>
+        <button type="button" id="open-external-footer">Edit message</button>
+      </article>`,
+  });
+  t.after(() => harness.cleanup());
+  let portalSends = 0;
+  harness.document.querySelector('#open-external-footer').addEventListener('click', () => {
+    const portal = harness.document.createElement('div');
+    portal.setAttribute('role', 'dialog');
+    portal.setAttribute('data-testid', 'message-edit-dialog');
+    portal.innerHTML = `
+      <form id="external-edit-form"><textarea>External footer source.</textarea></form>
+      <footer>
+        <button type="button" form="external-edit-form">Cancel</button>
+        <button type="button" form="external-edit-form" id="external-footer-send">Send</button>
+      </footer>`;
+    harness.document.body.append(portal);
+    portal.querySelector('#external-footer-send').addEventListener('click', () => { portalSends += 1; });
+  }, { once: true });
+
+  harness.document.querySelector('#open-external-footer').click();
+  await wait(harness.window, 0);
+  const portalComposer = harness.document.querySelector('#external-edit-form textarea');
+  assert.equal(harness.app.state.pendingEditSession.composerRef, portalComposer);
+  portalComposer.value = 'what is 2+2';
+  harness.document.querySelector('#external-footer-send').click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(portalSends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('a portaled More-actions menu keeps the edited source without claiming an unrelated menu', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Bottom draft',
+    pickerLevel: 'High',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-portaled-more" data-message-author-role="user">
+        <div data-message-content>Portaled menu source.</div>
+        <button type="button" id="portaled-more" aria-label="More actions">…</button>
+      </article>
+      <div id="unrelated-profile-menu" role="menu" data-state="open">
+        <button type="button" role="menuitem" id="unrelated-profile-edit">Edit</button>
+      </div>`,
+  });
+  t.after(() => harness.cleanup());
+  let portalSends = 0;
+  harness.document.querySelector('#portaled-more').addEventListener('click', () => {
+    const menu = harness.document.createElement('div');
+    menu.id = 'portaled-message-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('data-state', 'open');
+    menu.innerHTML = '<button type="button" role="menuitem" id="portaled-menu-edit">Edit message</button>';
+    harness.document.body.append(menu);
+    menu.querySelector('#portaled-menu-edit').addEventListener('click', () => {
+      const portal = harness.document.createElement('div');
+      portal.setAttribute('role', 'dialog');
+      portal.setAttribute('data-testid', 'message-edit-dialog');
+      portal.innerHTML = `
+        <form><textarea>Portaled menu source.</textarea>
+          <button type="button">Cancel</button>
+          <button type="button" id="portaled-menu-send">Send message</button>
+        </form>`;
+      harness.document.body.append(portal);
+      portal.querySelector('#portaled-menu-send').addEventListener('click', () => { portalSends += 1; });
+    }, { once: true });
+  }, { once: true });
+
+  harness.document.querySelector('#portaled-more').click();
+  harness.document.querySelector('#unrelated-profile-edit').click();
+  assert.equal(harness.app.state.pendingEditSession, null);
+  harness.document.querySelector('#portaled-menu-edit').click();
+  await wait(harness.window, 0);
+  const portalComposer = harness.document.querySelector('[data-testid="message-edit-dialog"] textarea');
+  assert.equal(harness.app.state.pendingEditSession.composerRef, portalComposer);
+  portalComposer.value = 'what is 2+2';
+  harness.document.querySelector('#portaled-menu-send').click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(portalSends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('a form-less portaled edited message still uses Adaptive Auto', async (t) => {
+  const discardedFiles = Array.from({ length: 6 }, (_value, index) =>
+    `<div data-file-id="discarded-${index}" data-file-name="discarded-${index}.xlsx">discarded-${index}.xlsx</div>`).join('');
+  const harness = await createHarness({
+    prompt: 'Bottom draft',
+    pickerLevel: 'High',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-formless-portal" data-message-author-role="user">
+        <div data-message-content>Formless portal source.</div>
+        <button type="button" id="open-formless-portal">Edit message</button>
+      </article>
+      <article data-testid="conversation-turn-formless-discarded" data-message-author-role="user">
+        <div>Discarded future attachments.</div>${discardedFiles}
+      </article>`,
+  });
+  t.after(() => harness.cleanup());
+  let portalSends = 0;
+  harness.document.querySelector('#open-formless-portal').addEventListener('click', () => {
+    const portal = harness.document.createElement('div');
+    portal.setAttribute('role', 'dialog');
+    portal.setAttribute('data-testid', 'message-edit-dialog');
+    portal.innerHTML = `
+      <textarea>Formless portal source.</textarea>
+      <button type="button">Cancel</button>
+      <button type="button" id="formless-portal-send">Send prompt</button>`;
+    harness.document.body.append(portal);
+    portal.querySelector('#formless-portal-send').addEventListener('click', () => { portalSends += 1; });
+  }, { once: true });
+
+  harness.document.querySelector('#open-formless-portal').click();
+  await wait(harness.window, 0);
+  const portalComposer = harness.document.querySelector('[data-testid="message-edit-dialog"] textarea');
+  assert.equal(harness.app.state.pendingEditSession.composerRef, portalComposer);
+  portalComposer.value = 'what is 2+2';
+  const snapshot = harness.app.captureSendSnapshot(portalComposer);
+  assert.equal(snapshot.attachmentCount, 0);
+  harness.document.querySelector('#formless-portal-send').click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(portalSends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('a failed Edit cannot claim a replacement bottom composer that only matches the source text', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Bottom draft',
+    pickerLevel: 'High',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-failed-source-match" data-message-author-role="user">
+        <div data-message-content>Matching source text.</div>
+        <button type="button" id="failed-source-edit">Edit message</button>
+      </article>`,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.document.querySelector('#failed-source-edit').click();
+  const oldForm = harness.composer.closest('form');
+  const replacement = harness.document.createElement('form');
+  replacement.innerHTML = '<textarea id="prompt-textarea">Matching source text.</textarea><button type="button" data-testid="send-button">Send</button>';
+  oldForm.replaceWith(replacement);
+  await wait(harness.window, 0);
+
+  assert.equal(harness.app.state.pendingEditSession.composerRef, null);
+  assert.equal(harness.app.state.adaptiveSendPromise, null);
+});
+
+test('an expired failed Edit session cannot claim a later editor-looking form', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Bottom draft',
+    pickerLevel: 'High',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-expired-edit" data-message-author-role="user">
+        <div data-message-content>Original source.</div>
+        <button type="button" id="expired-edit-action">Edit message</button>
+      </article>`,
+  });
+  t.after(() => harness.cleanup());
+  harness.document.querySelector('#expired-edit-action').click();
+  harness.app.state.pendingEditSession.startedAt -= 16_000;
+  const unrelated = harness.document.createElement('form');
+  unrelated.setAttribute('data-testid', 'message-editor');
+  unrelated.innerHTML = `
+    <textarea>unrelated draft</textarea>
+    <button type="button">Cancel</button>
+    <button type="button" id="expired-unrelated-send">Send</button>`;
+  harness.document.body.append(unrelated);
+  let nativeSends = 0;
+  unrelated.querySelector('#expired-unrelated-send').addEventListener('click', () => { nativeSends += 1; });
+  await wait(harness.window, 0);
+
+  unrelated.querySelector('#expired-unrelated-send').click();
+  await Promise.resolve();
+
+  assert.equal(nativeSends, 1);
+  assert.equal(harness.app.state.pendingEditSession, null);
+  assert.equal(harness.app.state.adaptiveSendPromise, null);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+});
+
+test('Cancel as a default submit button never turns into an edited resend', async (t) => {
+  const harness = await createEditHarness({
+    draft: 'what is 2+2',
+    pickerLevel: 'High',
+    sendMarkup: '<button type="submit" id="edit-send">Send</button>',
+  });
+  t.after(() => harness.cleanup());
+  const cancel = harness.document.querySelector('#edit-cancel');
+  cancel.removeAttribute('type');
+  let cancels = 0;
+  cancel.addEventListener('click', () => { cancels += 1; });
+
+  cancel.click();
+  await wait(harness.window, 0);
+
+  assert.equal(cancels, 1);
+  assert.equal(harness.editCounters.sends, 0);
+  assert.equal(harness.app.state.adaptiveSendPromise, null);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+});
+
+test('an edited replay permits only one synchronous framework submit after its composer unmounts', async (t) => {
+  const harness = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+  let firstSubmit = true;
+  harness.editForm.addEventListener('submit', () => {
+    if (!firstSubmit) return;
+    firstSubmit = false;
+    harness.editComposer.remove();
+  });
+  harness.editSend.addEventListener('click', () => {
+    for (let index = 0; index < 2; index += 1) {
+      harness.editForm.dispatchEvent(new harness.window.SubmitEvent('submit', {
+        bubbles: true,
+        cancelable: true,
+        submitter: harness.editSend,
+      }));
+    }
+  });
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.editCounters.submits, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('an edited replay recognizes a synchronously remounted equivalent form', async (t) => {
+  const harness = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+  let replacementSubmits = 0;
+  harness.editSend.addEventListener('click', () => {
+    const replacement = harness.document.createElement('form');
+    replacement.innerHTML = `
+      <textarea>what is 2+2</textarea>
+      <button type="button">Cancel</button>
+      <button type="submit" id="replacement-edit-send">Send</button>`;
+    harness.editForm.replaceWith(replacement);
+    replacement.addEventListener('submit', (event) => {
+      replacementSubmits += 1;
+      event.preventDefault();
+    });
+    replacement.dispatchEvent(new harness.window.SubmitEvent('submit', {
+      bubbles: true,
+      cancelable: true,
+      submitter: replacement.querySelector('#replacement-edit-send'),
+    }));
+  }, { once: true });
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(replacementSubmits, 1);
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.editCounters.submits, 0);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('a form-less portaled replay permits one synchronous submit after mounting a form', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Bottom draft',
+    pickerLevel: 'High',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-formless-mount" data-message-author-role="user">
+        <div data-message-content>Formless mount source.</div>
+        <button type="button" id="open-formless-mount">Edit message</button>
+      </article>`,
+  });
+  t.after(() => harness.cleanup());
+  let replacementSubmits = 0;
+  harness.document.querySelector('#open-formless-mount').addEventListener('click', () => {
+    const portal = harness.document.createElement('div');
+    portal.setAttribute('role', 'dialog');
+    portal.setAttribute('data-testid', 'message-edit-dialog');
+    portal.innerHTML = `
+      <textarea>Formless mount source.</textarea>
+      <button type="button">Cancel</button>
+      <button type="button" id="formless-mount-send">Send message</button>`;
+    harness.document.body.append(portal);
+    portal.querySelector('#formless-mount-send').addEventListener('click', () => {
+      const replacement = harness.document.createElement('form');
+      replacement.innerHTML = `
+        <textarea>what is 2+2</textarea>
+        <button type="button">Cancel</button>
+        <button type="submit" id="formless-mounted-submit">Send</button>`;
+      portal.replaceWith(replacement);
+      replacement.addEventListener('submit', (event) => {
+        replacementSubmits += 1;
+        event.preventDefault();
+      });
+      const submit = () => replacement.dispatchEvent(new harness.window.SubmitEvent('submit', {
+        bubbles: true,
+        cancelable: true,
+        submitter: replacement.querySelector('#formless-mounted-submit'),
+      }));
+      submit();
+      submit();
+    }, { once: true });
+  }, { once: true });
+
+  harness.document.querySelector('#open-formless-mount').click();
+  await wait(harness.window, 0);
+  const portalComposer = harness.document.querySelector('[data-testid="message-edit-dialog"] textarea');
+  portalComposer.value = 'what is 2+2';
+  harness.document.querySelector('#formless-mount-send').click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(replacementSubmits, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('a consumed replay permit blocks a delayed duplicate submit', async (t) => {
+  const harness = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+  harness.editSend.addEventListener('click', () => {
+    const submit = () => harness.editForm.dispatchEvent(new harness.window.SubmitEvent('submit', {
+      bubbles: true,
+      cancelable: true,
+      submitter: harness.editSend,
+    }));
+    submit();
+    harness.window.setTimeout(submit, 20);
+  });
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+  await wait(harness.window, 40);
+
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.editCounters.submits, 1);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('a failed edited accuracy send rolls back the internal verification guard', async (t) => {
+  const original = "I don't get why the answer is 12V and 4V.";
+  const harness = await createEditHarness({ draft: original, pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+  const snapshot = harness.app.captureSendSnapshot(harness.editComposer);
+
+  const sent = await harness.app.smartRouteAndSend({
+    composer: harness.editComposer,
+    snapshot,
+    beforeReplay: async () => false,
+  });
+
+  assert.equal(sent, false);
+  assert.equal(toolkit.getComposerText(harness.editComposer), original);
+  assert.equal(harness.editCounters.sends, 0);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('Escape during an async edited replay hook cancels and restores the draft', async (t) => {
+  const original = "I don't get why the answer is 12V and 4V.";
+  const harness = await createEditHarness({ draft: original, pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+  const snapshot = harness.app.captureSendSnapshot(harness.editComposer);
+  let releaseHook;
+  let enterHook;
+  const entered = new Promise((resolve) => { enterHook = resolve; });
+  const held = new Promise((resolve) => { releaseHook = resolve; });
+
+  const pending = harness.app.smartRouteAndSend({
+    composer: harness.editComposer,
+    snapshot,
+    beforeReplay: async () => {
+      enterHook();
+      await held;
+      return true;
+    },
+  });
+  await entered;
+  harness.document.dispatchEvent(new harness.window.KeyboardEvent('keydown', {
+    key: 'Escape', bubbles: true, cancelable: true,
+  }));
+  releaseHook();
+
+  assert.equal(await pending, false);
+  assert.equal(toolkit.getComposerText(harness.editComposer), original);
+  assert.equal(harness.editCounters.sends, 0);
+  assert.equal(harness.counters.sends, 0);
+});
+
+test('a throwing edited replay hook also restores the accuracy guard', async (t) => {
+  const original = "I don't understand how you chose B.";
+  const harness = await createEditHarness({ draft: original, pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+  const snapshot = harness.app.captureSendSnapshot(harness.editComposer);
+
+  await assert.rejects(harness.app.smartRouteAndSend({
+    composer: harness.editComposer,
+    snapshot,
+    beforeReplay: async () => { throw new Error('simulated hook failure'); },
+  }), /simulated hook failure/iu);
+
+  assert.equal(toolkit.getComposerText(harness.editComposer), original);
+  assert.equal(harness.editCounters.sends, 0);
+  assert.equal(harness.counters.sends, 0);
 });
 
 test('composer attachment profiling counts logical files instead of nested controls', async (t) => {
@@ -543,6 +1710,214 @@ test('conversation routing is cached until a conversation turn changes', async (
   assert.equal(harness.app.state.conversationRoutingBuilds, firstBuilds + 1);
 });
 
+test('benign hover-class churn does not cancel an adaptive send in progress', async (t) => {
+  const harness = await createHarness({
+    prompt: 'what is 2+2',
+    pickerLevel: 'High',
+    menuDelay: 30,
+    conversationMarkup: '<article data-testid="conversation-turn-hover" data-message-author-role="assistant"><div>A short answer.</div></article>',
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  harness.document.querySelector('[data-testid="conversation-turn-hover"]').classList.add('hovered');
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('hidden descendants never contaminate edit context and visibility changes invalidate the cache', async (t) => {
+  const hardTask = 'Design and implement a production compiler end to end with a threat model, formal verification, concurrency analysis, migrations, benchmarks, and exhaustive tests.';
+  const harness = await createEditHarness({
+    draft: 'Continue and finish it.',
+    pickerLevel: 'Instant',
+    prefixMarkup: `
+      <article data-testid="conversation-turn-hidden-context" data-message-author-role="user">
+        <div>Give one simple desk tip.<span id="hidden-hard-context" hidden>${hardTask}</span></div>
+      </article>`,
+  });
+  t.after(() => harness.cleanup());
+  const hard = harness.document.querySelector('#hidden-hard-context');
+  const captureLevel = () => harness.app.captureSendSnapshot(harness.editComposer).conversationLevel;
+
+  assert.notEqual(captureLevel(), 'pro');
+  hard.hidden = false;
+  await wait(harness.window, 0);
+  assert.equal(captureLevel(), 'pro');
+
+  hard.style.display = 'none';
+  await wait(harness.window, 0);
+  assert.notEqual(captureLevel(), 'pro');
+  hard.style.display = 'inline';
+  await wait(harness.window, 0);
+  assert.equal(captureLevel(), 'pro');
+
+  hard.dataset.state = 'closed';
+  await wait(harness.window, 0);
+  assert.notEqual(captureLevel(), 'pro');
+  hard.dataset.state = 'open';
+  await wait(harness.window, 0);
+  assert.equal(captureLevel(), 'pro');
+
+  hard.className = 'hidden';
+  await wait(harness.window, 0);
+  assert.notEqual(captureLevel(), 'pro');
+  hard.className = '';
+  await wait(harness.window, 0);
+  assert.equal(captureLevel(), 'pro');
+
+  hard.setAttribute('inert', '');
+  await wait(harness.window, 0);
+  assert.notEqual(captureLevel(), 'pro');
+});
+
+test('stylesheet-hidden branch wrappers are excluded with bounded visibility checks', async (t) => {
+  const hardTask = 'Design and implement a production compiler end to end with a threat model, formal verification, concurrency analysis, migrations, benchmarks, and exhaustive tests.';
+  const harness = await createEditHarness({
+    draft: 'Continue and finish it.',
+    prefixMarkup: `
+      <style>.closed-branch { display: none; }</style>
+      <section id="css-hidden-branch" class="closed-branch">
+        <article data-testid="conversation-turn-css-hidden" data-message-author-role="user"><div>${hardTask}</div></article>
+      </section>`,
+  });
+  t.after(() => harness.cleanup());
+
+  const hiddenSnapshot = harness.app.captureSendSnapshot(harness.editComposer);
+  assert.equal(hiddenSnapshot.hasPriorConversation, false);
+  harness.document.querySelector('#css-hidden-branch').className = '';
+  await wait(harness.window, 0);
+  const visibleSnapshot = harness.app.captureSendSnapshot(harness.editComposer);
+  assert.equal(visibleSnapshot.conversationLevel, 'pro');
+});
+
+test('edit context samples both ends of long user and assistant turns', async (t) => {
+  const filler = 'Ordinary background sentence with no difficult request. '.repeat(650);
+  const hardTask = 'Design and implement a production compiler end to end with a threat model, formal verification, concurrency analysis, migrations, benchmarks, and exhaustive tests.';
+  const userTail = await createEditHarness({
+    draft: 'Continue and finish it.',
+    prefixMarkup: `<article data-testid="conversation-turn-long-user" data-message-author-role="user"><div>${filler}${hardTask}</div></article>`,
+  });
+  t.after(() => userTail.cleanup());
+  const userSnapshot = userTail.app.captureSendSnapshot(userTail.editComposer);
+  assert.equal(userSnapshot.conversationLevel, 'pro');
+
+  const assistantHead = await createEditHarness({
+    draft: 'Can you explain more?',
+    prefixMarkup: `
+      <article data-testid="conversation-turn-assistant-head-user" data-message-author-role="user"><div>Give one desk tip.</div></article>
+      <article data-testid="conversation-turn-assistant-head" data-message-author-role="assistant"><div class="markdown">Formal proof with a threat model, race condition analysis, and a security vulnerability review. ${filler}</div></article>`,
+  });
+  t.after(() => assistantHead.cleanup());
+  const assistantSnapshot = assistantHead.app.captureSendSnapshot(assistantHead.editComposer);
+  assert.equal(assistantSnapshot.assistantContextLevel, 'high');
+
+  const assistantTail = await createEditHarness({
+    draft: 'Can you explain more?',
+    prefixMarkup: `
+      <article data-testid="conversation-turn-assistant-tail-user" data-message-author-role="user"><div>Give one desk tip.</div></article>
+      <article data-testid="conversation-turn-assistant-tail" data-message-author-role="assistant"><div class="markdown">${filler} Formal proof with a threat model, race condition analysis, and a security vulnerability review.</div></article>`,
+  });
+  t.after(() => assistantTail.cleanup());
+  const assistantTailSnapshot = assistantTail.app.captureSendSnapshot(assistantTail.editComposer);
+  assert.equal(assistantTailSnapshot.assistantContextLevel, 'high');
+});
+
+test('long edited-chat capture does not force layout once per retained turn', async (t) => {
+  const prefixMarkup = Array.from({ length: 180 }, (_value, index) => `
+    <article data-testid="conversation-turn-layout-${index}" data-message-author-role="${index % 2 ? 'assistant' : 'user'}">
+      <div>${index % 2 ? 'A short response.' : `A short question ${index}.`}</div>
+    </article>`).join('');
+  const harness = await createEditHarness({
+    draft: 'Continue and finish it.',
+    prefixMarkup,
+  });
+  t.after(() => harness.cleanup());
+  let layoutReads = 0;
+  for (const turn of harness.document.querySelectorAll('[data-testid^="conversation-turn-layout-"]')) {
+    turn.getClientRects = () => {
+      layoutReads += 1;
+      return [{ width: 100, height: 20 }];
+    };
+  }
+  const originalGetComputedStyle = harness.window.getComputedStyle.bind(harness.window);
+  let computedStyleReads = 0;
+  harness.window.getComputedStyle = (element, pseudoElement) => {
+    computedStyleReads += 1;
+    return originalGetComputedStyle(element, pseudoElement);
+  };
+
+  harness.app.captureSendSnapshot(harness.editComposer);
+  assert.equal(layoutReads, 0);
+  assert.ok(computedStyleReads < 100, `computed visibility checks must stay bounded, saw ${computedStyleReads}`);
+});
+
+test('generated assistant attachments participate in relevant edited follow-ups', async (t) => {
+  const generatedFiles = Array.from({ length: 8 }, (_value, index) =>
+    `<div data-file-id="generated-${index}" data-file-name="reference-${index}.pdf">reference-${index}.pdf</div>`).join('');
+  const harness = await createEditHarness({
+    draft: 'Compare those files.',
+    pickerLevel: 'Instant',
+    prefixMarkup: `
+      <article data-testid="conversation-turn-generate-files" data-message-author-role="user"><div>Create the reference files.</div></article>
+      <article data-testid="conversation-turn-generated-files" data-message-author-role="assistant"><div class="markdown">Here are the files.</div>${generatedFiles}</article>`,
+  });
+  t.after(() => harness.cleanup());
+
+  const snapshot = harness.app.captureSendSnapshot(harness.editComposer);
+  assert.equal(snapshot.archivedAttachmentProfile.count, 8);
+  assert.equal(snapshot.historicalAttachmentProfile.count, 8);
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'extra-high');
+  assert.equal(harness.editCounters.sends, 1);
+});
+
+test('assistant download links count as generated attachments for edited follow-ups', async (t) => {
+  const generatedFiles = Array.from({ length: 8 }, (_value, index) =>
+    `<a href="sandbox:/mnt/data/report-${index}.pdf" download="report-${index}.pdf">report-${index}.pdf</a>`).join('');
+  const harness = await createEditHarness({
+    draft: 'Compare those files.',
+    pickerLevel: 'Instant',
+    prefixMarkup: `
+      <article data-testid="conversation-turn-generate-downloads" data-message-author-role="user"><div>Create the reports.</div></article>
+      <article data-testid="conversation-turn-generated-downloads" data-message-author-role="assistant"><div class="markdown">Here are the reports.</div>${generatedFiles}</article>`,
+  });
+  t.after(() => harness.cleanup());
+
+  const snapshot = harness.app.captureSendSnapshot(harness.editComposer);
+  assert.equal(snapshot.historicalAttachmentProfile.count, 8);
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'extra-high');
+});
+
+test('old generated files remain archived without contaminating a later topic', async (t) => {
+  const generatedFiles = Array.from({ length: 8 }, (_value, index) =>
+    `<div data-file-id="old-generated-${index}" data-file-name="old-reference-${index}.pdf">old-reference-${index}.pdf</div>`).join('');
+  const laterTurns = Array.from({ length: 8 }, (_value, index) => `
+    <article data-testid="conversation-turn-later-user-${index}" data-message-author-role="user"><div>Give desk tip ${index + 1}.</div></article>
+    <article data-testid="conversation-turn-later-assistant-${index}" data-message-author-role="assistant"><div class="markdown">Keep the desk tidy.</div></article>`).join('');
+  const harness = await createEditHarness({
+    draft: 'Explain the first step.',
+    pickerLevel: 'Instant',
+    prefixMarkup: `
+      <article data-testid="conversation-turn-old-files-user" data-message-author-role="user"><div>Create old files.</div></article>
+      <article data-testid="conversation-turn-old-files-assistant" data-message-author-role="assistant"><div>Here they are.</div>${generatedFiles}</article>
+      ${laterTurns}`,
+  });
+  t.after(() => harness.cleanup());
+
+  const snapshot = harness.app.captureSendSnapshot(harness.editComposer);
+  assert.equal(snapshot.archivedAttachmentProfile.count, 8);
+  assert.equal(snapshot.historicalAttachmentProfile.count, 0);
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'medium');
+});
+
 test('acknowledgments do not evict the last meaningful hard task from routing context', async (t) => {
   const hardTask = 'Design and implement a production compiler end to end with a parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument.';
   const conversationMarkup = [
@@ -565,6 +1940,59 @@ test('acknowledgments do not evict the last meaningful hard task from routing co
   await finishAdaptiveSend(harness);
   assert.equal(harness.picker.textContent, 'Pro');
   assert.equal(harness.app.state.lastRouteDecision.target, 'pro');
+});
+
+test('a confirmation reply inherits difficulty only after the assistant offers the next step', async (t) => {
+  const hardTask = 'Design and implement a production compiler with formal verification, a threat model, concurrency analysis, migrations, exhaustive tests, and benchmarks.';
+  const offered = await createHarness({
+    prompt: 'Yes, do it.',
+    pickerLevel: 'Instant',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-confirm-user" data-message-author-role="user"><div>${hardTask}</div></article>
+      <article data-testid="conversation-turn-confirm-assistant" data-message-author-role="assistant"><div class="markdown">I have the design. Would you like me to implement and verify it now?</div></article>`,
+  });
+  t.after(() => offered.cleanup());
+  const offer = offered.document.querySelector('[data-testid="conversation-turn-confirm-assistant"] .markdown');
+  for (const invitation of [
+    'Would you like a detailed example?',
+    'Would you like that?',
+    'Do you want a detailed example?',
+    'Should we continue?',
+    'Want to continue?',
+    'I can also add tests.',
+    'Let me know if you want more.',
+    'Ready to continue?',
+    'Ready for the next step?',
+  ]) {
+    offer.textContent = invitation;
+    await wait(offered.window, 0);
+    assert.equal(offered.app.captureSendSnapshot(offered.composer).awaitingConfirmation, true, invitation);
+  }
+  offered.sendButton.click();
+  await finishAdaptiveSend(offered);
+  assert.equal(offered.app.state.lastRouteDecision.target, 'pro');
+
+  const plain = await createHarness({
+    prompt: 'Yes.',
+    pickerLevel: 'High',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-plain-user" data-message-author-role="user"><div>${hardTask}</div></article>
+      <article data-testid="conversation-turn-plain-assistant" data-message-author-role="assistant"><div class="markdown">Here is the completed design and verification.</div></article>`,
+  });
+  t.after(() => plain.cleanup());
+  const completed = plain.document.querySelector('[data-testid="conversation-turn-plain-assistant"] .markdown');
+  for (const statement of [
+    'Here is the completed design and verification.',
+    'The release is ready for production.',
+    'If you want to reset it, click Settings.',
+  ]) {
+    completed.textContent = statement;
+    await wait(plain.window, 0);
+    assert.equal(plain.app.captureSendSnapshot(plain.composer).awaitingConfirmation, false, statement);
+  }
+  plain.sendButton.click();
+  await finishAdaptiveSend(plain);
+  assert.equal(plain.app.state.lastRouteDecision.target, 'instant');
 });
 
 test('two nameless attachments in separate turns remain two archived attachments', async (t) => {
@@ -702,6 +2130,33 @@ test('fallback transcript supplies difficulty for a context-dependent side quest
   assert.equal(harness.picker.textContent, 'Extra High');
   assert.equal(harness.counters.sends, 1);
   assert.equal(harness.app.state.lastRouteDecision.target, 'extra-high');
+});
+
+test('fallback transcript keeps an explicitly referenced hard first message beyond the recent window', async (t) => {
+  const jobId = 'fallback_archived_difficulty_job_1234';
+  const hardTask = 'Design and implement a production compiler end to end with architecture, concurrency, a security review, migration, exhaustive tests, benchmarks, and a formal correctness proof.';
+  const transcript = [
+    `USER:\n${hardTask}`,
+    'ASSISTANT:\nHere is the compiler design.',
+    ...Array.from({ length: 8 }, (_value, index) => `USER:\nGive me desk organization tip ${index + 1}.`),
+    'ASSISTANT:\nPut one item away at a time.',
+  ].join('\n\n');
+  const question = 'Use the rigorous method from our first message and continue it.';
+  const expected = toolkit.buildSideFallbackPrompt(transcript, question, 'ask', jobId);
+  const harness = await createHarness({ prompt: expected, pickerLevel: 'Instant' });
+  t.after(() => harness.cleanup());
+
+  const sent = await harness.app.smartRouteAndSend({
+    composer: harness.composer,
+    routingText: question,
+    silent: true,
+    draftValidator: (composer) => toolkit.fallbackDraftTextMatches(composer.value, expected, jobId),
+  });
+
+  assert.equal(sent, true);
+  assert.equal(harness.picker.textContent, 'Pro');
+  assert.equal(harness.app.state.lastRouteDecision.target, 'pro');
+  assert.equal(harness.counters.sends, 1);
 });
 
 test('fallback transcript retains an explicitly referenced attachment older than six user turns', async (t) => {

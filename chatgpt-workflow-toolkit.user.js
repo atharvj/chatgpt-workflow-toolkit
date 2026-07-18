@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.14
+// @version      1.4.15
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.14';
+  const VERSION = '1.4.15';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -65,6 +65,7 @@
   const SELECTED_QUOTE_MAX_LENGTH = 2_000;
   const ACCURACY_GUARD_INSTRUCTION = 'Before explaining, independently verify the stated answer or result. Do not assume it is correct; if it is wrong, say so and give the corrected result.';
   const ROUTE_OVERRIDE_PATTERN = /^\s*!route\s*:\s*(extra\s*-?\s*high|x\s*-?\s*high|xhigh|pro\s*-?\s*extended|pro\s*-?\s*ultra|pro\s*-?\s*standard|instant|medium|high|ultra|pro|max|highest|auto)(?=\s|:|;|$)/iu;
+  const USER_ACKNOWLEDGMENT_PATTERN = /^(?:thanks?(?:\s+you)?|thank\s+you|ok(?:ay)?|got\s+it|cool|great|yes|yeah|yep|sure(?:\s+thing)?|absolutely|definitely|sounds\s+good(?:\s+to\s+me)?|that\s+works(?:\s+for\s+me)?|of\s+course|no|hello|hi|hey|bye|go\s+ahead|please\s+do)[.!,\s]*$/iu;
   const SELECTION_PILL_GAP = 7;
   const SELECTION_PILL_MARGIN = 8;
   const SELECTION_PILL_FALLBACK_WIDTH = 112;
@@ -104,12 +105,20 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     'main form [contenteditable="true"][role="textbox"]',
     'main form textarea',
   ];
+  const LOCAL_COMPOSER_SELECTOR = [
+    'textarea',
+    '[contenteditable="true"][role="textbox"]',
+    '[contenteditable="plaintext-only"][role="textbox"]',
+    '[data-lexical-editor="true"]',
+    '.ProseMirror[contenteditable]',
+  ].join(', ');
   const SEND_BUTTON_SELECTORS = [
     'button[data-testid="send-button"]',
     'button[aria-label="Send prompt"]',
     'button[aria-label="Send message"]',
     'button[aria-label^="Send"]',
   ];
+  const SUBMISSION_CONTROL_SELECTOR = 'button, input[type="submit"], [role="button"]';
   const MODEL_OPTION_CONTAINER_SELECTOR = '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="radio"], [data-radix-collection-item], [data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-radio-item"]';
   const MODEL_OPTION_SELECTOR = `${MODEL_OPTION_CONTAINER_SELECTOR}, button`;
   const MODEL_MENU_ROOT_SELECTOR = '[role="menu"], [role="listbox"], [role="radiogroup"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-menu-items], [data-slot="dropdown-menu-content"], [data-slot="popover-content"], [data-state="open"][role="dialog"], [data-testid="composer-intelligence-picker-content"], [data-testid*="model-menu"], [data-testid*="model-picker-menu"], [data-testid*="intelligence-menu"]';
@@ -628,18 +637,24 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return getTurns(root).filter(isAssistantTurn);
   }
 
-  function isTurnStreaming(turn, doc = turn && turn.ownerDocument) {
+  function inferredStreamingTurn(doc) {
+    if (!doc) return null;
+    const stopButton = [...doc.querySelectorAll(
+      'button[data-testid="stop-button"], button[data-testid*="stop-generating"], button[aria-label^="Stop generating" i], button[aria-label^="Stop streaming" i]',
+    )].find(isProbablyVisible);
+    if (!stopButton) return null;
+    const assistants = getAssistantTurns(doc);
+    return assistants[assistants.length - 1] || null;
+  }
+
+  function isTurnStreaming(turn, doc = turn && turn.ownerDocument, knownStreamingTurn) {
     if (!turn || !doc) return false;
     if (turn.matches('[data-is-streaming="true"], [data-streaming="true"], .result-streaming') ||
         turn.querySelector('[data-is-streaming="true"], [data-streaming="true"], .result-streaming')) {
       return true;
     }
-    const stopButton = [...doc.querySelectorAll(
-      'button[data-testid="stop-button"], button[data-testid*="stop-generating"], button[aria-label^="Stop generating" i], button[aria-label^="Stop streaming" i]',
-    )].find(isProbablyVisible);
-    if (!stopButton) return false;
-    const assistants = getAssistantTurns(doc);
-    return assistants[assistants.length - 1] === turn;
+    if (arguments.length >= 3) return knownStreamingTurn === turn;
+    return inferredStreamingTurn(doc) === turn;
   }
 
   function getCompletedAssistantTurns(root) {
@@ -747,7 +762,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return `I have a question about this specific part of the response:\n\n${quote}\n\nMy question:\n`;
   }
 
-  function requiresAnswerVerification(value) {
+  function requiresAnswerVerification(value, context = {}) {
     const raw = String(value == null ? '' : value).slice(0, QUESTION_MAX_LENGTH);
     const withoutBom = raw.replace(/^\uFEFF/u, '');
     const overrideMatch = withoutBom.match(ROUTE_OVERRIDE_PATTERN);
@@ -813,6 +828,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const personalResultCheck = /\bi\s+(?:got|calculated|computed|found|think|believe)\b.{0,100}\b(?:which|what|is\s+(?:this|that|it))\b.{0,80}\b(?:answer|result|option|choice|correct|right|wrong)\b/iu.test(text);
     const compactAnswerValue = String.raw`(?:[a-z][\p{L}\p{N}_]*\s*=\s*${numericAnswerPiece}|${numericAnswerPiece}|(?:option|choice)\s+[a-z]{1,4}|[a-z])`;
     const freeformAnswerValue = String.raw`(?:[\p{L}][\p{L}\p{N}'’.\/-]*(?:\s+[\p{L}][\p{L}\p{N}'’.\/-]*){0,3})`;
+    const conciseCandidateExplanation = new RegExp(String.raw`^(?:(?:please\s+)?explain\s+why|i\s+(?:(?:still|really|just)\s+)?(?:do\s+not|don['’]?t|cannot|can['’]?t)\s+(?:get|understand|see|follow)\s+why)\s+(?:(?:the\s+)?(?:answer|choice|option)\s+(?:is|was)\s+)?${compactAnswerValue}[?.!]*$`, 'iu').test(text);
     const invertedClaim = new RegExp(String.raw`^(?:is|was|could|should|would|might)\s+(?:(?:the|my|your|our|their)\s+)?(?:answer|result|solution|value|output)\s+(?:(?:actually|definitely|really)\s+)?(?:be\s+)?${compactAnswerValue}[?.!]*$`, 'iu').test(text);
     const candidateCorrectness = !operationalNonAnswer && new RegExp(String.raw`^(?:is|was)\s+${compactAnswerValue}\s+(?:actually\s+|definitely\s+|really\s+)?(?:correct|right|wrong|valid|accurate)[?.!]*$`, 'iu').test(text);
     const candidateAsAnswer = new RegExp(String.raw`^(?:is|was)\s+${compactAnswerValue}\s+(?:actually\s+|definitely\s+|really\s+)?(?:the\s+)?(?:correct|right|wrong)\s+(?:answer|result|solution|choice|option)[?.!]*$`, 'iu').test(text);
@@ -837,7 +853,30 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const conciseCandidateChallenge = new RegExp(String.raw`^(?:(?:why|how\s+come)\s+(?:(?:option\s+)?${compactAnswerValue}|${compactAnswerValue}\s+is\s+(?:the\s+)?answer)|where\s+did\s+${compactAnswerValue}\s+come\s+from|(?:why|how)\s+did\s+you\s+(?:choose|pick|say)\s+${compactAnswerValue}|you\s+(?:chose|picked|selected|said)\s+${compactAnswerValue}\s*(?:[—–-]|[,;:])?\s*why|what\s+makes\s+${compactAnswerValue}\s+(?:correct|right)|[a-z][\p{L}\p{N}_]*\s+is\s+${compactAnswerValue}\s*,?\s+(?:right|correct)|i\s+got\s+(?:[a-z][\p{L}\p{N}_]*\s+as\s+${compactAnswerValue}|${compactAnswerValue}\s+for\s+[a-z][\p{L}\p{N}_]*)\s*,?\s+(?:right|correct))[?.!]*$`, 'iu').test(text);
     const passiveCandidateDerivation = !operationalNonAnswer && new RegExp(String.raw`^(?:why\s+(?:was|were)\s+${compactAnswerValue}\s+(?:used|chosen|picked|selected|substituted|added|subtracted|multiplied|divided)|how\s+(?:was|were)\s+${compactAnswerValue}\s+(?:calculated|computed|derived|obtained|found|chosen)|where\s+(?:does|did)\s+${compactAnswerValue}\s+come\s+from|what\s+made\s+you\s+(?:choose|pick|select|use)\s+${compactAnswerValue})[?.!]*$`, 'iu').test(text);
     const answerDoubt = !operationalNonAnswer && /^(?:(?:could|might|can|would)\s+(?:it|this|that|(?:your|the)\s+(?:answer|result|solution|calculation|conclusion))\s+be\s+(?:wrong|incorrect|mistaken)|is\s+there\s+(?:a|any)\s+(?:mistake|error)|(?:are\s+there\s+)?any\s+(?:mistakes?|errors?)|any\s+chance\s+(?:that|this|it|(?:your|the)\s+(?:answer|result))\s+is\s+(?:wrong|incorrect)|what\s+if\s+(?:your|the)\s+(?:answer|result|solution|calculation|conclusion)\s+is\s+(?:wrong|incorrect))[?.!]*$/iu.test(text);
-    const bareWhy = markerIndex < 0 && /^why[?.!]*$/iu.test(text);
+    const candidateExplanationFollowUp = !operationalNonAnswer && new RegExp(String.raw`^(?:i\s+got\s+${compactAnswerValue}\s*[,;:—–-]?\s*why|i\s+think\s+(?:the\s+)?answer\s+is\s+${compactAnswerValue}\s*[.;:—–-]?\s*explain(?:\s+why)?|(?:the\s+answer\s+key|my\s+teacher|it)\s+says?\s+(?:it\s+is\s+)?${compactAnswerValue}\s*[,;.:—–-]?\s*why|help\s+me\s+understand\s+(?:why\s+)?${compactAnswerValue}|why\s+(?:would|should|could)\s+it\s+be\s+${compactAnswerValue}|${compactAnswerValue}\s+is\s+(?:the\s+)?answer\s*[.;:—–-]?\s*explain\s+why|(?:the\s+)?answer\s+is\s+${compactAnswerValue}\s+because\s+.{1,100}?\s*[.;:—–-]?\s*is\s+that\s+true|why\s+not\s+${compactAnswerValue}|why\s+${compactAnswerValue}\s+instead\s+of\s+${compactAnswerValue}|i\s+(?:do\s+not|don['’]?t|cannot|can['’]?t)\s+(?:get|understand|follow)\s+${compactAnswerValue}|explain\s+(?:the\s+)?${compactAnswerValue}|walk\s+me\s+through\s+why\s+(?:it|that|this|(?:the\s+)?answer)\s+is\s+${compactAnswerValue}|show\s+(?:me\s+)?why\s+${compactAnswerValue}\s+is\s+(?:correct|right))[?.!]*$`, 'iu').test(text);
+    const suppliedAnswerValue = String.raw`(?:${compactAnswerValue}|[\p{L}\p{N}][\p{L}\p{N}'’\/-]*(?:\s+[\p{L}\p{N}][\p{L}\p{N}'’\/-]*){0,3})`;
+    const singleWordAnswerValue = String.raw`[\p{L}\p{N}][\p{L}\p{N}'’\/-]*`;
+    const signedAnswerPhrase = String.raw`(?:negative|positive|zero|nonzero|incorrect|wrong)\s+[\p{L}\p{N}][\p{L}\p{N}'’\/-]*(?:\s+[\p{L}\p{N}][\p{L}\p{N}'’\/-]*){0,2}`;
+    const suppliedAnswerExplanation = !operationalNonAnswer && new RegExp(String.raw`^(?:(?:(?:the|my|your)\s+)?(?:(?:correct\s+)?answer|answer\s+key|solution)\s*(?::|(?:is|was|says?|gives?|lists?|marks?)\s+)\s*${suppliedAnswerValue}(?:\s*[,;.:—–-]?\s*(?:why|explain(?:\s+(?:it|why))?|how\s+(?:is|can|could|would)\s+that))?|(?:(?:my|the)\s+)?(?:teacher|professor|instructor|book|textbook|chegg|calculator|key|it|they)\s+says?\s+(?:the\s+answer\s+is\s+|it\s+is\s+)?${suppliedAnswerValue}(?:\s*[,;.:—–-]?\s*(?:why|explain(?:\s+why)?))?|${suppliedAnswerValue}\s*[,;:—–-]\s*(?:why|explain(?:\s+why)?)|how\s+is\s+(?:the\s+)?answer\s+${suppliedAnswerValue}|why\s+not\s+(?:${compactAnswerValue}|${singleWordAnswerValue})|why\s+${compactAnswerValue}\s+instead\s+of\s+${compactAnswerValue}|(?:please\s+)?explain\s+${signedAnswerPhrase})[?.!]*$`, 'iu').test(text);
+    const priorAnswerExplanation = !operationalNonAnswer && /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:explain|justify)\s+(?:(?:how|why)\s+)?(?:(?:your|the|that|this)\s+)?(?:answer|result|solution|reasoning|logic|conclusion)|explain\s+how\s+you\s+(?:got|found|calculated|derived|reached|arrived\s+at)\s+(?:that|this|the\s+answer|your\s+answer)|walk\s+me\s+through\s+(?:(?:your|the|that|this)\s+)?(?:answer|reasoning|logic|solution)|show\s+(?:me\s+)?(?:(?:your|the)\s+)?(?:reasoning|work)|what\s+is\s+your\s+reasoning|how\s+did\s+you\s+arrive\s+at\s+(?:that|this|your\s+answer)|why\s+is\s+that)[?.!]*$/iu.test(text);
+    const expandedAnswerValue = String.raw`(?:${compactAnswerValue}|[\p{L}\p{N}][\p{L}\p{N}'’\/-]*(?:\s+[\p{L}\p{N}][\p{L}\p{N}'’\/-]*){0,4})`;
+    const expandedCandidateExplanation = !operationalNonAnswer && new RegExp(String.raw`^(?:i\s+got\s+${expandedAnswerValue}\s*[,;:.?—–-]+\s*(?:why|how|explain(?:\s+why)?)|i\s+think\s+(?:the\s+)?answer\s+is\s+${expandedAnswerValue}\s*[,;:.?—–-]+\s*(?:why|how|explain(?:\s+why)?)|why\s+(?:would|should|could|can)\s+(?:it|this|that)\s+be\s+${expandedAnswerValue}|(?:(?:the|my)\s+)?(?:solution|answer\s+key|key|teacher|professor|instructor|book|textbook|chegg|calculator|they|it)\s+(?:says?|got|gives?|lists?|marks?)\s+(?:the\s+answer\s+is\s+|it\s+is\s+)?${expandedAnswerValue}\s*[,;:.?—–-]+\s*(?:why|how|explain(?:\s+why)?)|according\s+to\s+(?:the\s+)?(?:answer\s+key|key|teacher|professor|instructor|book|textbook|chegg)\s*[,]?\s*(?:the\s+answer|it)\s+is\s+${expandedAnswerValue}\s*[,;:.?—–-]+\s*(?:why|how|explain(?:\s+why)?)|${expandedAnswerValue}\s*[,;:.?—–-]+\s*(?:why|how|explain(?:\s+why)?))[?.!]*$`, 'iu').test(text);
+    const additionalPriorAnswerExplanation = !operationalNonAnswer && /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:show\s+(?:me\s+)?(?:the\s+)?reasoning\s+behind\s+(?:that|this|it|the\s+answer)|how\s+did\s+you\s+arrive\s+at\s+(?:that|this|the|your)\s+answer)[?.!]*$/iu.test(text);
+    const freeformDeicticCandidate = !operationalNonAnswer && new RegExp(String.raw`^(?:(?:is|was)\s+${suppliedAnswerValue}\s+(?:correct|right|wrong|valid|accurate)|(?:could|should|would|might|can)\s+${suppliedAnswerValue}\s+be\s+(?:correct|right|wrong|valid|accurate)|${singleWordAnswerValue}\s*[,;:]\s*(?:right|correct)|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:explain\s+(?:your|the)\s+(?:last|previous)\s+answer|justify\s+(?:it|that|this)|prove\s+(?:it|that|this)))[?.!]*$`, 'iu').test(text);
+    const assumedAnswerMatch = text.match(/^(?:why|how)\s+(?:is|was|would|could)\s+(?:it|this|that)\s+(.+?)[?.!]*$/iu);
+    const assumedAnswerCandidate = normalizeText(assumedAnswerMatch && assumedAnswerMatch[1]).replace(/[?.!]+$/gu, '');
+    const latestAssistantText = lowerText(boundedHeadTailSample(context.latestAssistantText || '', 4_000));
+    const contextualAssumedAnswer = Boolean(assumedAnswerCandidate && latestAssistantText &&
+      (assumedAnswerCandidate.match(/[\p{L}\p{N}]+/gu) || []).length <= 6 && (() => {
+        const escaped = lowerText(assumedAnswerCandidate).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+        return escaped.length >= 2 && new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`, 'iu').test(latestAssistantText);
+      })());
+    const confusedDerivationChallenge = !operationalNonAnswer && (
+      /^i\s+(?:(?:still|really|just)\s+)?(?:do\s+not|don['’]?t|cannot|can['’]?t)\s+(?:get|understand|see|follow)\s+(?:(?:where\s+(?:that|this|the\s+)?(?:answer|result|value|number|[-+]?\d+(?:\.\d+)?\s*[a-z]{0,8})\s+came\s+from)|(?:how|why)\s+(?:you|we)\s+(?:got|found|calculated|computed|derived|chose|picked|selected|used|substituted|added|subtracted|multiplied|divided|concluded|said)\b).*[?.!]*$/iu.test(text) ||
+      /^(?:that|this|it|(?:your|the)\s+(?:answer|result|solution|reasoning|explanation))\s+(?:(?:does\s+not|doesn['’]?t)\s+make\s+sense|makes?\s+no\s+sense)[?.!]*$/iu.test(text)
+    );
+    const tersePriorChallenge = /^(?:really|seriously|correct|right|wrong|where\s+did\s+you\s+get\s+that)[?.!]*$/iu.test(text);
+    const bareWhy = markerIndex < 0 && /^(?:why|how\s+come)[?.!]*$/iu.test(text);
     const extractedDataCheck = !operationalNonAnswer && (
       /^(?:are|is|were|was)\s+(?:(?:all|the|these|those)\s+)?(?:extracted|transcribed|identified|calculated|detected)\s+(?:names?|values?|figures?|numbers?|totals?|fields?|dates?|items?|results?)\s+(?:actually\s+|definitely\s+)?(?:correct|right|accurate|complete)[?.!]*$/iu.test(text) ||
       /\b(?:file|document|pdf|spreadsheet|table|chart|image|scan)\s+(?:says?|shows?|lists?|gives?|reports?)\b.{1,140}\b(?:is\s+(?:that|this|it)\s+|is\s+the\s+(?:value|number|total|result)\s+)?(?:correct|right|accurate)[?.!]*$/iu.test(text) ||
@@ -851,14 +890,14 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       /^(?:the\s+)?(?:ocr|transcription|extraction)\s+(?:says?|shows?|gives?)\b.{1,120}\b(?:is\s+(?:that|this|it)\s+)?(?:correct|right|accurate)[?.!—–-]*$/iu.test(text)
     );
     const suspiciousResultCheck = !operationalNonAnswer && /^(?:that|this|the)\s+(?:answer|result|solution|calculation|conclusion|output|value)\s+(?:(?:seems?|looks?)\s+(?:off|wrong|incorrect|suspicious)|(?:does\s+not|doesn['’]?t)\s+(?:add\s+up|look\s+right))[?.!]*$/iu.test(text);
-    return selectedChallenge || deicticValueChallenge || directRecheck || invertedClaim || deicticCorrectnessQuestion || claimThenCheck || personalResultCheck || candidateCorrectness || candidateAsAnswer || freeformCandidateAsAnswer || mathEquationCorrectness || answerPredicateCheck || tellMeCorrectness || processCorrectness || candidateLooksRight || checkCompactCandidate || personalCompactCheck || personalFreeformCheck || negativeAnswerClaim || alternativeCandidate || conflictCheck || disagreementChallenge || reconsiderationChallenge || externalConflict || checkedMathStatement || accuracyRecheck || namedAnswerClaim || conciseCandidateChallenge || passiveCandidateDerivation || answerDoubt || bareWhy || extractedDataCheck || suspiciousResultCheck || challengeLead.test(text) && (
+    return selectedChallenge || deicticValueChallenge || directRecheck || invertedClaim || deicticCorrectnessQuestion || claimThenCheck || personalResultCheck || candidateCorrectness || candidateAsAnswer || freeformCandidateAsAnswer || mathEquationCorrectness || answerPredicateCheck || tellMeCorrectness || processCorrectness || candidateLooksRight || checkCompactCandidate || personalCompactCheck || personalFreeformCheck || negativeAnswerClaim || alternativeCandidate || conflictCheck || disagreementChallenge || reconsiderationChallenge || externalConflict || checkedMathStatement || accuracyRecheck || namedAnswerClaim || conciseCandidateChallenge || conciseCandidateExplanation || passiveCandidateDerivation || answerDoubt || candidateExplanationFollowUp || suppliedAnswerExplanation || priorAnswerExplanation || expandedCandidateExplanation || additionalPriorAnswerExplanation || freeformDeicticCandidate || contextualAssumedAnswer || confusedDerivationChallenge || tersePriorChallenge || bareWhy || extractedDataCheck || suspiciousResultCheck || challengeLead.test(text) && (
       claimedAnswer.test(text) || reverseClaimedAnswer.test(text) || forwardAuxClaim.test(text) || derivationChallenge || correctnessChallenge.test(text)
     );
   }
 
-  function buildAccuracyGuardedPrompt(value, maximumLength = QUESTION_MAX_LENGTH) {
+  function buildAccuracyGuardedPrompt(value, maximumLength = QUESTION_MAX_LENGTH, context = {}) {
     const raw = String(value == null ? '' : value);
-    if (!requiresAnswerVerification(raw)) return raw;
+    if (!requiresAnswerVerification(raw, context)) return raw;
     const lower = lowerText(raw);
     if (lower.includes(lowerText(ACCURACY_GUARD_INSTRUCTION)) ||
       /\bindependently verify\b.{0,100}\b(?:answer|result)\b|\b(?:do not|don['’]?t) assume\b.{0,100}\b(?:correct|right)\b/iu.test(lower)) {
@@ -870,7 +909,40 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return guarded.length <= limit ? guarded : raw;
   }
 
-  function readableNodeText(root) {
+  function boundedHeadTailSample(value, maximumLength) {
+    const text = String(value == null ? '' : value);
+    const limit = clampInteger(maximumLength, 16_000, 1, QUESTION_MAX_LENGTH);
+    if (text.length <= limit) return text;
+    const headLength = Math.ceil((limit - 1) / 2);
+    const tailLength = Math.max(0, limit - headLength - 1);
+    return `${text.slice(0, headLength)}\n${tailLength ? text.slice(-tailLength) : ''}`;
+  }
+
+  function assistantInvitesContinuation(value) {
+    const text = lowerText(boundedHeadTailSample(value, 4_000));
+    if (!text) return false;
+    return /\b(?:would\s+you\s+like|do\s+you\s+want|want\s+me\s+to|should\s+(?:i|we)|shall\s+(?:i|we)|let\s+me\s+know\s+if\s+you\s+(?:want|would\s+like))\b|(?:^|[.!?]\s+)(?:want\s+to|ready\s+(?:to|for))\b[^.!?]{0,180}\?\s*$|\bif\s+you(?:['’]d|\s+would)?\s*(?:like|want)\s*[,;:]?\s+i\s+can\b|\bi\s+(?:can|could)\s+also\b|\bi\s+can\b.{0,180}\bif\s+you(?:['’]d|\s+would)\s+like\b/iu.test(text);
+  }
+
+  function inlineStyleHidesContent(value) {
+    return /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|content-visibility\s*:\s*hidden)\b/iu.test(
+      String(value == null ? '' : value),
+    );
+  }
+
+  function classTokensHideContent(value) {
+    return /(?:^|\s)(?:hidden|invisible|sr-only|visually-hidden)(?=\s|$)/iu.test(
+      String(value == null ? '' : value),
+    );
+  }
+
+  function classMayControlVisibility(value) {
+    return /(?:^|\s)[^\s]*(?:hidden|invisible|closed|collaps|inactive|conceal|offscreen|opacity-0|sr-only|visually-hidden)[^\s]*(?=\s|$)/iu.test(
+      String(value == null ? '' : value),
+    );
+  }
+
+  function readableNodeText(root, options = {}) {
     if (!root) return '';
     const blockTags = new Set([
       'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DIV', 'DL', 'DT', 'DD', 'FIGCAPTION', 'FIGURE',
@@ -880,15 +952,42 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const ignoredSelector = [
       `#${UI_ROOT_ID}`, `.${TURN_BUTTON_CLASS}`, '.cgs-turn-fallback-row',
       'button', 'input', 'textarea', 'select', 'option', 'script', 'style', 'svg', 'canvas', 'noscript',
-      '[aria-hidden="true"]', '[data-testid*="turn-action"]', '[data-testid*="message-actions"]',
+      '[hidden]', '[inert]', '[aria-hidden="true"]', '[data-state="closed"]',
+      '[class~="hidden"]', '[class~="invisible"]', '[class~="sr-only"]', '[class~="visually-hidden"]',
+      '[data-testid*="turn-action"]', '[data-testid*="message-actions"]',
       '[data-testid*="feedback"]', '[data-cgs-injected]',
     ].join(', ');
+    const checkComputedVisibility = options.checkComputedVisibility === true;
+    const visibilityState = options.visibilityState && typeof options.visibilityState.set === 'function'
+      ? options.visibilityState
+      : null;
+    const computedVisibilityCache = options.computedVisibilityCache instanceof Map
+      ? options.computedVisibilityCache
+      : new Map();
+    const view = root.ownerDocument && root.ownerDocument.defaultView;
+    const computedHidden = (node) => {
+      if (!checkComputedVisibility || !view || typeof view.getComputedStyle !== 'function' || !node || !node.hasAttribute ||
+        !node.hasAttribute('style') && !classMayControlVisibility(node.getAttribute('class'))) return false;
+      if (computedVisibilityCache.has(node)) return computedVisibilityCache.get(node);
+      let hidden = false;
+      try {
+        const style = view.getComputedStyle(node);
+        hidden = style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' ||
+          style.contentVisibility === 'hidden';
+      } catch (_error) {
+        hidden = false;
+      }
+      computedVisibilityCache.set(node, hidden);
+      if (visibilityState) visibilityState.set(node, hidden);
+      return hidden;
+    };
 
     const codeBlocks = [];
     const visit = (node) => {
       if (!node) return '';
       if (node.nodeType === 3) return String(node.nodeValue || '');
-      if (node.nodeType !== 1 || node.matches(ignoredSelector)) return '';
+      if (node.nodeType !== 1 || node.matches(ignoredSelector) || inlineStyleHidesContent(node.getAttribute('style')) ||
+        computedHidden(node)) return '';
       const tag = node.tagName;
       if (tag === 'BR') return '\n';
       if (tag === 'PRE') {
@@ -916,7 +1015,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return text;
   }
 
-  function extractAssistantHandoff(turn) {
+  function extractAssistantHandoff(turn, options = {}) {
     if (!turn) return '';
     const roleNode = turn.matches && turn.matches('[data-message-author-role="assistant"]')
       ? turn
@@ -925,7 +1024,10 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const preferred = [...roleNode.querySelectorAll('[data-message-content], .markdown, [class~="prose"]')]
       .filter((node) => !node.parentElement || !node.parentElement.closest('[data-message-content], .markdown, [class~="prose"]'));
     const candidates = preferred.length ? preferred : [roleNode];
-    const text = candidates.map(readableNodeText).sort((a, b) => b.length - a.length)[0] || '';
+    const text = candidates.map((node) => readableNodeText(node, options)).sort((a, b) => b.length - a.length)[0] || '';
+    if (options.headTailSampleLength) {
+      return boundedHeadTailSample(text, options.headTailSampleLength).trim();
+    }
     return text.slice(0, FRESH_HANDOFF_MAX_LENGTH).trim();
   }
 
@@ -1320,6 +1422,36 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     return true;
   }
 
+  function closestUserTurn(node) {
+    const element = node && (node.nodeType === 1 ? node : node.parentElement);
+    if (!element || typeof element.closest !== 'function') return null;
+    const primary = element.closest(TURN_SELECTOR);
+    if (primary) return roleOfTurn(primary) === 'user' ? primary : null;
+    const roleNode = element.closest('[data-message-author-role="user"]');
+    return roleNode ? roleNode.closest('article') || roleNode : null;
+  }
+
+  function isEditableComposer(element) {
+    if (!element || element.nodeType !== 1 || !element.matches(LOCAL_COMPOSER_SELECTOR) ||
+      element.closest(`#${UI_ROOT_ID}`) || element.disabled || element.readOnly ||
+      element.getAttribute('aria-disabled') === 'true') return false;
+    if (element.tagName !== 'TEXTAREA') {
+      const editable = lowerText(element.getAttribute('contenteditable'));
+      if (!(element.isContentEditable || editable === 'true' || editable === 'plaintext-only')) return false;
+    }
+    return isProbablyVisible(element);
+  }
+
+  function findComposerInScope(scope, preferredTarget = null) {
+    if (!scope || typeof scope.querySelectorAll !== 'function') return null;
+    const target = preferredTarget && (preferredTarget.nodeType === 1 ? preferredTarget : preferredTarget.parentElement);
+    const direct = target && (target.matches(LOCAL_COMPOSER_SELECTOR)
+      ? target
+      : target.closest && target.closest(LOCAL_COMPOSER_SELECTOR));
+    if (direct && (scope === direct || scope.contains(direct)) && isEditableComposer(direct)) return direct;
+    return [...scope.querySelectorAll(LOCAL_COMPOSER_SELECTOR)].find(isEditableComposer) || null;
+  }
+
   function findComposer(doc) {
     if (!doc) return null;
     for (const selector of COMPOSER_SELECTORS) {
@@ -1446,6 +1578,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     if (!composer) return null;
     const form = composer.closest('form');
     if (form) return form;
+    const editTurn = closestUserTurn(composer);
+    if (editTurn) return editTurn;
     let ancestor = composer.parentElement;
     for (let depth = 0; ancestor && depth < 6; depth += 1, ancestor = ancestor.parentElement) {
       if (SEND_BUTTON_SELECTORS.some((selector) => ancestor.querySelector(selector))) return ancestor;
@@ -1454,13 +1588,39 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
   }
 
   function findSendButton(doc, composer = findComposer(doc)) {
-    if (!doc) return null;
+    if (!doc || !composer) return null;
     const scope = composerScope(composer) || doc;
     for (const selector of SEND_BUTTON_SELECTORS) {
       const button = [...scope.querySelectorAll(selector)].find(isProbablyVisible);
       if (button) return button;
     }
-    return null;
+    const editTurn = closestUserTurn(composer);
+    if (!editTurn) return null;
+    const form = composer.closest('form');
+    const candidates = [...doc.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)].filter((control) => {
+      if (!isProbablyVisible(control) || control.closest(`#${UI_ROOT_ID}`)) return false;
+      const associatedForm = control.form || control.closest('form');
+      return form && associatedForm === form || editTurn.contains(control);
+    });
+    return candidates.find((control) => isEditSubmissionControl(control, composer)) || null;
+  }
+
+  function isEditSubmissionControl(control, composer, suppliedEditTurn = null) {
+    const editTurn = suppliedEditTurn || closestUserTurn(composer);
+    if (!control || !composer || !editTurn || !isProbablyVisible(control) ||
+      control.closest(`#${UI_ROOT_ID}`)) return false;
+    const form = composer.closest('form');
+    const associatedForm = control.form || control.closest('form');
+    if (!(form && associatedForm === form) && !editTurn.contains(control)) return false;
+    if (control.matches(SEND_BUTTON_SELECTORS.join(', '))) return true;
+    const label = lowerText(`${accessibleText(control)} ${control.value || ''}`);
+    const testId = lowerText(control.getAttribute('data-testid'));
+    if (/\b(?:cancel|discard|close|regenerate|retry|branch|edit)\b/iu.test(label) &&
+      !/\b(?:send|submit|resend)\b/iu.test(label)) return false;
+    if (/\b(?:send|submit|resend)\b/iu.test(testId) && !/\b(?:cancel|discard)\b/iu.test(testId)) return true;
+    if (control.matches('button[type="submit"], input[type="submit"]') &&
+      !/\b(?:cancel|discard|close)\b/iu.test(label)) return true;
+    return /^(?:send|resend|submit|save\s*(?:&|and)\s*(?:send|submit)|send\s+message|send\s+prompt)$/iu.test(label);
   }
 
   function extractModelLevel(value) {
@@ -1693,6 +1853,56 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     return strongest;
   }
 
+  function explicitlyReferencesOlderMaterials(value) {
+    const text = normalizeText(value).toLocaleLowerCase('en-US');
+    if (!text) return false;
+    const material = String.raw`(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)`;
+    const action = String.raw`(?:compare|review|analy[sz]e|summari[sz]e|use|open|read|explain)`;
+    return [
+      new RegExp(String.raw`^${action}\s+(?:all|every)\s+(?:the\s+)?(?:(?:uploaded|attached|provided|shared)\s+)?${material}(?:\s+(?:so\s+far|above|earlier|previously|(?:from|in)\s+(?:this|the|our|whole|entire|full)\s+(?:chat|conversation|thread)|(?:i|we|you)\s+(?:uploaded|attached|provided|shared)(?:\s+(?:here|above))?))?[?.!]*$`, 'iu'),
+      new RegExp(String.raw`^${action}\s+(?:the\s+)?(?:first|earliest|oldest|original)\s+(?:uploaded\s+)?${material}(?:\s+(?:here|above|in\s+(?:this|the|our)\s+(?:chat|conversation|thread)))?[?.!]*$`, 'iu'),
+      new RegExp(String.raw`^compare\s+(?:the\s+)?first\s+and\s+last\s+${material}[?.!]*$`, 'iu'),
+      new RegExp(String.raw`^what\s+was\s+in\s+(?:the\s+)?(?:first|earliest|oldest|original)\s+(?:uploaded|attached|provided|shared)\s+${material}[?.!]*$`, 'iu'),
+      new RegExp(String.raw`\b(?:first|earliest|oldest|original)\s+${material}\s+(?:i|we|you)\s+(?:uploaded|attached|provided|shared)\b`, 'iu'),
+      new RegExp(String.raw`^${action}\b.{0,80}\b(?:earlier|previous|older)\s+${material}[?.!]*$`, 'iu'),
+      new RegExp(String.raw`^${action}\b.{0,80}\b${material}\s+from\s+(?:the\s+)?(?:whole|entire|full)\s+(?:chat|conversation|thread)[?.!]*$`, 'iu'),
+    ].some((pattern) => pattern.test(text));
+  }
+
+  function explicitlyReferencesOlderConversation(value) {
+    const text = normalizeText(value).toLocaleLowerCase('en-US')
+      .replace(/[“"][^”"\n]{0,500}[”"]/gu, ' quoted text ')
+      .replace(/‘[^’\n]{0,500}’/gu, ' quoted text ')
+      .replace(/`[^`\n]{0,500}`/gu, ' quoted text ');
+    if (!text) return false;
+    if (explicitlyReferencesOlderMaterials(text)) return true;
+    return [
+      /\b(?:go|look|refer|return)(?:ing)?\s+back\s+to\s+(?:the\s+)?(?:message|turn)\s*(?:#|number\s*)?\d+\b/iu,
+      /\b(?:message|turn)\s*(?:#|number\s*)?\d+\s+(?:from|in)\s+(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
+      /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?:messages?|turns?|questions?|requests?|tasks?|prompts?)\s+(?:ago|back)\b/iu,
+      /\b(?:go|look|refer|return)(?:ing)?\s+back\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?:messages?|turns?|questions?|requests?|tasks?|prompts?)\b/iu,
+      /\b(?:go|look|refer|return)(?:ing)?\s+back(?:\s+to)?\s+(?:the\s+)?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:message|turn|question|request|task|prompt)\b/iu,
+      /\b(?:continue|finish|resume|use|revisit|return\s+to)\s+(?:(?:the|our)\s+)?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:message|turn|question|request|task|prompt)\b/iu,
+      /\b(?:our|your|my)\s+(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|earliest|original)\s+(?:message|turn|question|request|task|prompt|answer|response)\b/iu,
+      /\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:message|turn|question|request|task|prompt)\s+(?:from|in)\s+(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
+      /\b(?:message|turn|question|request|task|prompt)\s+(?:right\s+)?before\s+(?:the\s+)?last\b/iu,
+      /\b(?:message|question|request|task|prompt|answer|response|instructions?|discussion|work|proof)\s+(?:from|at)\s+the\s+(?:very\s+)?beginning\b/iu,
+      /\b(?:from|since|at|near)\s+the\s+(?:very\s+)?(?:start|beginning|top)\s+of\s+(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
+      /\b(?:continue|finish|resume|use|apply|repeat|revisit|return\s+to)\s+(?:(?:the|that|our|your)\s+)?(?:message|question|request|task|prompt|answer|response|instructions?|work|proof|problem)\b.{0,80}\b(?:at|from)\s+the\s+(?:very\s+)?(?:start|beginning)\b/iu,
+      /\b(?:earlier|previously|before)\s+in\s+(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
+      /\b(?:continue|finish|resume|use|revisit|return\s+to|go\s+back\s+to)\s+(?:(?:the|that|our)\s+)?(?:earlier|previous|prior|old)\s+(?:task|request|problem|question|prompt|instructions?|work|discussion|approach|method)\b/iu,
+      /\b(?:continue|finish|resume)\s+what\s+(?:we|you)\s+(?:were|was)\s+(?:doing|working\s+on|discussing)\s+before\b/iu,
+      /\b(?:way|much|far)\s+(?:back|earlier)\s+in\s+(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
+      /\b(?:our|this|the\s+current|current)\s+(?:whole|entire|full)\s+(?:chat|conversation|thread|discussion|history)\b/iu,
+      /\b(?:summari[sz]e|review|use|consider|recap|continue\s+using|look\s+at|read|based\s+on)\b.{0,80}\b(?:(?:our|this|the|the\s+current|current)\s+)?(?:whole|entire|full)\s+(?:chat|conversation|thread|discussion|history|context)\b/iu,
+      /\b(?:summari[sz]e|review|use|consider|recap|continue\s+using|look\s+at|read)\b.{0,80}\b(?:our|this|the|current)\s+(?:chat|conversation|thread|discussion)\s+history\b/iu,
+      /\b(?:everything|all)\s+(?:(?:that\s+)?(?:we|you)\s+)?(?:have\s+)?(?:discussed|said|written|covered|done|decided|used)\s*(?:so\s+far|above|earlier)?\b/iu,
+      /\b(?:use|consider|review|summari[sz]e|recap|continue\s+using|based\s+on)\b.{0,80}\b(?:everything|all)\s+(?:above|earlier|so\s+far|previous\s+messages?)\b/iu,
+      /\b(?:all|every)\s+(?:earlier|previous|prior)\s+(?:messages?|turns?|questions?|requests?|answers?|responses?)\b/iu,
+      /\b(?:recap|summary|review)\s+(?:of\s+)?(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
+    ].some((pattern) => pattern.test(text));
+  }
+
   function classifyPrompt(value, context = {}) {
     const raw = String(value == null ? '' : value);
     const override = parseRouteOverride(raw);
@@ -1710,6 +1920,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     const topicResetMatch = originalNormalized.match(/^(?:(?:new|unrelated|separate)\s+(?:question|topic)|changing\s+(?:the\s+)?(?:question|topics?)|on\s+(?:an?\s+)?unrelated\s+note)\s*[.:,;!?—–-]\s*(.+)$/iu);
     const normalized = normalizeText(topicResetMatch ? topicResetMatch[1] : originalNormalized);
     const topicReset = Boolean(topicResetMatch);
+    const olderMaterialLongRangeReference = !topicReset && explicitlyReferencesOlderMaterials(normalized);
+    const longRangeContextReference = !topicReset && explicitlyReferencesOlderConversation(raw);
+    const wholeConversationReference = !topicReset && /\b(?:(?:our|this|the\s+current|current)\s+(?:whole|entire|full)\s+(?:chat|conversation|thread|discussion|history)|(?:summari[sz]e|review|use|consider|recap|continue\s+using|look\s+at|read|based\s+on)\b.{0,80}\b(?:(?:our|this|the|the\s+current|current)\s+)?(?:whole|entire|full)\s+(?:chat|conversation|thread|discussion|history|context)|(?:summari[sz]e|review|use|consider|recap|continue\s+using|look\s+at|read)\b.{0,80}\b(?:our|this|the|current)\s+(?:chat|conversation|thread|discussion)\s+history|(?:everything|all)\s+(?:(?:that\s+)?(?:we|you)\s+)?(?:have\s+)?(?:discussed|said|written|covered|done|decided|used)|(?:recap|summary|review)\s+(?:of\s+)?(?:this|the|our)\s+(?:chat|conversation|thread|discussion))\b/iu.test(originalNormalized);
     const currentAttachments = normalizeAttachmentProfile(context);
     const historicalAttachments = context.historicalAttachmentProfile && typeof context.historicalAttachmentProfile === 'object'
       ? buildAttachmentProfile(context.historicalAttachmentProfile.items || [], context.historicalAttachmentProfile.count)
@@ -1718,13 +1931,18 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       ? buildAttachmentProfile(context.archivedAttachmentProfile.items || [], context.archivedAttachmentProfile.count)
       : buildAttachmentProfile();
     const hasPriorConversation = context.hasPriorConversation === true || Boolean(
-      context.previousLevel || context.conversationLevel || context.assistantContextLevel,
-    );
+      context.previousLevel || context.conversationLevel || context.assistantContextLevel || context.awaitingConfirmation,
+    ) || historicalAttachments.count > 0 || archivedAttachments.count > 0;
     const previousLevel = strongerRouteLevel(
       context.previousLevel,
       context.conversationLevel,
       context.assistantContextLevel,
+      longRangeContextReference && (!olderMaterialLongRangeReference || wholeConversationReference)
+        ? context.archivedConversationLevel
+        : '',
     );
+    const archivedMeaningfulTurnCount = clampInteger(context.archivedMeaningfulTurnCount, 0, 0, 100_000);
+    const archivedSampledTextLength = clampInteger(context.archivedSampledTextLength, 0, 0, 100_000_000);
     if (!normalized && currentAttachments.count === 0) {
       return { target: 'instant', score: 0, confidence: 0.94, explicit: false, reasons: ['empty prompt'] };
     }
@@ -1754,13 +1972,18 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     let formalReasoning = false;
     let longHorizon = false;
     let expertWork = false;
+    let longRangeMinimumLevel = '';
     const behaviorPreservation = /\bwithout\s+changing\s+(?:behavior|behaviour|semantics|output)\b|\bpreserve\s+(?:the\s+)?(?:exact\s+)?(?:behavior|behaviour|semantics|output)\b/iu.test(sampleLower);
-    const answerVerification = requiresAnswerVerification(raw);
+    const answerVerification = requiresAnswerVerification(raw, context);
 
-    const acknowledgment = /^(?:thanks?(?: you)?|thank you|ok(?:ay)?|got it|cool|great|yes|no|hello|hi|hey|bye)[.!\s]*$/iu;
+    const acknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
+    const affirmativeConfirmation = !topicReset && context.awaitingConfirmation === true && (
+      /^(?:(?:yes|yeah|yep|okay|ok|sure|absolutely|definitely|of\s+course)(?:\s+thing)?(?:[,;:]?\s+(?:please|do\s+(?:it|that)|go\s+ahead|continue|proceed))?|please|go\s+ahead|do\s+it|sounds\s+good(?:\s+to\s+me)?|that\s+works)[?.!\s]*$/iu.test(lower) ||
+      /^(?:(?:yes|yeah|yep|okay|ok|sure|absolutely|definitely|of\s+course)(?:\s+thing)?|go\s+ahead)(?:\s*[,;:]\s*|\s+(?:and|but)\s+)(?:(?:and|but)\s+)?\S.+$/iu.test(lower)
+    );
     const simpleTransform = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:make|rewrite|rephrase|paraphrase|proofread|shorten|summari[sz]e|translate|format|spell|capitalize|lowercase|edit)\b.{0,160}$/iu;
     const compoundReasoning = /\b(?:and|but|then|also)\b.{0,100}\b(?:analy[sz]e|assess|evaluate|verify|validate|confirm|check|compare|recommend|justify|explain|flag|identify|find|solve|decide|detect|review|calculate|ensure|audit|inspect|test|tell)\b|\b(?:weakness(?:es)?|risks?|risky|dangerous|secure|security|thread[\s-]?safe|injection|vulnerabilit\w*|trade-?offs?|edge cases?|hidden assumptions?|better|more accurate|riemann hypothesis|p\s+(?:versus|vs\.?)\s+np)\b|\bwithout\s+changing\s+(?:behavior|behaviour|semantics|output)\b|^(?:please\s+)?make\s+sure\b|^(?:please\s+)?make\s+(?:a|an)\s+(?:plan|strategy|argument|recommendation|decision)\b/iu;
-    const continuation = /^(?:why(?:\s+(?:not|though))?|how(?:\s+(?:so|exactly|did\s+you\s+know))?|what\s+do\s+you\s+mean|i(?:['’]m|\s+am)\s+(?:lost|confused)|(?:i\s+)?(?:still\s+)?(?:(?:do\s+not|don['’]?t)\s+(?:follow|understand|get\s+it))|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:elaborate(?:\s+(?:more|on\s+that))?|go\s+deeper|clarify|show\s+(?:me\s+)?the\s+steps)|clarify\s+that|say\s+that\s+another\s+way|put\s+that\s+differently|break\s+that\s+down|go\s+(?:over\s+that\s+again|through\s+it\s+once\s+more)|expand\s+on\s+that|explain\s+(?:further|why|your\s+reasoning)|show\s+your\s+work|walk\s+me\s+through\s+your\s+logic|continue(?: and (?:finish|complete) it)?|continue\s+from\s+there|go on|fix (?:that|it)|try again|prove (?:it|that)|finish (?:that|it)|run\s+through\s+that\s+again|walk\s+me\s+through\s+it\s+again|where\s+did\s+that\s+come\s+from|source\s+for\s+that|cite\s+that|recalculate (?:that|this|it)|re[\s-]?evaluate (?:the\s+)?(?:answer|result|that|this|it)|check your logic|your answer and mine disagree|(?:do\s+not|don['’]?t)\s+make\s+mistakes|answer\s+carefully)[?.!]*$/iu;
+    const continuation = /^(?:why(?:\s+(?:not|though))?|how(?:\s+(?:so|exactly|did\s+you\s+know))?|really|seriously|correct|right|wrong|sources?|evidence|proof|examples?|meaning|where\s+did\s+you\s+get\s+that|what\s+do\s+you\s+mean|i(?:['’]m|\s+am)\s+(?:lost|confused)|(?:i\s+)?(?:still\s+)?(?:(?:do\s+not|don['’]?t)\s+(?:follow|understand|get\s+it))|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:elaborate(?:\s+(?:more|on\s+that))?|go\s+deeper|clarify|show\s+(?:me\s+)?the\s+steps)|clarify\s+that|say\s+that\s+another\s+way|put\s+that\s+differently|break\s+that\s+down|go\s+(?:over\s+that\s+again|through\s+it\s+once\s+more)|expand\s+on\s+that|explain\s+(?:further|why|your\s+reasoning)|show\s+your\s+work|walk\s+me\s+through\s+your\s+logic|continue(?: and (?:finish|complete) it)?|continue\s+from\s+there|go on|fix (?:that|it)|try again|prove (?:it|that)|finish (?:that|it)|run\s+through\s+that\s+again|walk\s+me\s+through\s+it\s+again|where\s+did\s+that\s+come\s+from|source\s+for\s+that|cite\s+that|recalculate (?:that|this|it)|re[\s-]?evaluate (?:the\s+)?(?:answer|result|that|this|it)|check your logic|your answer and mine disagree|(?:do\s+not|don['’]?t)\s+make\s+mistakes|answer\s+carefully)[?.!]*$/iu;
     const simpleFact = /^(?:(?:define\s+[\p{L}\p{N}'’.-]+(?:\s+[\p{L}\p{N}'’.-]+){0,3}|what\s+(?:color\s+is|(?:planet|country|city|animal|element|number|day|month|year)\s+is|is\s+the\s+(?:capital|largest|smallest|tallest|longest)\b)\s*.{1,80}|how\s+(?:many|much|long|far|old)\b.{1,100}|who\s+(?:wrote|created|invented|painted|discovered)\s+.{1,100}|when\s+did\s+.{1,100}\s+(?:end|begin|start|happen|occur)|where\s+is\s+.{1,100})|(?:define|explain|what(?:['’]s|\s+(?:is|are)))\b.{1,120}\b(?:in simple terms|in one sentence)|what\s+does\b.{0,140}\bmean)[?.!]*$/iu;
     const simpleMath = /^(?:what is|calculate|compute)?\s*[\d\s()+\-*/^%.=]+\??$/iu;
     const simpleAdministrative = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:confirm\s+(?:the\s+)?proof\s+of\s+delivery|confirm\s+(?:that\s+)?(?:(?:the|my|your|our|their)\s+)?email\s+address|(?:is|are)\s+(?:this|that|these|those)\s+correct\s+(?:spelling|spellings|grammar|wording|words?)|(?:(?:check|recheck|double[\s-]?check|verify|confirm|validate)\b|tell\s+me\s+(?:whether|if)\b).{0,100}\b(?:weather|temperature|email|inbox|work email|phone number|shipping address|address|appointment time|meeting time|meeting room|booking time|train time|train schedule|bus schedule|booking date|date|coupon code|username|password|file path|file name|solution file|url|link|sentence|translation|reservation|spelling|word|capitalization|verb tense|door|grocery list|customer name|order status|calendar|menu|paragraph|box)\b)\b/iu;
@@ -1778,36 +2001,34 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       .replace(/[“"][^”"\n]{0,500}[”"]/gu, ' quoted text ')
       .replace(/‘[^’\n]{0,500}’/gu, ' quoted text ')
       .replace(/`[^`\n]{0,500}`/gu, ' quoted text ');
-    const contextualReference = /\b(?:this|that|them|their|these|those|above|earlier|previous|same|again)\b|\b(?:first|second|third|last|next|previous|other)\s+(?:step|part|point|example|sentence|bullet|item|message|option|answer|result|paragraph|section|equation|formula|file|document|image|table|chart|one)\b/iu;
+    const contextualReference = /\b(?:this|that|them|their|these|those)\b|\b(?:first|second|third|last|next|previous|other)\s+(?:step|part|point|example|sentence|bullet|item|message|option|answer|result|paragraph|section|equation|formula|file|document|image|table|chart|one)\b/iu;
     const contextualLead = /^(?:(?:can|could|would|will|do|does|did|is|are|should)\b|(?:please\s+)?(?:explain|check|verify|review|fix|help|compare|continue|finish|redo|retry|try|solve|show|tell|change)\b|(?:what|why|how|which)\b)/iu;
     const simpleUiAction = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:check|uncheck|select|click|tick|press|open|close|copy|confirm)\s+(?:(?:this|that|the)\s+)?(?:[\p{L}\p{N}_-]+\s+){0,2}(?:box|checkbox|button|option|setting|link|dialog|text|menu)|check\s+(?:if|whether)\s+(?:this|that|it)\s+is\s+(?:the\s+)?(?:(?:right|left)\s+)?(?:button|option|link)|confirm\s+(?:this|that|the)?\s*email)\b/iu;
     const metalinguisticVerification = /^what does\b.{0,160}\b(?:verify|verification|check|confirm|answer)\b.{0,160}\bmean\b/iu.test(lower);
     const routineOperationalCheck = /\bproof\s+of\s+concept\b.{0,60}\b(?:builds?|runs?|works?)\b/iu.test(lower);
     const implicitContextFollowUp = /^(?:(?:what\s+(?:should\s+i\s+(?:do|change\s+here)|do\s+(?:i|we)\s+do\s+now|now|next)|(?:now|then)\s+what|(?:okay[,]?\s+)?(?:so\s+)?then\s+what|so\s+what\s+now|and\s+then|where\s+do\s+we\s+go\s+from\s+here)|which\s+one|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:explain\s+more|do\s+the\s+next\s+one|continue\s+from\s+there)|(?:please\s+)?try\s+(?:a\s+)?different\s+approach|your answer and mine disagree)[?.!]*$/iu;
     const genericCheckFollowUp = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:check|verify|review)(?:\s+(?:this|that|it|again|once\s+more|(?:my|your|the)\s+(?:answer|result|solution|calculation|reasoning|work|proof)))?|recheck(?:\s+(?:this|that|it))?|double[\s-]?check(?:\s+(?:this|that|it))?)[?.!]*$/iu;
-    const explicitContextTask = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:improve|show|summari[sz]e|translate|rewrite|rephrase|shorten|format|simplify|continue|finish|apply|use|reuse|calculate|recalculate|solve|check|verify|explain|review|fix|change|compare)\b.{0,120}\b(?:this|that|it|them|these|those|above|earlier|previous|same|answer|response|result|solution|code|proof|reasoning|matrix|equation|formula|fix|assumptions?|approach|function)\b/iu;
+    const explicitContextTask = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:improve|show|summari[sz]e|translate|rewrite|rephrase|shorten|format|simplify|continue|finish|apply|use|reuse|calculate|recalculate|solve|check|verify|explain|review|fix|change|compare)\b.{0,120}\b(?:this|that|it|them|these|those|answer|response|result|solution|code|proof|reasoning|matrix|equation|formula|fix|assumptions?|approach|function)\b/iu;
     const contextualRevision = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?make\s+(?:this|that|it)\s+(?:better|clearer|shorter|simpler|more\s+(?:accurate|concise|formal|detailed|readable))[?.!]*$/iu;
     // Indexed references must be phrased as an action/question. A bare “line
     // 4” or “Part B” may be a bus route or a product name.
     const indexedContextTask = /^(?:(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:explain|review|check|verify|solve|do|continue|redo|show|use|apply|change|fix)\b.{0,80}\b(?:(?:line|paragraph|section|step|part|equation|formula|figure|table|chart|option|answer|result)\s*(?:number\s*)?(?:[a-z]|\d+|one|two|three|four|five|first|second|third|fourth|fifth)|(?:first|second|third|fourth|fifth|last|next|previous)\s+(?:line|paragraph|section|step|part|equation|formula|figure|table|chart|option|answer|result))|(?:does?|is|are)\s+(?:the\s+)?(?:equation|formula|step|result|answer)\s*(?:number\s*)?(?:[a-z]|\d+)\s+(?:still\s+)?(?:hold|work|apply|change|correct|valid|true|false)\b|what\s+does\s+the\s+(?:(?:first|second|third|fourth|fifth|last|next|previous)\s+(?:line|paragraph|section|step|equation|formula|figure|table|chart|option|answer|result)|(?:line|paragraph|section|step|equation|formula|figure|table|chart|option|answer|result)\s*(?:number\s*)?(?:[a-z]|\d+))\s+mean\b|(?:what|how)\s+about\s+(?:part|option)\s+[a-z0-9]+)\b/iu;
-    const definiteContextObject = /\b(?:that|this|those|these)\s+(?:answer|response|result|solution|calculation|proof|reasoning|code|function|error|fix|approach|assumptions?|equation|formula|matrix|attachments?|files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?|paragraph|section|step)\b|\bthe\s+(?:answer(?!\s+key\b)|response|result|solution|calculation|reasoning|error|fix|approach|assumptions?|equation|formula|paragraph|section|step)\b/iu;
-    const namedMaterialReference = /\b(?:(?:attached|uploaded|earlier|previous|this|that)\s+(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)|the\s+(?:attachments?|uploads?|attached|uploaded|earlier|previous)\s+(?:attachments?|files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)?|(?:open|read|review|analy[sz]e|use|using|summari[sz]e|explain|check|verify|compare|from)\s+(?:the|this|that|those|these|attached|uploaded|earlier|previous)\s+(?:files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)|what\s+do(?:es)?\s+(?:the|this|that|these|those)\s+(?:files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)\s+(?:say|show|contain|mean))\b/iu;
+    const definiteContextObject = /\b(?:that|this|those|these)\s+(?:answer|response|result|solution|calculation|proof|reasoning|code|function|error|fix|approach|assumptions?|equation|formula|matrix|attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?|paragraph|section|step)\b|\bthe\s+(?:answer(?!\s+key\b)|response|result|solution|calculation|reasoning|error|fix|approach|assumptions?|equation|formula|paragraph|section|step)\b/iu;
+    const namedMaterialReference = /\b(?:(?:attached|uploaded|earlier|previous|this|that)\s+(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)|the\s+(?:(?:attached|uploaded|earlier|previous)\s+)?(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)|(?:open|read|review|analy[sz]e|use|using|summari[sz]e|explain|check|verify|compare|from)\s+(?:the|this|that|those|these|attached|uploaded|earlier|previous)\s+(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)|what\s+do(?:es)?\s+(?:the|this|that|these|those)\s+(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)\s+(?:say|show|contain|mean))\b/iu;
     const genericMaterialCompound = /\b(?:attachment\s+theory|file\s+system|document\s+object\s+model|table\s+of\s+contents|image\s+sensor|spreadsheet\s+software)\b/iu;
+    const literalQuotedTextTransform = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:rewrite|rephrase|paraphrase|proofread|shorten|summari[sz]e|translate|format|spell|capitalize|lowercase|edit)\s+(?:the\s+)?(?:text|phrase|word|name|filename|file\s+name|string|sentence)\b/iu.test(lower);
+    const filenameProbe = literalQuotedTextTransform ? contextProbe : lower;
     const filenameMentioned = (name) => {
       if (!name || name.length < 3) return false;
       const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-      return new RegExp(`(?:^|[^\\p{L}\\p{N}_.-])${escaped}(?=$|[^\\p{L}\\p{N}_.-])`, 'iu').test(lower);
+      return new RegExp(`(?:^|[^\\p{L}\\p{N}_.-])${escaped}(?=$|[^\\p{L}\\p{N}_.-]|\\.(?=\\s|$))`, 'iu').test(filenameProbe);
     };
-    const exactFilenameAllowed = !safeSimpleTransform ||
-      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:open|read|review|analy[sz]e|use|summari[sz]e|compare|check|verify)\b/iu.test(contextProbe);
-    const matchingKnownAttachments = exactFilenameAllowed
-      ? combineAttachmentProfiles(
-        buildAttachmentProfile(historicalAttachments.items.filter((item) => filenameMentioned(lowerText(item.name)))),
-        buildAttachmentProfile(archivedAttachments.items.filter((item) => filenameMentioned(lowerText(item.name)))),
-      )
-      : buildAttachmentProfile();
+    const matchingKnownAttachments = combineAttachmentProfiles(
+      buildAttachmentProfile(historicalAttachments.items.filter((item) => filenameMentioned(lowerText(item.name)))),
+      buildAttachmentProfile(archivedAttachments.items.filter((item) => filenameMentioned(lowerText(item.name)))),
+    );
     const mentionsKnownAttachment = matchingKnownAttachments.count > 0;
-    const explicitOlderMaterialReference = /\b(?:earlier|previous|older|original)\s+(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)\b/iu.test(contextProbe);
+    const explicitOlderMaterialReference = explicitlyReferencesOlderMaterials(contextProbe);
     const explicitPriorWorkReference = [
       /\b(?:previous|earlier|prior|above|last)\s+(?:answers?|responses?|results?|solutions?|calculations?|proofs?|reasoning|code|formulas?|equations?|work|analysis|approaches?|steps?|questions?|instructions?|explanations?|messages?|discussion|context)\b/iu,
       /\b(?:answers?|responses?|results?|solutions?|calculations?|proofs?|reasoning|code|formulas?|equations?|work|analysis|approaches?|steps?|questions?|instructions?|explanations?|messages?)\s+(?:above|earlier|previously|from\s+before)\b/iu,
@@ -1819,10 +2040,40 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     const materialContextReference = namedMaterialReference.test(contextProbe) && !genericMaterialCompound.test(contextProbe) ||
       mentionsKnownAttachment;
     const currentMaterialReference = currentAttachments.count > 0 &&
-      /\b(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|images?|screenshots?|diagrams?|tables?|charts?)\b/iu.test(contextProbe);
+      /\b(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)\b/iu.test(contextProbe);
     const startsCurrentAttachmentTask = currentMaterialReference &&
       !mentionsKnownAttachment && !explicitOlderMaterialReference && !explicitPriorWorkReference;
+    const externalOrdinalTopic = /\b(?:the\s+)?(?:first|second|third|fourth|fifth|last|next|previous)\s+(?:file|document|image|table|step|section|paragraph|line|part|question|example|formula|equation|version)\s+(?:of|in|on|for)\s+(?!(?:this|that|these|those|our|your|previous|earlier|above)\b)|\b(?:the\s+)?(?:first|earliest|oldest|original)\s+(?:image\s+sensor|spreadsheet\s+format|pdf\s+specification)\b/iu.test(contextProbe);
     const ellipticalFollowUp = hasPriorConversation && wordCount <= 40 && [
+      /^(?:same(?:\s+(?:thing|approach|method|format|style|analysis|calculation|proof|code))?\s+(?:but|for|with|using|on)\b|same[?.!]*$)/iu,
+      /^(?:this|that)\s+one\s+too[?.!]*$/iu,
+      /^repeat\s+(?:it|this|that|the\s+same|for|with|using)\b/iu,
+      /^based\s+on\s+(?:the\s+)?(?:above|earlier|previous|prior)\b/iu,
+      /^refactor\b.{0,120}\b(?:it|this|that|the\s+same\s+way|same\s+way)\b/iu,
+      /^(?:actually\s*[,;:]?\s*)?(?:do|write|make|implement|convert|rewrite|refactor)\s+(?:it|this|that)\s+(?:in|with|using)\b/iu,
+      /^(?:use|in|with)\s+(?:python|typescript|javascript|java|rust|c\+\+|c#|go|ruby|swift|kotlin|sql|comments?|type hints?|tests?|examples?)\b[?.!]*$/iu,
+      /^(?:add|include)\s+(?:error handling|comments?|type hints?|tests?|logging|validation|citations?|examples?)\b[?.!]*$/iu,
+      /^(?:try|use)\s+(?:the\s+)?(?:other|second|different|alternative)\s+(?:method|approach|way|option|one)\b[?.!]*$/iu,
+      /^(?:the\s+)?(?:first|second|third|fourth|fifth|last|next|other)\s+one[?.!]*$/iu,
+      /^(?:part|step|section|question)\s*(?:number\s*)?(?:[a-z]|\d+)\s*(?:please)?[?.!]*$/iu,
+      /^(?:be\s+more\s+(?:specific|detailed|concise|clear|rigorous)|(?:one|another)\s+more\s+example|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:expand|elaborate))(?:\s+(?:more|on\s+it))?[?.!]*$/iu,
+      /^(?:(?:make\s+it\s+)?(?:shorter|longer|simpler|clearer|faster|slower|formal|casual|professional|more\s+(?:concise|formal|casual|specific|detailed|rigorous)|less\s+(?:formal|technical|verbose))|(?:more|less)\s+(?:detail|detailed|concise|formal|technical|verbose)|(?:formal|casual|professional)\s+tone)(?:\s+please)?[?.!]*$/iu,
+      /^(?:again|how\s+come|next|keep\s+going|try\s+(?:it\s+)?once\s+more|step[\s-]+by[\s-]+step|in\s+simpler\s+terms|one\s+more|more\s+examples?)(?:\s+please)?[?.!]*$/iu,
+      /^(?:now\s+)?(?:(?:with|without|using)\s+(?:comments?|tests?|examples?|citations?|type\s+hints?|error\s+handling|logging|validation)|no\s+(?:comments?|tests?|examples?|citations?))(?:\s+please)?[?.!]*$/iu,
+      /^(?:(?:use|as)\s+(?:bullets?|a\s+(?:table|list)|markdown)|only\s+show\s+(?:me\s+)?(?:the\s+)?(?:code|answer|result|steps?))(?:\s+please)?[?.!]*$/iu,
+      /^(?:do\s+it\s+)?(?:the\s+)?other\s+(?:way|method|approach|format|style)(?:\s+please)?[?.!]*$/iu,
+      /^(?:fix|correct)\s+(?:the\s+)?(?:errors?|mistakes?|bugs?)|^remove\s+(?:the\s+)?(?:errors?|mistakes?|bugs?|comments?|tests?|examples?|citations?)(?:\s+please)?[?.!]*$/iu,
+      /^(?:do|finish|complete)\s+(?:the\s+)?rest(?:\s+please)?[?.!]*$/iu,
+      /^same\s+thing(?:\s+please)?[?.!]*$/iu,
+      /^(?:please\s+)?(?:do|write|create|generate|draft|try|redo|run|test|deploy|compile|execute|debug|optimi[sz]e|document|lint|implement|build|complete|secure|benchmark|profile|ship|analy[sz]e|inspect|read|audit|open|process)\s+(?:it|them|this|that)\b.{0,80}[?.!]*$/iu,
+      /^(?:please\s+)?make\s+(?:it|them|this|that)(?:\s+please)?[?.!]*$/iu,
+      /^(?:what\s+(?:does|did)\s+it\s+say|what\s+is\s+(?:in|inside)\s+it|(?:does|did)\s+it\s+mention\b.{1,80}|where\s+does\s+it\s+mention\b.{1,80}|find\b.{1,80}\bin\s+it|search\s+it\s+for\b.{1,80}|extract\b.{1,80}\bfrom\s+it|list\s+what\s+is\s+in\s+it|tell\s+me\s+what\s+it\s+says)[?.!]*$/iu,
+      /^(?:proceed|go\s+ahead|go\s+for\s+it|please\s+do|yes\s+please|yes[,]?\s+do\s+(?:it|that)|(?:okay|ok|sure|sounds\s+good)[,;:]?\s+do\s+it|carry\s+on|let['’]?s\s+do\s+it)[?.!]*$/iu,
+      /^(?:whatever\s+you\s+think\s+is\s+best|choose\s+for\s+me|pick\s+(?:one|for\s+me)|you\s+decide|which\s+one\s+do\s+you\s+recommend|what\s+do\s+you\s+recommend|what\s+would\s+you\s+do|use\s+your\s+best\s+judg(?:e)?ment)[?.!]*$/iu,
+      /^no[,;:]?\s+(?:use|do|pick|choose|try|make|write|create|run|apply)\b.{1,100}[?.!]*$/iu,
+      /^(?:pick|choose|use|do|try)\s+(?:the\s+)?(?:first|second|third|other|next|previous|alternative)\s+(?:one|option|method|approach|version|choice)(?:\s+instead)?[?.!]*$/iu,
+      /^(?:use|try|choose|pick)\s+[\p{L}\p{N}+#.-]+\s+instead[?.!]*$/iu,
+      /^(?:tell\s+me\s+more|more\s+please|details|why\s+exactly|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?be\s+clearer|i\s+(?:am|['’]m)\s+still\s+confused)[?.!]*$/iu,
       /^(?:(?:using|based on)\s+(?:this|that|these|those)\b|(?:now|then)\s+(?:solve|calculate|find|derive|evaluate|simplify|substitute|continue|do)\b)/iu,
       /^(?:what\s+(?:happens?\s+when|if|about)|does\s+(?:this|that)\s+change\s+if)\s+[a-z](?:\s*(?:=|==|≠|!=|<=|>=|<|>)\s*[-+]?\w+(?:\.\w+)?|\s+is\s+(?:positive|negative|zero|null|true|false))\b/iu,
       /^(?:so|then)\s+(?:is|are|does?)\s+[a-z]\s+(?:positive|negative|zero|null|true|false)\b/iu,
@@ -1840,10 +2091,12 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       /^(?:(?:what|how)\s+about\b.{1,120}|what\s+if\b.{1,120}|and\b.{1,120})[?.!]*$/iu,
       /^(?:(?:does|will|would|can|could)\s+it\s+work\b.{0,100}|should\s+i\s+(?:sign|take|use|keep|remove)\s+it\b.{0,100}|can\s+i\s+(?:deploy|take|use|move|delete|send)\s+it\b.{0,100}|where\s+should\s+i\s+(?:put|place|save|store)\s+it\b.{0,100}|what\s+should\s+i\s+do\s+with\s+it\b.{0,100}|what\s+is\s+it|how\s+does\s+it\s+work|why\s+is\s+it\s+(?:wrong|incorrect)|what\s+about\s+it)[?.!]*$/iu,
     ].some((pattern) => pattern.test(contextProbe));
-    const contextDependent = !topicReset && (
+    const contextDependent = mentionsKnownAttachment || explicitOlderMaterialReference || affirmativeConfirmation || !topicReset && (
+      longRangeContextReference ||
       continuation.test(contextProbe) || implicitContextFollowUp.test(contextProbe) || genericCheckFollowUp.test(contextProbe) ||
-      explicitContextTask.test(contextProbe) || contextualRevision.test(contextProbe) || indexedContextTask.test(contextProbe) || definiteContextObject.test(contextProbe) ||
-      materialContextReference || ellipticalFollowUp || contextualReference.test(contextProbe) && contextualLead.test(contextProbe) ||
+      !externalOrdinalTopic && (explicitContextTask.test(contextProbe) || indexedContextTask.test(contextProbe) || definiteContextObject.test(contextProbe)) ||
+      contextualRevision.test(contextProbe) || materialContextReference || ellipticalFollowUp ||
+      !externalOrdinalTopic && contextualReference.test(contextProbe) && contextualLead.test(contextProbe) ||
       /^(?:now\s+)?(?:apply|use)\s+(?:that|this|the\s+same)\b|^(?:now\s+)?calculate\s+(?:it|that|this)\b|\b(?:its|their)\s+(?:determinant|value|meaning|effect|result|output)\b/iu.test(contextProbe)
     );
     const contextualTransform = contextDependent && (
@@ -1869,6 +2122,15 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       score = Math.max(score, 40);
       reasons.push('verify a supplied answer before explaining');
       strongGroups.add('supplied-answer verification');
+    }
+
+    if (longRangeContextReference && (archivedMeaningfulTurnCount >= 20 || archivedSampledTextLength >= 20_000)) {
+      longRangeMinimumLevel = archivedMeaningfulTurnCount >= 80 || archivedSampledTextLength >= 80_000
+        ? 'extra-high'
+        : 'high';
+      score = Math.max(score, longRangeMinimumLevel === 'extra-high' ? 62 : 44);
+      strongGroups.add('large whole-conversation context');
+      reasons.push('large whole-conversation context');
     }
 
     const attachmentCount = currentAttachments.count;
@@ -1937,7 +2199,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       }
     }
 
-    let contextualMinimumLevel = attachmentMinimumLevel;
+    let contextualMinimumLevel = strongerRouteLevel(attachmentMinimumLevel, longRangeMinimumLevel);
     let inheritedContext = false;
     const useConversationContext = contextDependent && !metalinguisticVerification &&
       !simpleAdministrative.test(lower) && !simpleUiAction.test(lower) &&
@@ -1946,11 +2208,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       const baseMinimum = answerVerification ? 'high'
         : continuation.test(lower) && !hasPriorConversation ? 'high'
           : 'medium';
-      let inheritedLevel = previousLevel;
-      if (contextualTransform && modelLevelRank(inheritedLevel) > ROUTE_LEVEL_RANK.high) inheritedLevel = 'high';
+      let inheritedLevel = topicReset ? '' : previousLevel;
+      if (contextualTransform && !wholeConversationReference && modelLevelRank(inheritedLevel) > ROUTE_LEVEL_RANK.high) inheritedLevel = 'high';
       const contextFloor = strongerRouteLevel(baseMinimum, inheritedLevel);
       contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, contextFloor);
-      inheritedContext = Boolean(previousLevel && hasPriorConversation);
+      inheritedContext = Boolean(!topicReset && previousLevel && hasPriorConversation);
       score = Math.max(score, answerVerification || continuation.test(lower) && !hasPriorConversation ? 40 : 24);
       reasons.push(answerVerification
         ? 'recheck the previous answer at High or above'
@@ -1958,7 +2220,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
       let historical = historicalAttachments;
       if (mentionsKnownAttachment) historical = matchingKnownAttachments;
-      else if (explicitOlderMaterialReference) {
+      else if (explicitOlderMaterialReference || wholeConversationReference) {
         historical = combineAttachmentProfiles(historicalAttachments, archivedAttachments);
       } else if (currentMaterialReference) historical = buildAttachmentProfile();
       else if (materialContextReference && historical.count === 0) historical = archivedAttachments;
@@ -3058,7 +3320,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             <button class="cgs-icon-button" type="button" data-cgs-action="close-settings" aria-label="Close settings">×</button>
           </div>
           <label class="cgs-setting">
-            <span><strong>Adaptive Auto for every message</strong><small>On Send, a fast local heuristic uses your message, attachment type/size/count, and relevant conversation context—including older attachments you refer to—to choose the lowest likely-sufficient level your account exposes. It never reads attachment contents or sends anything elsewhere. Hold Alt while sending to bypass it once.</small></span>
+            <span><strong>Adaptive Auto for every message</strong><small>On Send—including after editing an earlier message—a fast local heuristic uses your message, attachment type/size/count, and only the conversation that will remain in that branch. It never reads attachment contents or sends anything elsewhere. Hold Alt while sending to bypass it once.</small></span>
             <input type="checkbox" data-cgs-setting="adaptiveRouting" aria-label="Choose a model level for every message">
           </label>
           <label class="cgs-setting">
@@ -3124,8 +3386,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     return root;
   }
 
-  function decorateTurn(doc, turn) {
-    if (!turn || !isAssistantTurn(turn) || isTurnStreaming(turn, doc) || turn.querySelector(`.${TURN_BUTTON_CLASS}`)) return false;
+  function decorateTurn(doc, turn, options = null) {
+    const streaming = options && Object.prototype.hasOwnProperty.call(options, 'streamingTurn')
+      ? isTurnStreaming(turn, doc, options.streamingTurn)
+      : isTurnStreaming(turn, doc);
+    if (!turn || !isAssistantTurn(turn) || streaming || turn.querySelector(`.${TURN_BUTTON_CLASS}`)) return false;
     const button = doc.createElement('button');
     button.type = 'button';
     button.className = TURN_BUTTON_CLASS;
@@ -3208,14 +3473,22 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       incomingRecoveryAction: false,
       autoEnsurePromise: null,
       adaptiveSendPromise: null,
+      activeAdaptiveSnapshot: null,
+      pendingAdaptiveSend: null,
       replayingSend: false,
       submitReplayPermit: null,
       composingComposer: null,
+      pendingEditSession: null,
+      pendingEditMenuSource: null,
+      nextEditSessionId: 1,
       lastRouteDecision: null,
       adaptiveCancelled: false,
       conversationMutationVersion: 0,
+      conversationMutationHistory: [],
       conversationRoutingCache: null,
+      editConversationRoutingCache: new Map(),
       conversationRoutingBuilds: 0,
+      routingComputedVisibility: new WeakMap(),
       historicalAttachmentCache: new WeakMap(),
       attachmentScopeIds: new WeakMap(),
       nextAttachmentScopeId: 1,
@@ -3342,18 +3615,21 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         state.scanScheduled = false;
         const roots = [...state.pendingRoots];
         state.pendingRoots.clear();
-        for (const scanRoot of roots) processRoot(scanRoot);
+        const decorationContext = state.settings.showTurnButtons && !isReadOnlyChatPage(win.location.href)
+          ? { streamingTurn: inferredStreamingTurn(doc) }
+          : null;
+        for (const scanRoot of roots) processRoot(scanRoot, decorationContext);
         scheduleDockAvailability();
       };
       if (typeof win.requestIdleCallback === 'function') win.requestIdleCallback(run, { timeout: 350 });
       else win.setTimeout(run, 40);
     }
 
-    function processRoot(root) {
+    function processRoot(root, decorationContext = null) {
       if (!root || (root.closest && root.closest(`#${UI_ROOT_ID}`))) return;
       if (state.settings.hideStartWriting) cleanStartWriting(root);
       if (state.settings.showTurnButtons && !isReadOnlyChatPage(win.location.href)) {
-        for (const turn of potentialTurnsFromRoot(root)) decorateTurn(doc, turn);
+        for (const turn of potentialTurnsFromRoot(root)) decorateTurn(doc, turn, decorationContext);
       }
     }
 
@@ -3551,6 +3827,564 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       try { return new URL(String(win.location.href)).pathname; } catch (_error) { return ''; }
     }
 
+    function activeConversationTurns(suppliedTurns = null, options = {}) {
+      const turns = Array.isArray(suppliedTurns) ? suppliedTurns : getTurns(doc);
+      const hiddenRoots = [...doc.querySelectorAll(
+        '[hidden], [aria-hidden="true"], [inert], [data-state="closed"], [style], ' +
+        '[class~="hidden"], [class~="invisible"], [class~="sr-only"], [class~="visually-hidden"]',
+      )].filter((root) => {
+        const explicitlyHidden = root.hidden || root.getAttribute('aria-hidden') === 'true' ||
+          root.hasAttribute('inert') || root.getAttribute('data-state') === 'closed' ||
+          inlineStyleHidesContent(root.getAttribute('style')) || classTokensHideContent(root.getAttribute('class'));
+        if (!explicitlyHidden) return false;
+        if (!root.matches(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`) &&
+          !root.querySelector(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`)) return false;
+        const containedTurns = getTurns(root);
+        return containedTurns.length > 0 && (root.matches(TURN_SELECTOR) || containedTurns.length < turns.length);
+      });
+      const anchorIndex = clampInteger(options.anchorIndex, turns.length, 0, turns.length);
+      const computedCandidates = new Set(turns.slice(Math.max(0, anchorIndex - 40), anchorIndex));
+      let recentUsers = 0;
+      let recentAssistants = 0;
+      for (let index = anchorIndex - 1; index >= 0 && (recentUsers < 12 || recentAssistants < 12); index -= 1) {
+        const turn = turns[index];
+        const role = roleOfTurn(turn);
+        if (role === 'user' && recentUsers < 12) {
+          computedCandidates.add(turn);
+          recentUsers += 1;
+        } else if (role === 'assistant' && recentAssistants < 12) {
+          computedCandidates.add(turn);
+          recentAssistants += 1;
+        }
+      }
+      const turnSet = new Set(turns);
+      const attachmentSelector = [
+        '[data-file-id]', '[data-attachment-id]', '[data-testid*="file-pill"]',
+        '[aria-label*="remove file" i]', '[aria-label*="remove attachment" i]',
+        '[data-testid*="attachment"]', 'a[download]', 'a[href^="sandbox:"]',
+      ].join(', ');
+      for (const node of doc.querySelectorAll(attachmentSelector)) {
+        const primary = node.closest(TURN_SELECTOR);
+        const roleNode = primary ? null : node.closest(ROLE_SELECTOR);
+        const turn = primary || roleNode && (roleNode.closest('article') || roleNode);
+        if (turnSet.has(turn)) computedCandidates.add(turn);
+      }
+      if (explicitlyReferencesOlderConversation(options.referenceText || '')) {
+        for (const turn of turns.slice(0, anchorIndex)) computedCandidates.add(turn);
+      }
+      const computedStyle = doc.defaultView && typeof doc.defaultView.getComputedStyle === 'function'
+        ? doc.defaultView.getComputedStyle.bind(doc.defaultView)
+        : null;
+      const computedHiddenCache = new Map();
+      const hasComputedHiddenAncestor = (turn) => {
+        if (!computedStyle || !computedCandidates.has(turn)) return false;
+        let current = turn;
+        for (let depth = 0; current && depth < 10; depth += 1, current = current.parentElement) {
+          if (computedHiddenCache.has(current)) {
+            if (computedHiddenCache.get(current)) return true;
+            continue;
+          }
+          if (!current.hasAttribute('style') && !classMayControlVisibility(current.getAttribute('class'))) {
+            computedHiddenCache.set(current, false);
+            continue;
+          }
+          let hidden = false;
+          try {
+            const style = computedStyle(current);
+            hidden = style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' ||
+              style.contentVisibility === 'hidden';
+          } catch (_error) {
+            hidden = false;
+          }
+          computedHiddenCache.set(current, hidden);
+          state.routingComputedVisibility.set(current, hidden);
+          if (hidden) return true;
+          if (current === doc.body || current === doc.documentElement) break;
+        }
+        return false;
+      };
+      return turns.filter((turn) => {
+        if (!turn || !turn.isConnected || turn.hidden || turn.getAttribute('aria-hidden') === 'true' ||
+          turn.hasAttribute('inert') || turn.getAttribute('data-state') === 'closed' ||
+          inlineStyleHidesContent(turn.getAttribute('style')) || classTokensHideContent(turn.getAttribute('class')) ||
+          hiddenRoots.some((root) => root.contains(turn))) return false;
+        if (hasComputedHiddenAncestor(turn)) return false;
+        return true;
+      });
+    }
+
+    function userTurnLocator(turn) {
+      if (!turn) return null;
+      const testId = normalizeText(turn.getAttribute('data-testid'));
+      const stableTestId = /^conversation-turn-[\w-]+$/u.test(testId) ? testId : '';
+      return {
+        testId: stableTestId,
+        turnIndex: stableTestId ? -1 : getTurns(doc).indexOf(turn),
+      };
+    }
+
+    function locateUserTurn(locator) {
+      if (!locator || typeof locator !== 'object') return null;
+      const testId = normalizeText(locator.testId);
+      if (/^conversation-turn-[\w-]+$/u.test(testId)) {
+        const exact = doc.querySelector(`[data-testid="${testId}"]`);
+        if (exact && roleOfTurn(exact) === 'user') return exact;
+      }
+      const index = clampInteger(locator.turnIndex, -1, -1, 100_000);
+      if (index < 0) return null;
+      const turns = getTurns(doc);
+      return index >= 0 && roleOfTurn(turns[index]) === 'user' ? turns[index] : null;
+    }
+
+    function activeEditSession() {
+      const session = state.pendingEditSession;
+      if (!session) return null;
+      const now = Date.now();
+      let expired = false;
+      if (!session.composerRef) {
+        expired = now - session.startedAt > 15_000;
+      } else if (session.composerRef.isConnected) {
+        session.disconnectedAt = 0;
+      } else {
+        if (!session.disconnectedAt) session.disconnectedAt = now;
+        expired = now - session.disconnectedAt > 5_000;
+      }
+      if (session.path !== conversationPath() || expired || !locateUserTurn(session.turnLocator)) {
+        state.pendingEditSession = null;
+        return null;
+      }
+      return session;
+    }
+
+    function clearEditSession(sessionId = 0) {
+      if (!state.pendingEditSession) return;
+      if (!sessionId || state.pendingEditSession.id === sessionId) state.pendingEditSession = null;
+    }
+
+    function editableUserMessageText(turn) {
+      if (!turn) return '';
+      const roleNode = turn.matches('[data-message-author-role="user"]')
+        ? turn
+        : turn.querySelector('[data-message-author-role="user"]') || turn;
+      const preferred = [...roleNode.querySelectorAll(
+        '[data-message-content], [data-testid="user-message"], [data-testid*="user-message-content"]',
+      )].filter((node) => !node.parentElement || !node.parentElement.closest(
+        '[data-message-content], [data-testid="user-message"], [data-testid*="user-message-content"]',
+      ));
+      const candidates = preferred.map(readableNodeText).filter(Boolean);
+      return (candidates.sort((left, right) => right.length - left.length)[0] || readableNodeText(turn))
+        .slice(0, QUESTION_MAX_LENGTH);
+    }
+
+    function editPortalControlLabel(control) {
+      return lowerText(`${accessibleText(control)} ${control && control.value || ''}`);
+    }
+
+    function isPortalCancelControl(control) {
+      return /^(?:cancel|discard(?: edit)?)$/iu.test(editPortalControlLabel(control));
+    }
+
+    function isPortalSendControl(control) {
+      if (!control) return false;
+      if (control.matches(SEND_BUTTON_SELECTORS.join(', '))) return true;
+      return /^(?:send(?:\s+(?:message|prompt))?|resend|submit|save\s*(?:&|and)\s*(?:send|submit))$/iu.test(
+        editPortalControlLabel(control),
+      );
+    }
+
+    function editPortalScope(composer) {
+      if (!composer) return null;
+      const form = composer.closest('form');
+      const dialog = composer.closest(
+        '[role="dialog"], [data-radix-dialog-content], [data-slot*="dialog"], [data-testid*="edit"], [data-state="open"][data-slot*="popover"]',
+      );
+      if (dialog) return dialog;
+      let ancestor = composer.parentElement;
+      for (let depth = 0; ancestor && depth < 5; depth += 1, ancestor = ancestor.parentElement) {
+        const controls = [...ancestor.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)];
+        if (controls.some(isPortalCancelControl) && controls.some(isPortalSendControl)) return ancestor;
+      }
+      return form;
+    }
+
+    function hasEditPortalEvidence(composer, session) {
+      if (!isEditableComposer(composer) || !session) return false;
+      const turn = locateUserTurn(session.turnLocator);
+      if (!turn) return false;
+      if (closestUserTurn(composer) === turn) return true;
+      const draft = getComposerText(composer);
+      const sourceMatches = Boolean(session.sourceDraft &&
+        composerTextSemanticallyEquals(composer, session.sourceDraft));
+      const scope = editPortalScope(composer);
+      if (!scope || scope.matches('main, body, html')) return false;
+      const form = composer.closest('form');
+      const controls = uniqueElements([
+        ...scope.querySelectorAll(SUBMISSION_CONTROL_SELECTOR),
+        ...(form ? [...doc.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)].filter((control) => control.form === form) : []),
+      ]).filter((control) => isProbablyVisible(control) && !control.closest(`#${UI_ROOT_ID}`));
+      const hasCancel = controls.some(isPortalCancelControl);
+      const hasExactSend = controls.some(isPortalSendControl);
+      const controlled = [...session.controlledIds].some((id) => {
+        const root = doc.getElementById(id);
+        return root && (root === scope || root.contains(composer));
+      });
+      const markerNodes = [];
+      for (let current = composer; current && markerNodes.length < 8; current = current.parentElement) markerNodes.push(current);
+      const markerText = markerNodes.flatMap((node) => [
+        node.getAttribute('data-testid'), node.getAttribute('data-slot'),
+      ]).filter(Boolean).join(' ');
+      const editMarked = controlled || /(?:message|prompt)[-_ ]?edit(?:or|ing|[-_ ]dialog)?|edit(?:or|ing)?[-_ ]?(?:message|prompt)/iu.test(markerText);
+      return hasCancel && hasExactSend && (sourceMatches || editMarked) &&
+        Boolean(draft || session.sourceDraft === '');
+    }
+
+    function sessionPortalControl(control, composer, expectedAction = 'send') {
+      const session = activeEditSession();
+      if (!control || !composer || !session || session.composerRef !== composer ||
+        !composer.isConnected || !hasEditPortalEvidence(composer, session)) return false;
+      const scope = editPortalScope(composer);
+      const form = composer.closest('form');
+      const associated = Boolean(scope && scope.contains(control) || form && control.form === form);
+      if (!associated || !isProbablyVisible(control) || control.closest(`#${UI_ROOT_ID}`)) return false;
+      if (expectedAction === 'cancel') return isPortalCancelControl(control);
+      return isPortalSendControl(control);
+    }
+
+    function editSurfaceBaselineState(composer) {
+      const scope = editPortalScope(composer);
+      const form = composer && composer.closest('form');
+      const controls = scope ? uniqueElements([
+        ...scope.querySelectorAll(SUBMISSION_CONTROL_SELECTOR),
+        ...(form ? [...doc.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)].filter((control) => control.form === form) : []),
+      ]) : [];
+      const markerNodes = [];
+      for (let current = composer; current && markerNodes.length < 8; current = current.parentElement) markerNodes.push(current);
+      const markerText = markerNodes.flatMap((node) => [
+        node.getAttribute('data-testid'), node.getAttribute('data-slot'),
+      ]).filter(Boolean).join(' ');
+      return {
+        draft: getComposerText(composer),
+        hasCancel: controls.some(isPortalCancelControl),
+        editMarked: /(?:message|prompt)[-_ ]?edit(?:or|ing|[-_ ]dialog)?|edit(?:or|ing)?[-_ ]?(?:message|prompt)/iu.test(markerText),
+      };
+    }
+
+    function baselineComposerBecameEditSurface(composer, session) {
+      const baseline = session && session.baselinePositions && session.baselinePositions.get(composer);
+      if (!baseline || !composer || !composer.isConnected) return false;
+      const current = editSurfaceBaselineState(composer);
+      return current.hasCancel && !baseline.editState.hasCancel ||
+        current.editMarked && !baseline.editState.editMarked ||
+        normalizeComposerPayload(baseline.editState.draft) !== normalizeComposerPayload(session.sourceDraft) &&
+          composerTextSemanticallyEquals(composer, session.sourceDraft);
+    }
+
+    function baselineComposerMovedIntoEditSurface(composer, session) {
+      const baseline = session && session.baselinePositions && session.baselinePositions.get(composer);
+      if (!baseline || !composer || !composer.isConnected) return false;
+      const currentForm = composer.closest('form');
+      const moved = composer.parentElement !== baseline.parent || currentForm !== baseline.form ||
+        currentForm && currentForm.parentElement !== baseline.formParent;
+      return Boolean(moved && hasEditPortalEvidence(composer, session));
+    }
+
+    function cancelBelongsToEditSurface(control, actionTurn = null) {
+      const session = activeEditSession();
+      const sessionTurn = session && locateUserTurn(session.turnLocator);
+      const activeSurface = state.activeAdaptiveSnapshot && state.activeAdaptiveSnapshot.surface;
+      const activeTurn = activeSurface && activeSurface.kind === 'edit' ? surfaceTurn(activeSurface) : null;
+      if (actionTurn) {
+        if (actionTurn === sessionTurn || actionTurn === activeTurn) return true;
+        const localComposer = findComposerInScope(actionTurn, control);
+        return Boolean(localComposer && isEditableComposer(localComposer));
+      }
+      if (!session || !session.composerRef || !session.composerRef.isConnected) return false;
+      const composerForm = session.composerRef.closest('form');
+      const controlForm = control.form || control.closest('form');
+      if (composerForm && composerForm === controlForm) return true;
+      const composerPortal = editPortalScope(session.composerRef);
+      return Boolean(composerPortal && composerPortal !== doc && composerPortal.contains(control));
+    }
+
+    function bindEditSession(session) {
+      if (!session || state.pendingEditSession !== session) return;
+      const turn = locateUserTurn(session.turnLocator);
+      if (!turn) {
+        clearEditSession(session.id);
+        return;
+      }
+      const candidates = [...doc.querySelectorAll(LOCAL_COMPOSER_SELECTOR)].filter(isEditableComposer);
+      const eligible = candidates.filter((composer) =>
+        closestUserTurn(composer) === turn ||
+        (!session.baselineComposers.has(composer) || baselineComposerMovedIntoEditSurface(composer, session) ||
+          baselineComposerBecameEditSurface(composer, session)) &&
+          hasEditPortalEvidence(composer, session));
+      if (eligible.length === 1) {
+        session.composerRef = eligible[0];
+        session.formRef = eligible[0].closest('form');
+      }
+    }
+
+    function startEditSession(turn, trigger = null) {
+      if (!turn) return null;
+      const baselineComposers = [...doc.querySelectorAll(LOCAL_COMPOSER_SELECTOR)].filter(isEditableComposer);
+      const session = {
+        id: state.nextEditSessionId,
+        path: conversationPath(),
+        startedAt: Date.now(),
+        turnLocator: userTurnLocator(turn),
+        sourceDraft: editableUserMessageText(turn),
+        controlledIds: new Set(normalizeText(
+          `${trigger && trigger.getAttribute('aria-controls') || ''} ${trigger && trigger.getAttribute('aria-owns') || ''}`,
+        ).split(/\s+/u).filter(Boolean)),
+        baselineComposers: new Set(baselineComposers),
+        baselinePositions: new Map(baselineComposers.map((composer) => {
+          const form = composer.closest('form');
+          return [composer, {
+            parent: composer.parentElement,
+            form,
+            formParent: form && form.parentElement,
+            editState: editSurfaceBaselineState(composer),
+          }];
+        })),
+        composerRef: null,
+        formRef: null,
+        disconnectedAt: 0,
+      };
+      state.nextEditSessionId += 1;
+      state.pendingEditSession = session;
+      win.setTimeout(() => bindEditSession(session), 0);
+      win.setTimeout(() => bindEditSession(session), 100);
+      win.setTimeout(() => bindEditSession(session), 500);
+      return session;
+    }
+
+    function rememberEditMenuSource(turn, trigger) {
+      if (!turn || !trigger) return;
+      const menuSelector = '[role="menu"], [role="listbox"], [data-radix-menu-content], [data-slot*="dropdown-menu"], [data-state][data-slot*="popover"]';
+      state.pendingEditMenuSource = {
+        path: conversationPath(),
+        startedAt: Date.now(),
+        turnLocator: userTurnLocator(turn),
+        triggerRef: trigger,
+        controlledIds: normalizeText(
+          `${trigger.getAttribute('aria-controls') || ''} ${trigger.getAttribute('aria-owns') || ''}`,
+        ).split(/\s+/u).filter(Boolean),
+        menuStates: new Map([...doc.querySelectorAll(menuSelector)].map((menu) => [menu, {
+          hidden: menu.hidden === true,
+          ariaHidden: normalizeText(menu.getAttribute('aria-hidden')),
+          state: normalizeText(menu.getAttribute('data-state')),
+        }])),
+      };
+    }
+
+    function editMenuSourceTurn(control) {
+      const pending = state.pendingEditMenuSource;
+      if (!pending || pending.path !== conversationPath() || Date.now() - pending.startedAt > 10_000) {
+        state.pendingEditMenuSource = null;
+        return null;
+      }
+      const menu = control && control.closest(
+        '[role="menu"], [role="listbox"], [data-radix-menu-content], [data-slot*="dropdown-menu"], [data-state="open"][data-slot*="popover"]',
+      );
+      if (!menu) return null;
+      const controlled = pending.controlledIds.some((id) => {
+        const root = doc.getElementById(id);
+        return root && root.contains(control);
+      }) || normalizeText(
+        `${pending.triggerRef && pending.triggerRef.getAttribute('aria-controls') || ''} ${pending.triggerRef && pending.triggerRef.getAttribute('aria-owns') || ''}`,
+      ).split(/\s+/u).filter(Boolean).some((id) => {
+        const root = doc.getElementById(id);
+        return root && root.contains(control);
+      });
+      const triggerId = normalizeText(pending.triggerRef && pending.triggerRef.id);
+      const labelledByTrigger = triggerId && normalizeText(menu.getAttribute('aria-labelledby'))
+        .split(/\s+/u).includes(triggerId);
+      const previousMenuState = pending.menuStates.get(menu);
+      const newlyOpenedMenu = Date.now() - pending.startedAt <= 3_000 && pending.triggerRef && pending.triggerRef.isConnected && (
+        !previousMenuState || previousMenuState.hidden && !menu.hidden ||
+        previousMenuState.ariaHidden === 'true' && normalizeText(menu.getAttribute('aria-hidden')) !== 'true' ||
+        previousMenuState.state === 'closed' && normalizeText(menu.getAttribute('data-state')) === 'open'
+      );
+      if (!controlled && !labelledByTrigger && !newlyOpenedMenu) return null;
+      return locateUserTurn(pending.turnLocator);
+    }
+
+    function retainedTurnsBefore(editTurn, referenceText = '') {
+      if (!editTurn) return activeConversationTurns();
+      const turns = getTurns(doc);
+      const index = turns.indexOf(editTurn);
+      if (index < 0) return [];
+      const active = new Set(activeConversationTurns(turns, { anchorIndex: index, referenceText }));
+      return turns.slice(0, index).filter((turn) => active.has(turn));
+    }
+
+    function retainedPrefixChangedSince(snapshot, editTurn) {
+      if (!snapshot || snapshot.conversationVersion === state.conversationMutationVersion) return false;
+      const history = state.conversationMutationHistory.filter((entry) =>
+        entry.version > snapshot.conversationVersion);
+      if (!history.length || history[0].version > snapshot.conversationVersion + 1) return true;
+      const retainedAtCapture = Array.isArray(snapshot.retainedPrefixTurns)
+        ? snapshot.retainedPrefixTurns
+        : retainedTurnsBefore(editTurn, snapshot.draft || '');
+      const prefixTurns = new Set(retainedAtCapture);
+      if (history.some((entry) => entry.structural === true)) {
+        const current = retainedTurnsBefore(editTurn, snapshot.draft || '');
+        if (current.length !== retainedAtCapture.length ||
+          current.some((turn, index) => turn !== retainedAtCapture[index])) return true;
+      }
+      return history.some((entry) => entry.turns.some((turn) => prefixTurns.has(turn)));
+    }
+
+    function submissionSurface(composer, options = {}) {
+      if (!isEditableComposer(composer)) return null;
+      const directTurn = closestUserTurn(composer);
+      const suppliedTurn = options.editTurn && roleOfTurn(options.editTurn) === 'user'
+        ? options.editTurn
+        : locateUserTurn(options.turnLocator);
+      const editTurn = directTurn || suppliedTurn;
+      const kind = editTurn ? 'edit' : 'primary';
+      const locator = editTurn ? userTurnLocator(editTurn) : null;
+      const key = editTurn
+        ? `edit:${locator && (locator.testId || locator.turnIndex)}`
+        : 'primary';
+      return {
+        kind,
+        key,
+        sessionId: kind === 'edit' ? clampInteger(options.sessionId, 0, 0, Number.MAX_SAFE_INTEGER) : 0,
+        composerRef: composer,
+        formRef: composer.closest('form'),
+        submitterRef: options.submitter || null,
+        turnLocator: locator,
+      };
+    }
+
+    function surfaceTurn(surface) {
+      return surface && surface.kind === 'edit' ? locateUserTurn(surface.turnLocator) : null;
+    }
+
+    function composerMatchesSurface(composer, surface) {
+      if (!composer || !surface) return false;
+      if (surface.kind === 'primary') return !closestUserTurn(composer);
+      const expectedTurn = surfaceTurn(surface);
+      const session = surface.sessionId && activeEditSession();
+      const sessionMatch = session && session.id === surface.sessionId && (
+        session.composerRef === composer ||
+        session.formRef && composer.closest('form') === session.formRef
+      );
+      return Boolean(expectedTurn && closestUserTurn(composer) === expectedTurn ||
+        expectedTurn && surface.formRef && surface.formRef.isConnected && composer.closest('form') === surface.formRef ||
+        expectedTurn && sessionMatch);
+    }
+
+    function resolveSurfaceComposer(surface, expectedDraft = null, allowAnyText = false) {
+      if (!surface) return null;
+      const original = surface.composerRef;
+      if (original && original.isConnected && isEditableComposer(original) && composerMatchesSurface(original, surface) &&
+        (allowAnyText || expectedDraft == null || composerTextEquals(original, expectedDraft))) return original;
+      if (surface.kind === 'primary') {
+        const primary = findComposer(doc);
+        if (!primary || closestUserTurn(primary)) return null;
+        return allowAnyText || expectedDraft == null || composerTextEquals(primary, expectedDraft) ? primary : null;
+      }
+      const turn = surfaceTurn(surface);
+      if (!turn) return null;
+      const candidates = [];
+      if (surface.formRef && surface.formRef.isConnected) {
+        const formComposer = findComposerInScope(surface.formRef);
+        if (formComposer) candidates.push(formComposer);
+      }
+      candidates.push(...turn.querySelectorAll(LOCAL_COMPOSER_SELECTOR));
+      const session = surface.sessionId && activeEditSession();
+      if (session && session.id === surface.sessionId && session.composerRef && session.composerRef.isConnected) {
+        candidates.push(session.composerRef);
+      }
+      const visible = uniqueElements(candidates).filter((candidate) =>
+        isEditableComposer(candidate) && composerMatchesSurface(candidate, surface));
+      if (expectedDraft != null) {
+        const matching = visible.filter((candidate) => composerTextEquals(candidate, expectedDraft));
+        if (matching.length === 1) return matching[0];
+      }
+      if (allowAnyText && visible.length === 1) return visible[0];
+      if (session && session.id === surface.sessionId && session.composerRef && !session.composerRef.isConnected) {
+        const remounted = [...doc.querySelectorAll(LOCAL_COMPOSER_SELECTOR)].filter((candidate) =>
+          isEditableComposer(candidate) && !session.baselineComposers.has(candidate) &&
+          hasEditPortalEvidence(candidate, session) &&
+          (expectedDraft == null || composerTextEquals(candidate, expectedDraft)));
+        if (remounted.length === 1) {
+          session.composerRef = remounted[0];
+          session.formRef = remounted[0].closest('form');
+          return remounted[0];
+        }
+      }
+      return null;
+    }
+
+    function interactionSurface(target, options = {}) {
+      const node = target && (target.nodeType === 1 ? target : target.parentElement);
+      if (!node) return null;
+      const session = activeEditSession();
+      const form = options.form || node.form || node.closest && node.closest('form');
+      let composer = node.matches && node.matches(LOCAL_COMPOSER_SELECTOR) && isEditableComposer(node)
+        ? node
+        : node.closest && node.closest(LOCAL_COMPOSER_SELECTOR);
+      if (!isEditableComposer(composer)) composer = form && findComposerInScope(form, node);
+      const directTurn = closestUserTurn(node);
+      if (!composer && directTurn) composer = findComposerInScope(directTurn, node);
+      if (!composer && session && session.composerRef &&
+        sessionPortalControl(node, session.composerRef, 'send')) composer = session.composerRef;
+      if (!composer) return null;
+      const primary = findComposer(doc);
+      const composerTurn = directTurn || closestUserTurn(composer);
+      const sessionTurn = session && locateUserTurn(session.turnLocator);
+      let editTurn = composerTurn;
+      if (!editTurn && session && sessionTurn) {
+        const composerForm = composer.closest('form');
+        const bound = session.composerRef === composer ||
+          session.formRef && composerForm && session.formRef === composerForm;
+        const eligibleComposer = !session.baselineComposers.has(composer) ||
+          baselineComposerMovedIntoEditSurface(composer, session) ||
+          baselineComposerBecameEditSurface(composer, session);
+        const newlyMounted = (!session.composerRef || !session.composerRef.isConnected) &&
+          Date.now() - session.startedAt <= 15_000 &&
+          eligibleComposer && hasEditPortalEvidence(composer, session);
+        if (bound || newlyMounted) {
+          editTurn = sessionTurn;
+          session.composerRef = composer;
+          session.formRef = composerForm;
+        }
+      }
+      if (!editTurn && (composer !== primary || !findSendButton(doc, composer))) return null;
+      return submissionSurface(composer, {
+        editTurn,
+        sessionId: editTurn && sessionTurn === editTurn ? session.id : 0,
+        submitter: options.submitter || null,
+      });
+    }
+
+    function sendControlForSurface(surface, composer) {
+      const saved = surface && surface.submitterRef;
+      if (saved && saved.isConnected && isProbablyVisible(saved)) {
+        if (surface.kind === 'edit' && (isEditSubmissionControl(saved, composer, surfaceTurn(surface)) ||
+          sessionPortalControl(saved, composer, 'send'))) return saved;
+        if (surface.kind === 'primary' && saved === findSendButton(doc, composer)) return saved;
+      }
+      if (surface && surface.kind === 'edit') {
+        const editTurn = surfaceTurn(surface);
+        const form = composer.closest('form');
+        const local = [...doc.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)].find((control) => {
+          const associatedForm = control.form || control.closest('form');
+          return (form && associatedForm === form || editTurn && editTurn.contains(control)) &&
+            isEditSubmissionControl(control, composer, editTurn);
+        });
+        if (local) return local;
+        const portal = [...doc.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)].find((control) =>
+          sessionPortalControl(control, composer, 'send'));
+        if (portal) return portal;
+      }
+      return findSendButton(doc, composer);
+    }
+
     function attachmentStateFromScope(scope, options = {}) {
       if (!scope || typeof scope.querySelectorAll !== 'function') {
         return { count: 0, signature: '', profile: buildAttachmentProfile() };
@@ -3562,6 +4396,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         '[aria-label*="remove file" i]',
         '[aria-label*="remove attachment" i]',
         '[data-testid*="attachment"]',
+        'a[download]',
+        'a[href^="sandbox:"]',
       ];
       const rawNodes = uniqueElements(selectors.flatMap((selector) => [...scope.querySelectorAll(selector)]))
         .filter((node) => (options.includeHidden === true || isProbablyVisible(node)) && !node.closest(`#${UI_ROOT_ID}`))
@@ -3633,12 +4469,14 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           node.getAttribute('data-testid'),
           node.getAttribute('aria-label'),
           node.getAttribute('title'),
+          node.getAttribute('download'),
+          node.getAttribute('href'),
           node.querySelector('img[alt]') && node.querySelector('img[alt]').getAttribute('alt'),
           node.textContent,
         ].filter(Boolean).join('|')).slice(0, 240);
         const name = normalizeText(
           node.getAttribute('data-file-name') || node.getAttribute('data-filename') ||
-          node.getAttribute('data-name') || attachmentNameFromLabel(label),
+          node.getAttribute('data-name') || node.getAttribute('download') || attachmentNameFromLabel(label),
         ).slice(0, 220);
         const id = normalizeText(node.getAttribute('data-file-id') || node.getAttribute('data-attachment-id'));
         const normalizedName = lowerText(name);
@@ -3689,9 +4527,20 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       return { count: profile.count, signature, profile };
     }
 
-    function attachmentState(composer) {
-      const scope = composerScope(composer);
-      return attachmentStateFromScope(scope);
+    function attachmentState(composer, surface = null) {
+      const localScope = surface && surface.kind === 'edit'
+        ? editPortalScope(composer) || composerScope(composer)
+        : composerScope(composer);
+      const local = attachmentStateFromScope(localScope);
+      const editTurn = surface && surface.kind === 'edit'
+        ? surfaceTurn(surface)
+        : closestUserTurn(composer);
+      if (!editTurn || localScope === editTurn) return local;
+      const retained = attachmentStateFromScope(editTurn, { includeHidden: true });
+      const profile = mergeAttachmentProfiles(local.profile, retained.profile);
+      const signature = profile.items.map((item) => [item.key, item.name, item.mime, item.size, item.kind].join('|'))
+        .sort().join('\n');
+      return { count: profile.count, signature, profile };
     }
 
     function historicalAttachmentState(turn, shouldScan = true) {
@@ -3758,7 +4607,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     }
 
     function assistantTextContextLevel(value) {
-      const text = String(value == null ? '' : value).slice(-12_000);
+      const text = boundedHeadTailSample(value, 12_000);
       if (!text) return '';
       const codeLines = text.split(/\r?\n/u).filter((line) => /^\s{4,}|[{}();]|=>|\b(?:const|let|def|class|function|import|SELECT)\b/u.test(line)).length;
       if (codeLines >= 25 || /\b(?:formal proof|threat model|race condition|stack trace|diagnosis|contract clause|security vulnerability|derive(?:d|s)? the equation)\b/iu.test(text)) return 'high';
@@ -3766,45 +4615,92 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       return '';
     }
 
-    function assistantContextLevel(allTurns = getTurns(doc)) {
+    function assistantContextLevel(allTurns = getTurns(doc), options = {}) {
       const assistants = allTurns.filter((turn) => roleOfTurn(turn) === 'assistant');
-      const stopButton = [...doc.querySelectorAll(
+      const stopButton = options.ignoreActiveGeneration === true ? null : [...doc.querySelectorAll(
         'button[data-testid="stop-button"], button[data-testid*="stop-generating"], button[aria-label^="Stop generating" i], button[aria-label^="Stop streaming" i]',
       )].find(isProbablyVisible);
-      const completed = assistants.filter((turn, index) => {
+      const assistantAcknowledgment = /^(?:you(?:['’]re|\s+are)\s+welcome|no\s+problem|happy\s+to\s+help|glad\s+(?:that\s+)?helped|sure|okay|ok|of\s+course|anytime)[.!,\s]*$/iu;
+      const userAcknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
+      let latestCompletedText = '';
+      const textOptions = options.textOptions || {};
+      for (let index = assistants.length - 1; index >= 0; index -= 1) {
+        const turn = assistants[index];
         const explicitlyStreaming = turn.matches('[data-is-streaming="true"], [data-streaming="true"], .result-streaming') ||
           turn.querySelector('[data-is-streaming="true"], [data-streaming="true"], .result-streaming');
-        return !explicitlyStreaming && !(stopButton && index === assistants.length - 1);
-      });
-      const assistantAcknowledgment = /^(?:you(?:['’]re|\s+are)\s+welcome|no\s+problem|happy\s+to\s+help|glad\s+(?:that\s+)?helped|sure|okay|ok|of\s+course|anytime)[.!,\s]*$/iu;
-      const meaningful = completed.filter((turn) =>
-        !assistantAcknowledgment.test(normalizeText(extractAssistantHandoff(turn))));
-      const latest = meaningful[meaningful.length - 1] || completed[completed.length - 1];
-      return latest ? assistantTextContextLevel(extractAssistantHandoff(latest)) : '';
+        if (explicitlyStreaming || stopButton && index === assistants.length - 1) continue;
+        const text = extractAssistantHandoff(turn, {
+          ...textOptions,
+          headTailSampleLength: 12_000,
+        });
+        if (!latestCompletedText) latestCompletedText = text;
+        if (!assistantAcknowledgment.test(normalizeText(text))) return assistantTextContextLevel(text);
+        const allTurnIndex = allTurns.indexOf(turn);
+        let precedingUser = null;
+        for (let candidateIndex = allTurnIndex - 1; candidateIndex >= 0; candidateIndex -= 1) {
+          if (roleOfTurn(allTurns[candidateIndex]) === 'user') {
+            precedingUser = allTurns[candidateIndex];
+            break;
+          }
+        }
+        if (precedingUser && !userAcknowledgment.test(normalizeText(readableNodeText(precedingUser, textOptions)))) return '';
+      }
+      return assistantTextContextLevel(latestCompletedText);
     }
 
-    function transferredConversationRoutingState(value) {
+    function latestCompletedAssistantText(allTurns = getTurns(doc), options = {}) {
+      const assistants = allTurns.filter((turn) => roleOfTurn(turn) === 'assistant');
+      const stopButton = options.ignoreActiveGeneration === true ? null : [...doc.querySelectorAll(
+        'button[data-testid="stop-button"], button[data-testid*="stop-generating"], button[aria-label^="Stop generating" i], button[aria-label^="Stop streaming" i]',
+      )].find(isProbablyVisible);
+      const textOptions = options.textOptions || {};
+      for (let index = assistants.length - 1; index >= 0; index -= 1) {
+        const turn = assistants[index];
+        const explicitlyStreaming = turn.matches('[data-is-streaming="true"], [data-streaming="true"], .result-streaming') ||
+          turn.querySelector('[data-is-streaming="true"], [data-streaming="true"], .result-streaming');
+        if (explicitlyStreaming || stopButton && index === assistants.length - 1) continue;
+        return extractAssistantHandoff(turn, {
+          ...textOptions,
+          headTailSampleLength: 4_000,
+        });
+      }
+      return '';
+    }
+
+    function transferredConversationRoutingState(value, referenceText = '') {
       const raw = String(value == null ? '' : value);
       const match = raw.match(/--- PREVIOUS CONVERSATION ---\s*\n([\s\S]*?)\n--- END PREVIOUS CONVERSATION ---/u);
       if (!match) return null;
       const transcript = match[1].slice(0, SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH);
       const blocks = [...transcript.matchAll(/(?:^|\n\n)(USER|ASSISTANT):\s*\n([\s\S]*?)(?=\n\n(?:USER|ASSISTANT):\s*\n|$)/gu)]
-        .map((entry) => ({ role: lowerText(entry[1]), text: entry[2].trim() }));
+        .map((entry, index) => ({ role: lowerText(entry[1]), text: entry[2].trim(), index }));
       const allUsers = blocks.filter((block) => block.role === 'user');
       if (!allUsers.length) return null;
       const archivedMaterials = mergeAttachmentProfiles(
-        ...allUsers.map((block) => attachmentProfileFromText(block.text)),
+        ...blocks.map((block) => attachmentProfileFromText(block.text)),
       );
+      let archivedConversationLevel = '';
+      if (explicitlyReferencesOlderConversation(referenceText)) {
+        for (const block of allUsers) {
+          const attachments = attachmentProfileFromText(block.text);
+          const decision = classifyPrompt(boundedHeadTailSample(block.text, 16_000), { attachmentProfile: attachments });
+          const target = decision.target === 'max' ? 'pro' : extractModelLevel(decision.target);
+          archivedConversationLevel = strongerRouteLevel(archivedConversationLevel, target);
+        }
+      }
       let level = '';
       let materials = buildAttachmentProfile();
       let hasMeaningfulTurn = false;
-      const acknowledgment = /^(?:thanks?(?: you)?|thank you|ok(?:ay)?|got it|cool|great|yes|no|hello|hi|hey|bye)[.!\s]*$/iu;
+      const acknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
       const users = allUsers.filter((block) =>
         !acknowledgment.test(normalizeText(block.text)) || attachmentProfileFromText(block.text).count > 0)
         .slice(-6);
-      for (const block of users) {
+      const archivedMeaningfulTurnCount = allUsers.filter((block) =>
+        !acknowledgment.test(normalizeText(block.text)) || attachmentProfileFromText(block.text).count > 0).length;
+      for (let userIndex = 0; userIndex < users.length; userIndex += 1) {
+        const block = users[userIndex];
         const attachments = attachmentProfileFromText(block.text);
-        const decision = classifyPrompt(block.text.slice(0, 16_000), {
+        const decision = classifyPrompt(boundedHeadTailSample(block.text, 16_000), {
           previousLevel: level,
           attachmentProfile: attachments,
           hasPriorConversation: hasMeaningfulTurn,
@@ -3818,60 +4714,113 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         const target = decision.target === 'max' ? 'pro' : extractModelLevel(decision.target);
         if (target) level = target;
         hasMeaningfulTurn = true;
+        const nextUserIndex = users[userIndex + 1] ? users[userIndex + 1].index : blocks.length;
+        const generatedMaterials = mergeAttachmentProfiles(...blocks
+          .filter((candidate) => candidate.role === 'assistant' && candidate.index > block.index && candidate.index < nextUserIndex)
+          .map((candidate) => attachmentProfileFromText(candidate.text)));
+        materials = mergeAttachmentProfiles(materials, generatedMaterials);
       }
       const assistantAcknowledgment = /^(?:you(?:['’]re|\s+are)\s+welcome|no\s+problem|happy\s+to\s+help|glad\s+(?:that\s+)?helped|sure|okay|ok|of\s+course|anytime)[.!,\s]*$/iu;
       const assistants = blocks.filter((block) => block.role === 'assistant');
-      const latestAssistant = [...assistants].reverse().find((block) =>
-        !assistantAcknowledgment.test(normalizeText(block.text))) || assistants[assistants.length - 1];
+      const userAcknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
+      let latestAssistant = null;
+      for (let assistantIndex = assistants.length - 1; assistantIndex >= 0; assistantIndex -= 1) {
+        const candidate = assistants[assistantIndex];
+        if (!assistantAcknowledgment.test(normalizeText(candidate.text))) {
+          latestAssistant = candidate;
+          break;
+        }
+        const precedingUser = [...blocks.slice(0, candidate.index)].reverse().find((block) => block.role === 'user');
+        if (precedingUser && !userAcknowledgment.test(normalizeText(precedingUser.text))) break;
+      }
       return {
         hasPriorConversation: true,
         conversationLevel: level,
+        archivedConversationLevel,
         assistantContextLevel: latestAssistant ? assistantTextContextLevel(latestAssistant.text) : '',
+        awaitingConfirmation: assistants.length > 0 && assistantInvitesContinuation(assistants[assistants.length - 1].text),
+        latestAssistantText: assistants.length > 0 ? boundedHeadTailSample(assistants[assistants.length - 1].text, 4_000) : '',
+        archivedMeaningfulTurnCount,
+        archivedSampledTextLength: transcript.length,
         historicalAttachmentProfile: materials,
         archivedAttachmentProfile: archivedMaterials,
       };
     }
 
-    function conversationRoutingState() {
+    function conversationRoutingState(beforeTurn = null, referenceText = '') {
       const path = conversationPath();
+      const includeArchivedDifficulty = explicitlyReferencesOlderConversation(referenceText);
       const cached = state.conversationRoutingCache;
-      if (cached && cached.path === path && cached.version === state.conversationMutationVersion) {
+      if (!beforeTurn && cached && cached.path === path && cached.version === state.conversationMutationVersion &&
+        (!includeArchivedDifficulty || cached.includesArchivedDifficulty)) {
         return cached.value;
       }
+      const boundaryLocator = beforeTurn ? userTurnLocator(beforeTurn) : null;
+      const boundaryKey = boundaryLocator
+        ? `${path}|${boundaryLocator.testId || boundaryLocator.turnIndex}|archive:${includeArchivedDifficulty ? 1 : 0}`
+        : '';
+      const editCached = boundaryKey && state.editConversationRoutingCache.get(boundaryKey);
+      if (editCached && editCached.version === state.conversationMutationVersion) return editCached.value;
       state.conversationRoutingBuilds += 1;
-      const allTurns = getTurns(doc);
+      const routingTextOptions = {
+        checkComputedVisibility: true,
+        visibilityState: state.routingComputedVisibility,
+        computedVisibilityCache: new Map(),
+      };
+      const allTurns = beforeTurn
+        ? retainedTurnsBefore(beforeTurn, referenceText)
+        : activeConversationTurns(null, { referenceText });
       const turns = allTurns.filter((turn) => roleOfTurn(turn) === 'user');
-      const turnSet = new Set(turns);
+      const materialTurnSet = new Set(allTurns.filter((turn) => {
+        const role = roleOfTurn(turn);
+        return role === 'user' || role === 'assistant';
+      }));
       const attachmentCandidateSelector = [
         '[data-file-id]', '[data-attachment-id]', '[data-testid*="file-pill"]',
         '[aria-label*="remove file" i]', '[aria-label*="remove attachment" i]',
-        '[data-testid*="attachment"]',
+        '[data-testid*="attachment"]', 'a[download]', 'a[href^="sandbox:"]',
       ].join(', ');
       const attachmentCandidates = new Set();
       for (const node of doc.querySelectorAll(attachmentCandidateSelector)) {
         const primary = node.closest(TURN_SELECTOR);
         const roleNode = primary ? null : node.closest(ROLE_SELECTOR);
         const turn = primary || roleNode && (roleNode.closest('article') || roleNode);
-        if (turnSet.has(turn)) attachmentCandidates.add(turn);
+        if (materialTurnSet.has(turn)) attachmentCandidates.add(turn);
       }
-      const attachmentProfiles = new Map(turns.map((turn) => [
+      const attachmentProfiles = new Map([...attachmentCandidates].map((turn) => [
         turn,
-        historicalAttachmentState(turn, attachmentCandidates.has(turn)),
+        historicalAttachmentState(turn, true),
       ]));
       const archivedMaterials = mergeAttachmentProfiles(...attachmentProfiles.values());
       let level = '';
+      let archivedConversationLevel = '';
       let materials = buildAttachmentProfile();
       let hasMeaningfulTurn = false;
-      const acknowledgment = /^(?:thanks?(?: you)?|thank you|ok(?:ay)?|got it|cool|great|yes|no|hello|hi|hey|bye)[.!\s]*$/iu;
+      let archivedMeaningfulTurnCount = 0;
+      let archivedSampledTextLength = 0;
+      const acknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
       const recent = [];
+      if (includeArchivedDifficulty) {
+        for (const turn of turns) {
+          const prompt = boundedHeadTailSample(readableNodeText(turn, routingTextOptions), 16_000);
+          const attachments = attachmentProfiles.get(turn) || buildAttachmentProfile();
+          if (!prompt || acknowledgment.test(normalizeText(prompt)) && attachments.count === 0) continue;
+          archivedMeaningfulTurnCount += 1;
+          archivedSampledTextLength += prompt.length;
+          const decision = classifyPrompt(prompt, { attachmentProfile: attachments });
+          const target = decision.target === 'max' ? 'pro' : extractModelLevel(decision.target);
+          archivedConversationLevel = strongerRouteLevel(archivedConversationLevel, target);
+        }
+      }
       for (let index = turns.length - 1; index >= 0 && recent.length < 6; index -= 1) {
         const turn = turns[index];
-        const prompt = readableNodeText(turn).slice(0, 16_000);
+        const prompt = boundedHeadTailSample(readableNodeText(turn, routingTextOptions), 16_000);
         const attachments = attachmentProfiles.get(turn) || buildAttachmentProfile();
         if (!prompt || acknowledgment.test(normalizeText(prompt)) && attachments.count === 0) continue;
-        recent.unshift({ prompt, attachments });
+        recent.unshift({ turn, prompt, attachments, turnIndex: allTurns.indexOf(turn) });
       }
-      for (const { prompt, attachments } of recent) {
+      for (let recentIndex = 0; recentIndex < recent.length; recentIndex += 1) {
+        const { prompt, attachments, turnIndex } = recent[recentIndex];
         const decision = classifyPrompt(prompt, {
           previousLevel: level,
           attachmentProfile: attachments,
@@ -3887,31 +4836,74 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         const target = decision.target === 'max' ? 'pro' : extractModelLevel(decision.target);
         if (target) level = target;
         hasMeaningfulTurn = true;
+        const nextTurnIndex = recent[recentIndex + 1] ? recent[recentIndex + 1].turnIndex : allTurns.length;
+        const generatedMaterials = mergeAttachmentProfiles(...allTurns
+          .slice(turnIndex + 1, nextTurnIndex)
+          .filter((turn) => roleOfTurn(turn) === 'assistant')
+          .map((turn) => attachmentProfiles.get(turn) || buildAttachmentProfile()));
+        materials = mergeAttachmentProfiles(materials, generatedMaterials);
       }
+      const latestAssistantText = latestCompletedAssistantText(allTurns, {
+        ignoreActiveGeneration: Boolean(beforeTurn),
+        textOptions: routingTextOptions,
+      });
       const value = {
         hasPriorConversation: turns.length > 0,
         conversationLevel: level,
-        assistantContextLevel: assistantContextLevel(allTurns),
+        archivedConversationLevel,
+        retainedTurns: beforeTurn ? allTurns : null,
+        assistantContextLevel: assistantContextLevel(allTurns, {
+          ignoreActiveGeneration: Boolean(beforeTurn),
+          textOptions: routingTextOptions,
+        }),
+        awaitingConfirmation: assistantInvitesContinuation(latestAssistantText),
+        latestAssistantText,
+        archivedMeaningfulTurnCount,
+        archivedSampledTextLength,
         historicalAttachmentProfile: materials,
         archivedAttachmentProfile: archivedMaterials,
       };
-      state.conversationRoutingCache = {
-        path,
-        version: state.conversationMutationVersion,
-        value,
-      };
+      if (!beforeTurn) {
+        state.conversationRoutingCache = {
+          path,
+          version: state.conversationMutationVersion,
+          includesArchivedDifficulty: includeArchivedDifficulty,
+          value,
+        };
+      } else if (boundaryKey) {
+        state.editConversationRoutingCache.set(boundaryKey, {
+          version: state.conversationMutationVersion,
+          value,
+        });
+      }
       return value;
     }
 
     function activeToolState(composer) {
-      const scope = composerScope(composer);
-      if (!scope || typeof scope.querySelectorAll !== 'function') return { signature: '', special: '' };
+      const primaryComposer = findComposer(doc);
+      const scopes = uniqueElements([
+        composerScope(composer),
+        closestUserTurn(composer) && primaryComposer && primaryComposer !== composer
+          ? composerScope(primaryComposer)
+          : null,
+      ]);
+      if (!scopes.length) return { signature: '', special: '' };
       const specialPattern = /\b(?:agent(?: mode)?|deep research|canvas|create (?:an )?image|image generation|video generation|voice mode|record mode)\b/iu;
-      const routingControls = new Set([findModelPicker(doc, composer), findReasoningPicker(doc, composer)].filter(Boolean));
-      const active = [...scope.querySelectorAll(
+      const routingControlCandidates = [
+        findModelPicker(doc, composer), findReasoningPicker(doc, composer),
+      ];
+      if (primaryComposer && primaryComposer !== composer) {
+        routingControlCandidates.push(
+          findModelPicker(doc, primaryComposer),
+          findReasoningPicker(doc, primaryComposer),
+        );
+      }
+      const routingControls = new Set(routingControlCandidates.filter(Boolean));
+      const active = uniqueElements(scopes.flatMap((scope) => [...scope.querySelectorAll(
         '[aria-pressed="true"], [aria-checked="true"], [data-state="active"], [data-state="on"], [data-state="checked"], [data-selected="true"]',
-      )].filter((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`) && !routingControls.has(node));
-      const ambiguousSpecial = [...scope.querySelectorAll('button, [role="button"], [data-testid*="tool"], [data-testid*="mode"]')]
+      )])).filter((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`) && !routingControls.has(node));
+      const ambiguousSpecial = uniqueElements(scopes.flatMap((scope) =>
+        [...scope.querySelectorAll('button, [role="button"], [data-testid*="tool"], [data-testid*="mode"]')]))
         .filter((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`) &&
           node.getAttribute('aria-pressed') !== 'false' && node.getAttribute('aria-checked') !== 'false' &&
           !['off', 'closed', 'inactive'].includes(lowerText(node.getAttribute('data-state'))) && specialPattern.test(accessibleText(node)));
@@ -3920,21 +4912,33 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       return { signature: labels.join('\n'), special };
     }
 
-    function captureSendSnapshot(composer = findComposer(doc)) {
+    function captureSendSnapshot(composer = findComposer(doc), suppliedSurface = null) {
       if (!composer) return null;
-      const attachments = attachmentState(composer);
+      const surface = suppliedSurface || interactionSurface(composer) || submissionSurface(composer);
+      if (!surface) return null;
+      const editTurn = surfaceTurn(surface);
+      if (surface.kind === 'edit' && !editTurn) return null;
+      const attachments = attachmentState(composer, surface);
       const tools = activeToolState(composer);
-      const conversation = conversationRoutingState();
+      const draft = getComposerText(composer);
+      const conversation = conversationRoutingState(editTurn, draft);
       return {
         path: conversationPath(),
         conversationVersion: state.conversationMutationVersion,
-        draft: getComposerText(composer),
+        surface,
+        draft,
         attachmentCount: attachments.count,
         attachmentSignature: attachments.signature,
         attachmentProfile: attachments.profile,
         hasPriorConversation: conversation.hasPriorConversation,
         conversationLevel: conversation.conversationLevel,
+        archivedConversationLevel: conversation.archivedConversationLevel,
+        retainedPrefixTurns: editTurn ? conversation.retainedTurns : null,
         assistantContextLevel: conversation.assistantContextLevel,
+        awaitingConfirmation: conversation.awaitingConfirmation,
+        latestAssistantText: conversation.latestAssistantText,
+        archivedMeaningfulTurnCount: conversation.archivedMeaningfulTurnCount,
+        archivedSampledTextLength: conversation.archivedSampledTextLength,
         historicalAttachmentProfile: conversation.historicalAttachmentProfile,
         archivedAttachmentProfile: conversation.archivedAttachmentProfile,
         toolSignature: tools.signature,
@@ -3944,10 +4948,24 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
     function validateSendSnapshot(snapshot) {
       if (!snapshot || conversationPath() !== snapshot.path) return { ok: false, reason: 'The conversation changed while Auto was choosing.' };
-      if (snapshot.conversationVersion !== state.conversationMutationVersion) {
+      if (snapshot.surface && snapshot.surface.kind === 'edit') {
+        const editTurn = surfaceTurn(snapshot.surface);
+        if (!editTurn) return { ok: false, reason: 'The edited message was closed while Auto was choosing.' };
+        if (hasActiveGeneration(doc)) {
+          return { ok: false, reason: 'ChatGPT started generating while Auto was choosing.' };
+        }
+        if (snapshot.conversationVersion !== state.conversationMutationVersion) {
+          if (retainedPrefixChangedSince(snapshot, editTurn)) {
+            return { ok: false, reason: 'The earlier conversation changed while Auto was choosing.' };
+          }
+          snapshot.conversationVersion = state.conversationMutationVersion;
+        }
+      } else if (snapshot.conversationVersion !== state.conversationMutationVersion) {
         return { ok: false, reason: 'The conversation changed while Auto was choosing.' };
       }
-      const composer = findComposer(doc);
+      const composer = snapshot.surface
+        ? resolveSurfaceComposer(snapshot.surface, null, true)
+        : findComposer(doc);
       let draftMatches = false;
       if (composer) {
         try {
@@ -3961,7 +4979,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       if (!composer || !draftMatches) {
         return { ok: false, reason: 'Your draft changed while Auto was choosing.' };
       }
-      const attachments = attachmentState(composer);
+      const attachments = attachmentState(composer, snapshot.surface);
       if (attachments.count !== snapshot.attachmentCount || attachments.signature !== snapshot.attachmentSignature) {
         return { ok: false, reason: 'An attachment changed while Auto was choosing.' };
       }
@@ -4006,27 +5024,34 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       }, 1_500);
     }
 
-    function armSubmitReplayPermit(composer, kind, draftValidator = null) {
+    function armSubmitReplayPermit(composer, kind, draftValidator = null, surface = null) {
       const form = composer && composer.closest('form');
-      if (!form) return;
+      if (!composer) return;
       state.submitReplayPermit = {
         form,
+        knownForms: new Set(doc.querySelectorAll('form')),
+        surfaceKey: surface && surface.key || '',
         path: conversationPath(),
         draft: getComposerText(composer),
         draftValidator: typeof draftValidator === 'function' ? draftValidator : null,
         kind,
-        expiresAt: Date.now() + 1_500,
+        consumed: false,
+        expiresAt: Date.now() + 3_000,
       };
     }
 
-    function consumeSubmitReplayPermit(event, composer) {
+    function consumeSubmitReplayPermit(event, composer, surface = null) {
       const permit = state.submitReplayPermit;
       if (!permit) return false;
       if (Date.now() > permit.expiresAt) {
         state.submitReplayPermit = null;
         return false;
       }
-      if (!event || event.target !== permit.form || conversationPath() !== permit.path) return false;
+      if (!event || conversationPath() !== permit.path) return false;
+      const sameSurface = permit.surfaceKey && surface && surface.key === permit.surfaceKey;
+      const exactForm = event.target === permit.form;
+      if (!exactForm && !sameSurface) return false;
+      if (permit.consumed) return 'duplicate';
       const currentDraft = getComposerText(composer);
       if (currentDraft) {
         let draftMatches = currentDraft === permit.draft;
@@ -4035,8 +5060,30 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         }
         if (!draftMatches) return false;
       }
-      state.submitReplayPermit = null;
-      return true;
+      if (!exactForm && sameSurface) permit.form = event.target;
+      permit.consumed = true;
+      return 'allow';
+    }
+
+    function mountedEditReplayCandidate(form, submitter = null) {
+      const permit = state.submitReplayPermit;
+      const activeSurface = state.activeAdaptiveSnapshot && state.activeAdaptiveSnapshot.surface;
+      if (!state.replayingSend || !permit || permit.consumed || permit.form && permit.form.isConnected ||
+        !form || !form.isConnected || permit.knownForms && permit.knownForms.has(form) ||
+        !activeSurface || activeSurface.kind !== 'edit' || !permit.surfaceKey ||
+        activeSurface.key !== permit.surfaceKey || conversationPath() !== permit.path) return null;
+      const composers = [...form.querySelectorAll(LOCAL_COMPOSER_SELECTOR)].filter(isEditableComposer);
+      if (composers.length !== 1) return null;
+      const composer = composers[0];
+      const controls = [...form.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)]
+        .filter((control) => isProbablyVisible(control) && !control.closest(`#${UI_ROOT_ID}`));
+      const sendControls = controls.filter(isPortalSendControl);
+      if (!controls.some(isPortalCancelControl) || sendControls.length !== 1 || submitter !== sendControls[0]) return null;
+      let draftMatches = getComposerText(composer) === permit.draft;
+      if (!draftMatches && permit.draftValidator) {
+        try { draftMatches = permit.draftValidator(composer, permit.draft) === true; } catch (_error) { draftMatches = false; }
+      }
+      return draftMatches ? { composer, surface: activeSurface } : null;
     }
 
     async function replayNativeSend(snapshot, decision, selectedLevel, manual = false, reason = '') {
@@ -4053,11 +5100,22 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         if (typeof snapshot.beforeReplay !== 'function') return true;
         const originalSnapshot = snapshot;
         const ready = await snapshot.beforeReplay(context);
+        if (state.adaptiveCancelled) return false;
         if (!ready) return false;
         if (ready && typeof ready === 'object' && ready.refreshSnapshot === true) {
-          const refreshed = captureSendSnapshot(ready.composer && ready.composer.isConnected
+          const refreshComposer = ready.composer && ready.composer.isConnected
             ? ready.composer
-            : findComposer(doc));
+            : snapshot.surface
+              ? resolveSurfaceComposer(snapshot.surface, null, true)
+              : findComposer(doc);
+          const refreshedSurface = snapshot.surface && refreshComposer
+            ? {
+              ...snapshot.surface,
+              composerRef: refreshComposer,
+              formRef: refreshComposer.closest('form'),
+            }
+            : null;
+          const refreshed = captureSendSnapshot(refreshComposer, refreshedSurface);
           if (!refreshed || refreshed.path !== originalSnapshot.path ||
             refreshed.attachmentCount !== originalSnapshot.attachmentCount ||
             refreshed.attachmentSignature !== originalSnapshot.attachmentSignature ||
@@ -4070,13 +5128,16 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           snapshot = refreshed;
         }
         validation = validateSendSnapshot(snapshot);
+        if (state.adaptiveCancelled) return false;
         if (!validation.ok) {
           if (!snapshot.silent) toast(`${validation.reason} Review it and press Send again.`, 7_000);
           return false;
         }
         return true;
       };
-      const sendButton = findSendButton(doc, validation.composer);
+      const sendButton = snapshot.surface
+        ? sendControlForSurface(snapshot.surface, validation.composer)
+        : findSendButton(doc, validation.composer);
       if (sendButton) {
         if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
           if (!snapshot.silent) toast('ChatGPT’s Send control is not ready. Your draft was not sent.', 7_000);
@@ -4084,17 +5145,27 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         }
         if (typeof snapshot.beforeReplay === 'function') {
           if (!await runBeforeReplay({ composer: validation.composer, sendButton })) return false;
-          const currentSendButton = findSendButton(doc, validation.composer);
+          const currentSendButton = snapshot.surface
+            ? sendControlForSurface(snapshot.surface, validation.composer)
+            : findSendButton(doc, validation.composer);
           if (!currentSendButton || currentSendButton.disabled || currentSendButton.getAttribute('aria-disabled') === 'true') return false;
-          armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator);
+          if (state.adaptiveCancelled) return false;
+          armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator, snapshot.surface);
           state.replayingSend = true;
           try { currentSendButton.click(); } finally { state.replayingSend = false; }
+          if (snapshot.surface && snapshot.surface.sessionId) {
+            win.setTimeout(() => clearEditSession(snapshot.surface.sessionId), 3_250);
+          }
           rememberRoute(selectedLevel, decision, manual, reason);
           return true;
         }
-        armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator);
+        if (state.adaptiveCancelled) return false;
+        armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator, snapshot.surface);
         state.replayingSend = true;
         try { sendButton.click(); } finally { state.replayingSend = false; }
+        if (snapshot.surface && snapshot.surface.sessionId) {
+          win.setTimeout(() => clearEditSession(snapshot.surface.sessionId), 3_250);
+        }
         rememberRoute(selectedLevel, decision, manual, reason);
         return true;
       }
@@ -4105,9 +5176,13 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         }
         const currentForm = validation.composer.closest('form');
         if (!currentForm || !currentForm.isConnected || typeof currentForm.requestSubmit !== 'function') return false;
-        armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator);
+        if (state.adaptiveCancelled) return false;
+        armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator, snapshot.surface);
         state.replayingSend = true;
         try { currentForm.requestSubmit(); } catch (_error) { return false; } finally { state.replayingSend = false; }
+        if (snapshot.surface && snapshot.surface.sessionId) {
+          win.setTimeout(() => clearEditSession(snapshot.surface.sessionId), 3_250);
+        }
         rememberRoute(selectedLevel, decision, manual, reason);
         return true;
       }
@@ -4310,10 +5385,14 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         ? modelLevelRank(decision.minimumLevel || target)
         : -1;
       const activeDiscoveryDeadline = discoveryDeadline || Date.now() + routingDiscoveryTimeout;
+      const routingComposer = () => snapshot.surface
+        ? resolveSurfaceComposer(snapshot.surface, null, true)
+        : findComposer(doc);
       const routingPickerCandidates = () => {
+        const composer = routingComposer();
         const preferred = targetRank >= ROUTE_LEVEL_RANK.pro
-          ? [findModelPicker(doc), findReasoningPicker(doc)]
-          : [findReasoningPicker(doc), findModelPicker(doc)];
+          ? [findModelPicker(doc, composer), findReasoningPicker(doc, composer)]
+          : [findReasoningPicker(doc, composer), findModelPicker(doc, composer)];
         return uniqueElements(preferred);
       };
       const pickerCandidates = routingPickerCandidates();
@@ -4598,9 +5677,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         await new Promise((resolve) => win.setTimeout(resolve, 100));
         selectionConfirmed = Boolean(await waitForCondition(() => {
           if (stagedThinkingChoice) {
-            const effortPicker = findReasoningPicker(doc);
+            const effortPicker = findReasoningPicker(doc, routingComposer());
             if (effortPicker) return effortPicker;
-            const basePicker = findModelPicker(doc);
+            const basePicker = findModelPicker(doc, routingComposer());
             if (basePicker && /\bthinking\b/iu.test(accessibleText(basePicker))) return basePicker;
           }
           const updated = currentRoutingPicker(choice.level);
@@ -4697,8 +5776,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         return replayNativeSend(snapshot, decision, reflected || current || 'unknown', manual, 'model switch unconfirmed; used current');
       }
       if (stagedThinkingChoice) {
-        await waitForCondition(() => findReasoningPicker(doc), {
-          root: composerScope(findComposer(doc)) || doc.documentElement,
+        await waitForCondition(() => findReasoningPicker(doc, routingComposer()), {
+          root: composerScope(routingComposer()) || doc.documentElement,
           win,
           timeout: 500,
           attributes: true,
@@ -4721,25 +5800,40 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     async function smartRouteAndSend(options = {}) {
       if (state.replayingSend) return false;
       if (state.adaptiveSendPromise) return state.adaptiveSendPromise;
-      const composer = options.composer && options.composer.isConnected ? options.composer : findComposer(doc);
-      const snapshot = options.snapshot && options.snapshot.path === conversationPath()
+      const suppliedSnapshot = options.snapshot && options.snapshot.path === conversationPath()
         ? options.snapshot
+        : null;
+      const composer = options.composer && options.composer.isConnected
+        ? options.composer
+        : suppliedSnapshot && suppliedSnapshot.surface
+          ? resolveSurfaceComposer(suppliedSnapshot.surface, null, true)
+          : findComposer(doc);
+      const snapshot = suppliedSnapshot
+        ? suppliedSnapshot
         : captureSendSnapshot(composer);
       if (!snapshot) return false;
       snapshot.draftValidator = typeof options.draftValidator === 'function' ? options.draftValidator : null;
       const suppliedBeforeReplay = typeof options.beforeReplay === 'function' ? options.beforeReplay : null;
       const guardedDraft = options.routingText == null
-        ? buildAccuracyGuardedPrompt(snapshot.draft)
+        ? buildAccuracyGuardedPrompt(snapshot.draft, QUESTION_MAX_LENGTH, snapshot)
         : snapshot.draft;
+      let accuracyGuardApplied = false;
       if (guardedDraft !== snapshot.draft) {
         snapshot.beforeReplay = async (context) => {
-          const liveComposer = context.composer && context.composer.isConnected ? context.composer : findComposer(doc);
+          const liveComposer = context.composer && context.composer.isConnected
+            ? context.composer
+            : snapshot.surface
+              ? resolveSurfaceComposer(snapshot.surface, snapshot.draft)
+              : findComposer(doc);
           if (!liveComposer || !composerTextEquals(liveComposer, snapshot.draft) ||
             !setComposerText(liveComposer, guardedDraft, win) || !composerTextEquals(liveComposer, guardedDraft)) {
             if (!snapshot.silent) toast('The accuracy check could not be added safely. Your message was not sent.', 8_000);
             return false;
           }
-          const activeComposer = findComposer(doc);
+          accuracyGuardApplied = true;
+          const activeComposer = snapshot.surface
+            ? resolveSurfaceComposer(snapshot.surface, guardedDraft)
+            : findComposer(doc);
           if (!activeComposer || !activeComposer.isConnected || !composerTextEquals(activeComposer, guardedDraft)) {
             if (!snapshot.silent) toast('The message box changed while the accuracy check was added. Your message was not sent.', 8_000);
             return false;
@@ -4749,7 +5843,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             const ready = await suppliedBeforeReplay({
               ...context,
               composer: activeComposer,
-              sendButton: findSendButton(doc, activeComposer),
+              sendButton: snapshot.surface
+                ? sendControlForSurface(snapshot.surface, activeComposer)
+                : findSendButton(doc, activeComposer),
               form: activeComposer.closest('form'),
             });
             if (!ready) return false;
@@ -4768,19 +5864,35 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
       const task = Promise.resolve().then(async () => {
         const transferredContext = options.routingText != null && !snapshot.hasPriorConversation
-          ? transferredConversationRoutingState(snapshot.draft)
+          ? transferredConversationRoutingState(snapshot.draft, options.routingText)
           : null;
         const inferredConversationLevel = strongerRouteLevel(
           snapshot.conversationLevel,
           transferredContext && transferredContext.conversationLevel,
         );
         const explicitDecision = classifyPrompt(options.routingText == null ? snapshot.draft : options.routingText, {
-          previousLevel: inferredConversationLevel ? '' : previousRouteLevel(),
+          previousLevel: inferredConversationLevel || (snapshot.surface && snapshot.surface.kind === 'edit'
+            ? ''
+            : previousRouteLevel()),
           attachmentCount: snapshot.attachmentCount,
           attachmentProfile: snapshot.attachmentProfile,
           hasPriorConversation: transferredContext ? true : snapshot.hasPriorConversation,
           conversationLevel: inferredConversationLevel,
+          archivedConversationLevel: strongerRouteLevel(
+            snapshot.archivedConversationLevel,
+            transferredContext && transferredContext.archivedConversationLevel,
+          ),
           assistantContextLevel: strongerRouteLevel(snapshot.assistantContextLevel, transferredContext && transferredContext.assistantContextLevel),
+          awaitingConfirmation: snapshot.awaitingConfirmation || Boolean(transferredContext && transferredContext.awaitingConfirmation),
+          latestAssistantText: transferredContext && transferredContext.latestAssistantText || snapshot.latestAssistantText,
+          archivedMeaningfulTurnCount: Math.max(
+            snapshot.archivedMeaningfulTurnCount || 0,
+            transferredContext && transferredContext.archivedMeaningfulTurnCount || 0,
+          ),
+          archivedSampledTextLength: Math.max(
+            snapshot.archivedSampledTextLength || 0,
+            transferredContext && transferredContext.archivedSampledTextLength || 0,
+          ),
           historicalAttachmentProfile: transferredContext
             ? mergeAttachmentProfiles(snapshot.historicalAttachmentProfile, transferredContext.historicalAttachmentProfile)
             : snapshot.historicalAttachmentProfile,
@@ -4795,11 +5907,27 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         return routeAndReplay(snapshot, decision, false, options.silent === true);
       });
       state.adaptiveSendPromise = task;
+      state.activeAdaptiveSnapshot = snapshot;
       syncSettingsUI();
+      const rollbackAccuracyGuard = () => {
+        if (!accuracyGuardApplied) return;
+        const guardedComposer = snapshot.surface
+          ? resolveSurfaceComposer(snapshot.surface, guardedDraft, true)
+          : findComposer(doc);
+        if (guardedComposer && composerTextEquals(guardedComposer, guardedDraft)) {
+          setComposerText(guardedComposer, snapshot.draft, win);
+        }
+      };
       try {
-        return await task;
+        const sent = await task;
+        if (!sent) rollbackAccuracyGuard();
+        return sent;
+      } catch (error) {
+        rollbackAccuracyGuard();
+        throw error;
       } finally {
         if (state.adaptiveSendPromise === task) state.adaptiveSendPromise = null;
+        if (state.activeAdaptiveSnapshot === snapshot) state.activeAdaptiveSnapshot = null;
         syncSettingsUI();
       }
     }
@@ -6440,95 +7568,238 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       return Boolean(composer && node && (node === composer || composer.contains(node)));
     }
 
+    function sameSendIntent(left, right) {
+      return Boolean(left && right && left.path === right.path &&
+        left.surface && right.surface && left.surface.key === right.surface.key &&
+        (left.surface.sessionId || 0) === (right.surface.sessionId || 0) &&
+        left.conversationVersion === right.conversationVersion &&
+        left.draft === right.draft && left.attachmentSignature === right.attachmentSignature &&
+        left.toolSignature === right.toolSignature);
+    }
+
+    function launchAdaptiveTask(composer, snapshot) {
+      smartRouteAndSend({ composer, snapshot }).catch((error) => {
+        if (win.console && typeof win.console.error === 'function') win.console.error('[ChatGPT Workflow Toolkit] Adaptive send failed:', error);
+        toast('Adaptive Auto hit an unexpected error. Your draft was kept; press Alt+Send to bypass it.', 8_000);
+      }).finally(() => {
+        const pending = state.pendingAdaptiveSend;
+        if (!pending) return;
+        state.pendingAdaptiveSend = null;
+        const validation = validateSendSnapshot(pending.snapshot);
+        if (!validation.ok) return;
+        state.adaptiveCancelled = false;
+        launchAdaptiveTask(validation.composer, pending.snapshot);
+      });
+    }
+
     function beginAdaptiveSend(event, composer, options = {}) {
       if (state.replayingSend) return false;
+      const surface = options.surface || submissionSurface(composer, { submitter: options.submitter });
+      if (!surface) return false;
       const bypass = options.altKey || event && event.altKey;
       if (bypass) {
-        if (adaptiveApplies(composer)) armSubmitReplayPermit(composer, 'alt-bypass');
+        if (adaptiveApplies(composer)) armSubmitReplayPermit(composer, 'alt-bypass', null, surface);
         return false;
       }
       if (!adaptiveApplies(composer)) return false;
       state.submitReplayPermit = null;
-      const snapshot = captureSendSnapshot(composer);
+      const snapshot = captureSendSnapshot(composer, surface);
       if (!snapshot || !snapshot.draft.trim() && snapshot.attachmentCount === 0) return false;
       if (event) {
         event.preventDefault();
         event.stopImmediatePropagation();
       }
-      if (!state.adaptiveSendPromise) {
-        smartRouteAndSend({ composer, snapshot }).catch((error) => {
-          if (win.console && typeof win.console.error === 'function') win.console.error('[ChatGPT Workflow Toolkit] Adaptive send failed:', error);
-          toast('Adaptive Auto hit an unexpected error. Your draft was kept; press Alt+Send to bypass it.', 8_000);
-        });
+      if (surface.kind === 'edit' && hasActiveGeneration(doc)) {
+        toast('Wait for ChatGPT to finish before resending an edited message.', 7_000);
+        return true;
       }
+      if (state.adaptiveSendPromise) {
+        const queued = state.pendingAdaptiveSend && state.pendingAdaptiveSend.snapshot;
+        const retryAfterCancellation = state.adaptiveCancelled && !sameSendIntent(snapshot, queued);
+        if (retryAfterCancellation ||
+          !sameSendIntent(snapshot, state.activeAdaptiveSnapshot) && !sameSendIntent(snapshot, queued)) {
+          state.adaptiveCancelled = true;
+          state.pendingAdaptiveSend = { snapshot };
+        }
+        return true;
+      }
+      launchAdaptiveTask(composer, snapshot);
       return true;
     }
 
     function onAdaptiveClick(event) {
       if (state.replayingSend) return;
-      const potentialSend = event.target && event.target.closest && event.target.closest(SEND_BUTTON_SELECTORS.join(', '));
-      if (!potentialSend) return;
-      const composer = findComposer(doc);
-      const sendButton = findSendButton(doc, composer);
-      if (!sendButton || potentialSend !== sendButton) return;
+      const control = event.target && event.target.closest && event.target.closest(
+        `${SUBMISSION_CONTROL_SELECTOR}, [role="menuitem"]`,
+      );
+      if (!control || control.closest(`#${UI_ROOT_ID}`)) return;
+      const label = lowerText(`${accessibleText(control)} ${control.value || ''}`);
+      const testId = lowerText(control.getAttribute('data-testid'));
+      const actionTurn = closestUserTurn(control);
+      const moreActionLabel = [
+        control.getAttribute('aria-label'),
+        control.getAttribute('title'),
+        control.textContent,
+        accessibleText(control),
+      ].some((value) => /^(?:more|more actions|more options|message actions|response actions)(?:\s*(?:\.\.\.|…|⋯))*$/iu.test(normalizeText(value)));
+      if (actionTurn && (moreActionLabel ||
+        /(?:more|menu)[-_ ]?(?:actions?|button)|message[-_ ]?actions?/iu.test(testId))) {
+        rememberEditMenuSource(actionTurn, control);
+        return;
+      }
+      const editAction = (/\bedit(?: message)?\b/iu.test(label) || /edit[-_ ]?(?:message|prompt)/iu.test(testId)) &&
+        !/\b(?:send|submit|resend)\b/iu.test(label);
+      const editActionTurn = actionTurn || editAction && editMenuSourceTurn(control);
+      if (editActionTurn && editAction &&
+        !/\b(?:send|submit|resend)\b/iu.test(label)) {
+        state.pendingEditMenuSource = null;
+        startEditSession(editActionTurn, control);
+        return;
+      }
+      if (/\b(?:cancel|discard)(?:\s+edit)?\b/iu.test(label) &&
+        !/\b(?:send|submit|resend)\b/iu.test(label) && cancelBelongsToEditSurface(control, actionTurn)) {
+        clearEditSession();
+        if (state.activeAdaptiveSnapshot && state.activeAdaptiveSnapshot.surface &&
+          state.activeAdaptiveSnapshot.surface.kind === 'edit') state.adaptiveCancelled = true;
+        state.pendingAdaptiveSend = null;
+        return;
+      }
+      const surface = interactionSurface(control, { submitter: control });
+      if (!surface) return;
+      const composer = resolveSurfaceComposer(surface, null, true);
+      if (!composer) return;
+      const validSend = surface.kind === 'edit'
+        ? isEditSubmissionControl(control, composer, surfaceTurn(surface)) ||
+          sessionPortalControl(control, composer, 'send')
+        : control.matches(SEND_BUTTON_SELECTORS.join(', ')) && control === findSendButton(doc, composer);
+      if (!validSend) return;
       if (state.sideAutomationActive) {
         event.preventDefault();
         event.stopImmediatePropagation();
         return;
       }
-      beginAdaptiveSend(event, composer);
+      beginAdaptiveSend(event, composer, { surface, submitter: control });
     }
 
     function onAdaptiveKeyDown(event) {
       if (event.key === 'Escape' && state.adaptiveSendPromise) {
         state.adaptiveCancelled = true;
+        state.pendingAdaptiveSend = null;
+        const activeSurface = state.activeAdaptiveSnapshot && state.activeAdaptiveSnapshot.surface;
+        const editSession = state.pendingEditSession;
+        const preserveBoundEdit = Boolean(activeSurface && activeSurface.kind === 'edit' &&
+          activeSurface.sessionId && editSession && editSession.id === activeSurface.sessionId &&
+          editSession.composerRef && editSession.composerRef.isConnected);
+        if (!preserveBoundEdit) clearEditSession();
         return;
       }
+      if (event.key === 'Escape') clearEditSession();
       if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
-      const composer = findComposer(doc);
-      if (!composerContainsTarget(composer, event.target) || state.composingComposer === composer) return;
+      const surface = interactionSurface(event.target);
+      if (!surface) return;
+      const composer = resolveSurfaceComposer(surface, null, true);
+      if (!composer || !composerContainsTarget(composer, event.target) || state.composingComposer === composer) return;
       if (state.sideAutomationActive && !state.replayingSend) {
         event.preventDefault();
         event.stopImmediatePropagation();
         return;
       }
       if (event.altKey) {
-        beginAdaptiveSend(null, composer, { altKey: true });
+        beginAdaptiveSend(null, composer, { altKey: true, surface });
         return;
       }
-      const sendButton = findSendButton(doc, composer);
+      const sendButton = sendControlForSurface(surface, composer);
       if (!sendButton || sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') return;
       const activeDescendantId = normalizeText(composer.getAttribute('aria-activedescendant'));
       const activeDescendant = activeDescendantId ? doc.getElementById(activeDescendantId) : null;
+      const ownedPopupIds = normalizeText(
+        `${composer.getAttribute('aria-controls') || ''} ${composer.getAttribute('aria-owns') || ''}`,
+      ).split(/\s+/u).filter(Boolean);
+      const suggestionRoots = uniqueElements([
+        surface.kind === 'edit' ? editPortalScope(composer) || composerScope(composer) : composerScope(composer),
+        ...ownedPopupIds.map((id) => doc.getElementById(id)),
+      ]);
       const selectedSuggestion = activeDescendant && isProbablyVisible(activeDescendant)
         ? activeDescendant
-        : [...doc.querySelectorAll('[role="option"][aria-selected="true"], [role="option"][data-highlighted], [role="menuitem"][data-highlighted]')]
+        : uniqueElements(suggestionRoots.flatMap((root) => [...root.querySelectorAll(
+          '[role="option"][aria-selected="true"], [role="option"][data-highlighted], [role="menuitem"][data-highlighted]',
+        )]))
         .find((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`));
       if (selectedSuggestion && !event.metaKey && !event.ctrlKey) return;
-      beginAdaptiveSend(event, composer);
+      beginAdaptiveSend(event, composer, { surface, submitter: sendButton });
     }
 
     function onAdaptiveSubmit(event) {
-      const composer = findComposer(doc);
-      if (!composer || !event.target || event.target !== composer.closest('form')) return;
-      if (state.replayingSend) return;
+      const form = event.target && event.target.nodeType === 1 ? event.target : null;
+      if (!form || !form.matches('form')) return;
+      const submitter = event.submitter && event.submitter.nodeType === 1 ? event.submitter : null;
+      if (state.submitReplayPermit && state.submitReplayPermit.form === form) {
+        const exactComposer = findComposerInScope(form, submitter || form);
+        const exactResult = consumeSubmitReplayPermit(event, exactComposer, null);
+        if (exactResult === 'allow') return;
+        if (exactResult === 'duplicate') {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+      }
+      if (state.replayingSend) {
+        let replaySurface = interactionSurface(submitter || form, { form, submitter });
+        let replayComposer = replaySurface
+          ? resolveSurfaceComposer(replaySurface, null, true)
+          : findComposerInScope(form, submitter || form);
+        if (!replaySurface) {
+          const mounted = mountedEditReplayCandidate(form, submitter);
+          if (mounted) {
+            replaySurface = mounted.surface;
+            replayComposer = mounted.composer;
+          }
+        }
+        const replayResult = consumeSubmitReplayPermit(event, replayComposer, replaySurface);
+        if (replayResult === 'allow') return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (submitter) {
+        const submitterLabel = lowerText(`${accessibleText(submitter)} ${submitter.value || ''}`);
+        const submitterTestId = lowerText(submitter.getAttribute('data-testid'));
+        if ((/\b(?:cancel|discard|close)(?:\s+edit)?\b/iu.test(submitterLabel) ||
+          /(?:cancel|discard|close)[-_ ]?(?:edit|message|prompt)?/iu.test(submitterTestId)) &&
+          !/\b(?:send|submit|resend)\b/iu.test(submitterLabel)) return;
+      }
+      const surface = interactionSurface(event.submitter || form, { form, submitter: event.submitter || null });
+      if (!surface) return;
+      const composer = resolveSurfaceComposer(surface, null, true);
+      if (!composer || form !== composer.closest('form')) return;
+      if (surface.kind === 'edit' && submitter &&
+        !isEditSubmissionControl(submitter, composer, surfaceTurn(surface))) return;
       // ChatGPT may dispatch the actual form submit shortly after our
       // programmatic Send click returns. Let only that short-lived, exact
       // composer replay through while the broader side-job guard stays active.
       if (state.sideAutomationActive) {
-        if (state.submitReplayPermit && state.submitReplayPermit.kind === 'adaptive-replay' &&
-          consumeSubmitReplayPermit(event, composer)) return;
+        const replayResult = state.submitReplayPermit && state.submitReplayPermit.kind === 'adaptive-replay'
+          ? consumeSubmitReplayPermit(event, composer, surface)
+          : false;
+        if (replayResult === 'allow') return;
         state.submitReplayPermit = null;
         event.preventDefault();
         event.stopImmediatePropagation();
         return;
       }
-      if (consumeSubmitReplayPermit(event, composer)) return;
-      beginAdaptiveSend(event, composer);
+      const replayResult = consumeSubmitReplayPermit(event, composer, surface);
+      if (replayResult === 'allow') return;
+      if (replayResult === 'duplicate') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      beginAdaptiveSend(event, composer, { surface, submitter: event.submitter || null });
     }
 
     function onCompositionStart(event) {
-      const composer = findComposer(doc);
+      const surface = interactionSurface(event.target);
+      const composer = surface && resolveSurfaceComposer(surface, null, true);
       if (composerContainsTarget(composer, event.target)) state.composingComposer = composer;
     }
 
@@ -6671,6 +7942,57 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       ));
     }
 
+    function visibilityMutationChangesConversation(node, attributeName = '', oldValue = '') {
+      const target = mutationElement(node);
+      if (!target || isToolkitMutationNode(target)) return false;
+      const recordedComputedVisibilityChanged = () => {
+        if (!state.routingComputedVisibility.has(target) || typeof win.getComputedStyle !== 'function') return false;
+        const previous = state.routingComputedVisibility.get(target);
+        let current = false;
+        try {
+          const style = win.getComputedStyle(target);
+          current = style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' ||
+            style.contentVisibility === 'hidden';
+        } catch (_error) {
+          return false;
+        }
+        state.routingComputedVisibility.set(target, current);
+        return previous !== current;
+      };
+      if (target.matches(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`)) {
+        if (attributeName === 'class') {
+          return classTokensHideContent(oldValue) !== classTokensHideContent(target.getAttribute('class')) ||
+            classMayControlVisibility(oldValue) !== classMayControlVisibility(target.getAttribute('class')) ||
+            recordedComputedVisibilityChanged();
+        }
+        if (attributeName === 'style') {
+          return inlineStyleHidesContent(oldValue) !== inlineStyleHidesContent(target.getAttribute('style')) ||
+            recordedComputedVisibilityChanged();
+        }
+        return true;
+      }
+      if (target.closest(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`)) {
+        // Class/style churn inside code blocks and controls is common while a
+        // response is hovered or highlighted; it is not a branch swap.
+        if (attributeName === 'class') {
+          return classTokensHideContent(oldValue) !== classTokensHideContent(target.getAttribute('class')) ||
+            classMayControlVisibility(oldValue) !== classMayControlVisibility(target.getAttribute('class')) ||
+            recordedComputedVisibilityChanged();
+        }
+        if (attributeName === 'style') {
+          return inlineStyleHidesContent(oldValue) !== inlineStyleHidesContent(target.getAttribute('style')) ||
+            recordedComputedVisibilityChanged();
+        }
+        return true;
+      }
+      const containedTurns = getTurns(target);
+      if (!containedTurns.length) return false;
+      const allTurns = getTurns(doc);
+      // Modal menus may temporarily mark the entire app aria-hidden. That is
+      // not a branch/context change; a hidden subset of turns is.
+      return containedTurns.length < allTurns.length;
+    }
+
     function nodeTouchesGenerationControl(node) {
       const target = mutationElement(node);
       if (!target) return false;
@@ -6695,6 +8017,18 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       return target.matches(selector) || Boolean(target.closest(selector));
     }
 
+    function nodeIsInsideLiveEditor(node) {
+      const target = mutationElement(node);
+      if (!target) return false;
+      const editor = target.matches(LOCAL_COMPOSER_SELECTOR)
+        ? target
+        : target.closest(LOCAL_COMPOSER_SELECTOR);
+      if (!editor || !editor.isConnected || editor.closest(`#${UI_ROOT_ID}`) || !closestUserTurn(editor)) return false;
+      if (editor.tagName === 'TEXTAREA') return !editor.disabled && !editor.readOnly;
+      const editable = lowerText(editor.getAttribute('contenteditable'));
+      return editor.isContentEditable || editable === 'true' || editable === 'plaintext-only';
+    }
+
     function evictHistoricalAttachmentCache(mutation) {
       const roleChanged = mutation.type === 'attributes' &&
         ['data-message-author-role', 'data-turn'].includes(mutation.attributeName);
@@ -6707,10 +8041,15 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
     function mutationChangesConversation(mutation) {
       if (!mutation || isToolkitMutationNode(mutation.target)) return false;
+      if ((mutation.type === 'characterData' || mutation.type === 'childList') &&
+        nodeIsInsideLiveEditor(mutation.target)) return false;
       if (mutation.type === 'characterData') return nodeIsInsideConversation(mutation.target);
       if (mutation.type === 'attributes') {
         const name = mutation.attributeName || '';
         if (name === 'data-message-author-role' || name === 'data-turn') return true;
+        if (name === 'hidden' || name === 'inert' || name === 'aria-hidden' || name === 'data-state' || name === 'style' || name === 'class') {
+          return visibilityMutationChangesConversation(mutation.target, name, mutation.oldValue);
+        }
         if (['data-is-streaming', 'data-streaming', 'data-file-id', 'data-attachment-id', 'data-file-name',
           'data-filename', 'data-name', 'data-mime-type', 'data-file-type', 'data-file-size', 'data-size'].includes(name)) {
           return nodeIsInsideConversation(mutation.target);
@@ -6730,13 +8069,75 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         nodeTouchesConversation(node) || nodeTouchesGenerationControl(node));
     }
 
+    function conversationMutationImpact(mutations) {
+      const affectedTurns = new Set();
+      let structural = false;
+      const recordTurn = (turn) => {
+        if (!turn) return false;
+        affectedTurns.add(turn);
+        return true;
+      };
+      for (const mutation of mutations) {
+        const roleChanged = mutation.type === 'attributes' &&
+          ['data-message-author-role', 'data-turn'].includes(mutation.attributeName);
+        const visibilityChanged = mutation.type === 'attributes' &&
+          ['hidden', 'inert', 'aria-hidden', 'data-state', 'style', 'class'].includes(mutation.attributeName);
+        const targetTurn = conversationTurnForNode(mutation.target, roleChanged);
+        const target = mutationElement(mutation.target);
+        const membershipVisibilityChange = visibilityChanged && Boolean(target) && (
+          target.matches(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`) || !targetTurn
+        );
+        if (membershipVisibilityChange) structural = true;
+        const targetRecorded = membershipVisibilityChange ? false : recordTurn(targetTurn);
+        if (mutation.type !== 'childList') continue;
+        let changedTurnRecorded = false;
+        for (const node of mutation.addedNodes) {
+          for (const turn of potentialTurnsFromRoot(node)) {
+            if (recordTurn(turn)) {
+              changedTurnRecorded = true;
+              structural = true;
+            }
+          }
+        }
+        for (const node of mutation.removedNodes) {
+          const removedTurns = potentialTurnsFromRoot(node);
+          if (removedTurns.length) {
+            structural = true;
+            for (const turn of removedTurns) recordTurn(turn);
+          }
+        }
+        if (!targetRecorded && !changedTurnRecorded &&
+          [...mutation.addedNodes, ...mutation.removedNodes].some(nodeTouchesConversation)) structural = true;
+      }
+      return { structural, turns: [...affectedTurns] };
+    }
+
     function observe() {
       state.observer = new win.MutationObserver((mutations) => {
+        const pendingSession = state.pendingEditSession;
+        if (pendingSession && (!pendingSession.composerRef || !pendingSession.composerRef.isConnected) &&
+          mutations.some((mutation) => mutation.type === 'childList' && mutation.addedNodes.length > 0)) {
+          const editSession = activeEditSession();
+          bindEditSession(editSession);
+        }
         let conversationChanged = false;
+        const changedMutations = [];
         for (const mutation of mutations) {
-          if (!conversationChanged && mutationChangesConversation(mutation)) conversationChanged = true;
-          if (mutation.type === 'attributes') scheduleScan(mutation.target);
-          else {
+          const changesConversation = mutationChangesConversation(mutation);
+          if (changesConversation) {
+            conversationChanged = true;
+            changedMutations.push(mutation);
+          }
+          if (mutation.type === 'attributes') {
+            const name = mutation.attributeName || '';
+            const selectorRelevant = [
+              'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label',
+              'data-message-author-role', 'data-turn', 'data-testid', 'data-is-streaming', 'data-streaming',
+            ].includes(name);
+            const visibilityRelevant = changesConversation &&
+              ['hidden', 'inert', 'aria-hidden', 'data-state', 'style', 'class'].includes(name);
+            if (selectorRelevant || visibilityRelevant) scheduleScan(mutation.target);
+          } else {
             for (const node of mutation.addedNodes) scheduleScan(node);
             if (mutation.removedNodes.length) scheduleScan(mutation.target);
           }
@@ -6744,7 +8145,17 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         if (conversationChanged) {
           for (const mutation of mutations) evictHistoricalAttachmentCache(mutation);
           state.conversationMutationVersion += 1;
+          const impact = conversationMutationImpact(changedMutations);
+          state.conversationMutationHistory.push({
+            version: state.conversationMutationVersion,
+            structural: impact.structural,
+            turns: impact.turns,
+          });
+          if (state.conversationMutationHistory.length > 100) {
+            state.conversationMutationHistory.splice(0, state.conversationMutationHistory.length - 100);
+          }
           state.conversationRoutingCache = null;
+          state.editConversationRoutingCache.clear();
         }
       });
       state.observer.observe(doc.body, {
@@ -6755,6 +8166,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         characterData: true,
         attributeFilter: [
           'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label', 'title',
+          'hidden', 'inert', 'aria-hidden', 'data-state', 'style', 'class',
           'data-message-author-role', 'data-turn', 'data-testid', 'data-is-streaming', 'data-streaming',
           'data-file-id', 'data-attachment-id', 'data-file-name', 'data-filename', 'data-name',
           'data-mime-type', 'data-file-type', 'data-file-size', 'data-size',
