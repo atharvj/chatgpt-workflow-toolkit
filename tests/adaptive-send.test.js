@@ -387,6 +387,17 @@ function wait(win, milliseconds) {
   return new Promise((resolve) => win.setTimeout(resolve, milliseconds));
 }
 
+function installGuestChrome(harness, options = {}) {
+  const header = harness.document.createElement('header');
+  header.id = options.id || 'guest-auth-header';
+  if (options.hidden) header.hidden = true;
+  header.innerHTML = `
+    <a href="/auth/login" data-testid="login-button">Log in</a>
+    <a href="/auth/signup" data-testid="signup-button">Sign up</a>`;
+  harness.document.body.prepend(header);
+  return header;
+}
+
 test('simple prompt switches High to Instant and replays Send exactly once', async (t) => {
   const harness = await createHarness({ prompt: 'Thanks!', pickerLevel: 'High' });
   t.after(() => harness.cleanup());
@@ -3477,6 +3488,291 @@ test('already-correct picker sends without opening the model menu', async (t) =>
   assert.equal(harness.counters.pickerOpens, 0);
   assert.equal(harness.counters.optionClicks, 0);
   assert.equal(harness.counters.sends, 1);
+});
+
+test('signed-out session bypasses an auth-only model menu and sends exactly once', async (t) => {
+  const harness = await createHarness({
+    prompt: 'what is 2+2',
+    pickerLevel: 'ChatGPT',
+    modelLevels: ['Log in', 'Sign up', 'Upgrade'],
+  });
+  t.after(() => harness.cleanup());
+  installGuestChrome(harness);
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.pickerOpens, 0, 'guest routing must not probe a non-selectable picker');
+  assert.equal(harness.counters.optionClicks, 0);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'guest-default');
+  assert.match(harness.app.state.lastRouteDecision.reason, /signed-out session.*selection unavailable/iu);
+  assert.equal(harness.document.querySelector('[data-cgs-auto-badge]').textContent, 'Auto unavailable · ChatGPT default');
+  assert.doesNotMatch(harness.document.querySelector('#cgs-toast').textContent, /not sent|no compatible/iu);
+});
+
+test('signed-out no-picker sends work through click, Enter, and direct form submission', async () => {
+  for (const mode of ['click', 'enter', 'submit-with-button', 'submit-without-button']) {
+    const harness = await createHarness({ prompt: 'what is 2+2', includePicker: false });
+    try {
+      installGuestChrome(harness);
+      if (mode === 'click') {
+        harness.sendButton.click();
+      } else if (mode === 'enter') {
+        const event = new harness.window.KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        });
+        assert.equal(harness.composer.dispatchEvent(event), false, `${mode} is captured before guest replay`);
+      } else {
+        const event = new harness.window.SubmitEvent('submit', {
+          bubbles: true,
+          cancelable: true,
+          submitter: mode === 'submit-with-button' ? harness.sendButton : null,
+        });
+        assert.equal(harness.composer.closest('form').dispatchEvent(event), false, `${mode} is captured before guest replay`);
+      }
+      await finishAdaptiveSend(harness);
+
+      assert.equal(harness.counters.sends, 1, `${mode} replays one native Send`);
+      assert.equal(harness.counters.requestSubmits, 0, `${mode} does not synthesize a fallback form submission`);
+      assert.equal(harness.app.state.lastRouteDecision.level, 'guest-default');
+    } finally {
+      harness.cleanup();
+    }
+  }
+});
+
+test('signed-out strict answer recheck still adds its accuracy guard and sends', async (t) => {
+  const prompt = "I don't get why the answer is 12V and 4V.";
+  const harness = await createHarness({ prompt, includePicker: false });
+  t.after(() => harness.cleanup());
+  installGuestChrome(harness);
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'guest-default');
+  assert.ok(harness.composer.value.startsWith(prompt));
+  assert.match(harness.composer.value, /independently verify the stated answer or result/iu);
+});
+
+test('signed-out explicit route and attachment-only sends remain sendable', async () => {
+  const cases = [
+    {
+      prompt: '!route:pro\nSay hello.',
+      attachmentMarkup: '',
+      expectedTarget: 'pro',
+    },
+    {
+      prompt: '',
+      attachmentMarkup: '<div data-testid="attachment-pill" data-file-id="guest-pdf" aria-label="notes.pdf | 2 MB"></div>',
+      expectedTarget: 'medium',
+    },
+  ];
+  for (const scenario of cases) {
+    const harness = await createHarness({
+      prompt: scenario.prompt,
+      attachmentMarkup: scenario.attachmentMarkup,
+      includePicker: false,
+    });
+    try {
+      installGuestChrome(harness);
+      harness.sendButton.click();
+      await finishAdaptiveSend(harness);
+
+      assert.equal(harness.counters.sends, 1);
+      assert.equal(harness.app.state.lastRouteDecision.target, scenario.expectedTarget);
+      assert.equal(harness.app.state.lastRouteDecision.level, 'guest-default');
+    } finally {
+      harness.cleanup();
+    }
+  }
+});
+
+test('signed-out edited resend uses its own editor and never the bottom composer', async (t) => {
+  const harness = await createEditHarness({ draft: 'what is 2+2', pickerLevel: 'ChatGPT' });
+  t.after(() => harness.cleanup());
+  installGuestChrome(harness);
+
+  harness.editSend.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.editCounters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.composer.value, 'Bottom composer must stay untouched.');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'guest-default');
+});
+
+test('signed-out delayed framework submit consumes one replay permit without rerouting', async (t) => {
+  const harness = await createHarness({
+    prompt: 'what is 2+2',
+    pickerLevel: 'ChatGPT',
+    modelLevels: [],
+    delayedSubmitAfterClick: 0,
+  });
+  t.after(() => harness.cleanup());
+  installGuestChrome(harness);
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+  await wait(harness.window, 25);
+
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.counters.submits, 1);
+  assert.equal(harness.counters.pickerOpens, 0);
+  assert.equal(harness.app.state.pendingAdaptiveSend, null);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'guest-default');
+});
+
+test('guest detection requires visible auth chrome and rejects contradictory profile evidence', async (t) => {
+  const harness = await createHarness({ prompt: 'what is 2+2', includePicker: false });
+  t.after(() => harness.cleanup());
+  const conversationLink = harness.document.createElement('article');
+  conversationLink.dataset.testid = 'conversation-turn-login-example';
+  conversationLink.dataset.messageAuthorRole = 'assistant';
+  conversationLink.innerHTML = '<a href="/auth/login" data-testid="login-button">Log in</a><button>Sign up</button>';
+  harness.document.querySelector('main').prepend(conversationLink);
+  assert.equal(toolkit.accountRoutingCapability(harness.document), 'unknown');
+
+  const authHeader = installGuestChrome(harness, { hidden: true });
+  assert.equal(toolkit.accountRoutingCapability(harness.document), 'unknown');
+  authHeader.hidden = false;
+  assert.equal(toolkit.accountRoutingCapability(harness.document), 'guest');
+
+  const profile = harness.document.createElement('button');
+  profile.dataset.testid = 'profile-button';
+  profile.setAttribute('aria-label', 'Open profile');
+  harness.document.body.prepend(profile);
+  assert.equal(toolkit.accountRoutingCapability(harness.document), 'signed-in');
+});
+
+test('plain Log in and Sign up for free buttons in nonsemantic page chrome enable guest sending', async (t) => {
+  const harness = await createHarness({ prompt: 'what is 2+2', includePicker: false });
+  t.after(() => harness.cleanup());
+  const chrome = harness.document.createElement('div');
+  chrome.innerHTML = '<button type="button">Log in</button><button type="button">Sign up for free</button>';
+  harness.document.body.prepend(chrome);
+  assert.equal(toolkit.accountRoutingCapability(harness.document), 'guest');
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'guest-default');
+});
+
+test('an exact standalone ChatGPT login test ID enables guest sending outside semantic chrome', async (t) => {
+  const harness = await createHarness({ prompt: 'what is 2+2', includePicker: false });
+  t.after(() => harness.cleanup());
+  const chrome = harness.document.createElement('div');
+  chrome.innerHTML = '<button type="button" data-testid="login-button">Log in</button>';
+  harness.document.body.prepend(chrome);
+  assert.equal(toolkit.accountRoutingCapability(harness.document), 'guest');
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'guest-default');
+});
+
+test('a recognized current intelligence level overrides an unrelated exact login control', async (t) => {
+  const harness = await createHarness({ prompt: 'what is 2+2', pickerLevel: 'High' });
+  t.after(() => harness.cleanup());
+  const unrelatedLogin = harness.document.createElement('button');
+  unrelatedLogin.type = 'button';
+  unrelatedLogin.dataset.testid = 'login-button';
+  unrelatedLogin.textContent = 'Log in';
+  harness.document.body.prepend(unrelatedLogin);
+  assert.equal(toolkit.accountRoutingCapability(harness.document), 'signed-in');
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.pickerOpens, 1);
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('account-menu label variants override contradictory guest controls', async () => {
+  for (const ariaLabel of ['Account menu', 'Open user menu']) {
+    const harness = await createHarness({ prompt: 'what is 2+2', includePicker: false });
+    try {
+      const login = harness.document.createElement('button');
+      login.type = 'button';
+      login.dataset.testid = 'login-button';
+      login.textContent = 'Log in';
+      harness.document.body.prepend(login);
+      const account = harness.document.createElement('button');
+      account.type = 'button';
+      account.setAttribute('aria-label', ariaLabel);
+      harness.document.body.prepend(account);
+      assert.equal(toolkit.accountRoutingCapability(harness.document), 'signed-in');
+
+      harness.sendButton.click();
+      await finishAdaptiveSend(harness);
+
+      assert.equal(harness.counters.sends, 0);
+      assert.equal(harness.app.state.lastRouteDecision, null);
+    } finally {
+      harness.cleanup();
+    }
+  }
+});
+
+test('third-party login dialogs and unrelated login test IDs never enable guest fallback', async (t) => {
+  const harness = await createHarness({ prompt: 'what is 2+2', includePicker: false });
+  t.after(() => harness.cleanup());
+  const dialog = harness.document.createElement('div');
+  dialog.setAttribute('role', 'dialog');
+  dialog.innerHTML = `
+    <a href="https://example.com/login" data-testid="service-login">Log in</a>
+    <button type="button">Sign up</button>`;
+  harness.document.body.prepend(dialog);
+  const connector = harness.document.createElement('button');
+  connector.type = 'button';
+  connector.dataset.testid = 'github-login';
+  connector.textContent = 'Log in';
+  harness.document.body.prepend(connector);
+  const externalHeader = harness.document.createElement('header');
+  externalHeader.innerHTML = `
+    <a href="https://accounts.example.com/login">Log in</a>
+    <a href="https://accounts.example.com/signup">Sign up</a>`;
+  harness.document.body.prepend(externalHeader);
+  assert.equal(toolkit.accountRoutingCapability(harness.document), 'unknown');
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /draft was not sent/iu);
+});
+
+test('live signed-in evidence overrides a snapshot captured while guest auth chrome was visible', async (t) => {
+  const harness = await createHarness({ prompt: 'what is 2+2', includePicker: false });
+  t.after(() => harness.cleanup());
+  const authHeader = installGuestChrome(harness);
+  const snapshot = harness.app.captureSendSnapshot(harness.composer);
+  assert.ok(snapshot);
+  authHeader.remove();
+  const profile = harness.document.createElement('button');
+  profile.dataset.testid = 'profile-button';
+  profile.setAttribute('aria-label', 'Open profile');
+  harness.document.body.prepend(profile);
+  assert.equal(toolkit.accountRoutingCapability(harness.document), 'signed-in');
+
+  const sent = await harness.app.smartRouteAndSend({ composer: harness.composer, snapshot });
+
+  assert.equal(sent, false);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.app.state.lastRouteDecision, null);
 });
 
 test('ordinary prompt with no picker fails open and sends exactly once', async (t) => {

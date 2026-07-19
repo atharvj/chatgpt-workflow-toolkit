@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.15
+// @version      1.4.16
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.15';
+  const VERSION = '1.4.16';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1420,6 +1420,133 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       // when computed style is temporarily unavailable during a rerender.
     }
     return true;
+  }
+
+  function accountRoutingCapability(doc, composer = findComposer(doc)) {
+    if (!doc || typeof doc.querySelectorAll !== 'function') return 'unknown';
+    const structurallyExcluded = (node) => {
+      if (!node || node.closest(`#${UI_ROOT_ID}`) || node.closest(TURN_SELECTOR) || node.closest(ROLE_SELECTOR) ||
+        node.closest('[role="dialog"], [role="menu"], [role="listbox"], [role="radiogroup"], [data-radix-popper-content-wrapper], [data-slot*="popover" i]')) return true;
+      const form = node.closest('form');
+      return Boolean(form && form.querySelector(LOCAL_COMPOSER_SELECTOR));
+    };
+    const excluded = (node) => structurallyExcluded(node) || !isMountedAndNotHidden(node);
+    const collectPageActions = () => {
+      const root = doc.body || doc.documentElement;
+      if (!root || typeof doc.createTreeWalker !== 'function') {
+        return [...doc.querySelectorAll('a, button, [role="button"]')];
+      }
+      const walker = doc.createTreeWalker(root, 1, {
+        acceptNode(node) {
+          const tag = lowerText(node.localName);
+          const role = lowerText(node.getAttribute('role'));
+          const testId = lowerText(node.getAttribute('data-testid'));
+          const slot = lowerText(node.getAttribute('data-slot'));
+          if (node !== root && (
+            node.id === UI_ROOT_ID || testId.startsWith('conversation-turn-') ||
+            node.hasAttribute('data-message-author-role') ||
+            ['dialog', 'menu', 'listbox', 'radiogroup'].includes(role) ||
+            node.hasAttribute('data-radix-popper-content-wrapper') || slot.includes('popover') ||
+            node.hidden || node.getAttribute('aria-hidden') === 'true' || node.hasAttribute('inert') ||
+            ['script', 'style', 'template'].includes(tag) ||
+            tag === 'form' && node.querySelector(LOCAL_COMPOSER_SELECTOR) ||
+            tag === 'article' && node.querySelector(ROLE_SELECTOR)
+          )) return 2;
+          return tag === 'a' || tag === 'button' || role === 'button' ? 1 : 3;
+        },
+      });
+      const actions = [];
+      let node = walker.nextNode();
+      while (node) {
+        actions.push(node);
+        node = walker.nextNode();
+      }
+      return actions;
+    };
+    const primaryScope = composerScope(composer);
+    const routingScopes = uniqueElements([
+      primaryScope,
+      primaryScope && primaryScope.parentElement && !primaryScope.parentElement.matches('main, body, html')
+        ? primaryScope.parentElement
+        : null,
+    ]);
+    const routingLevelEvidence = uniqueElements(routingScopes.flatMap((scope) =>
+      [...scope.querySelectorAll('button')])).some((control) =>
+      isProbablyVisible(control) && !control.closest(`#${UI_ROOT_ID}`) &&
+      modelLevelRank(elementPickerLevel(control, { trigger: true })) >= 0);
+    if (routingLevelEvidence) return 'signed-in';
+    const profileCandidates = [...doc.querySelectorAll([
+      'button[data-testid*="profile" i]',
+      'a[data-testid*="profile" i]',
+      '[role="button"][data-testid*="profile" i]',
+      'button[data-testid*="account-menu" i]',
+      'a[data-testid*="account-menu" i]',
+      '[role="button"][data-testid*="account-menu" i]',
+      'button[data-testid*="user-menu" i]',
+      'a[data-testid*="user-menu" i]',
+      '[role="button"][data-testid*="user-menu" i]',
+      'button[aria-label*="profile" i]',
+      'button[aria-label*="account" i]',
+      'button[aria-label*="user menu" i]',
+    ].join(', '))].filter((node) => !excluded(node));
+    const profileEvidence = profileCandidates.some((node) => {
+      const hint = lowerText(`${node.getAttribute('data-testid')} ${node.getAttribute('aria-label')}`);
+      return /\bprofile\b|\b(?:account|user)[\s_-]+menu\b|\b(?:open|manage|your)\s+account\b/iu.test(hint);
+    });
+    if (profileEvidence) return 'signed-in';
+    const signals = (node) => [
+      node.getAttribute('aria-label'),
+      node.getAttribute('title'),
+      node.innerText,
+      node.textContent,
+    ].map(normalizeText).filter(Boolean);
+    const hasExactLabel = (node, pattern) => signals(node).some((value) => pattern.test(value));
+    const authKind = (node) => {
+      const testId = lowerText(node.getAttribute('data-testid')).replace(/[_\s]+/gu, '-');
+      let path = '';
+      const href = normalizeText(node.getAttribute('href'));
+      if (href) {
+        try {
+          const url = new URL(href, doc.location && doc.location.href || 'https://chatgpt.com/');
+          const hostname = lowerText(url.hostname);
+          const trustedHost = hostname === 'chatgpt.com' || hostname.endsWith('.chatgpt.com') ||
+            hostname === 'openai.com' || hostname.endsWith('.openai.com');
+          if (!trustedHost) return 'external';
+          path = lowerText(url.pathname);
+        } catch (_error) { path = ''; }
+      }
+      if (/^(?:auth-)?(?:log-?in|sign-?in)(?:-(?:button|link|cta))?$/u.test(testId) ||
+        /\/(?:auth\/)?(?:log-?in|sign-?in)(?:\/|$)/u.test(path)) return 'login';
+      if (/^(?:auth-)?(?:sign-?up|register|create-account)(?:-(?:button|link|cta))?$/u.test(testId) ||
+        /\/(?:auth\/)?(?:sign-?up|register|create-account)(?:\/|$)/u.test(path)) return 'signup';
+      return '';
+    };
+    const loginLabel = /^(?:log|sign)\s*in(?:\s+to\s+chatgpt)?$/iu;
+    const signupLabel = /^(?:sign\s*up|create(?:\s+an?)?\s+account|register)(?:\s+for\s+(?:chatgpt|free))?$/iu;
+    const rawAuthCandidates = collectPageActions();
+    const authCandidates = uniqueElements(rawAuthCandidates).filter((node) => !structurallyExcluded(node)).map((node) => ({
+      node,
+      isLogin: hasExactLabel(node, loginLabel),
+      isSignup: hasExactLabel(node, signupLabel),
+    })).filter((entry) => entry.isLogin || entry.isSignup).map((entry) => ({
+      ...entry,
+      kind: authKind(entry.node),
+    })).filter((entry) => entry.kind !== 'external' && !excluded(entry.node));
+    let visibleLogin = false;
+    let visibleSignup = false;
+    let strongLogin = false;
+    for (const entry of authCandidates) {
+      visibleLogin ||= entry.isLogin;
+      visibleSignup ||= entry.isSignup;
+      strongLogin ||= entry.isLogin && entry.kind === 'login';
+    }
+    const signedOutEvidence = strongLogin || visibleLogin && visibleSignup;
+    if (!signedOutEvidence) return 'unknown';
+    const currentRoutingLevel = uniqueElements([
+      findReasoningPicker(doc, composer),
+      findModelPicker(doc, composer),
+    ]).some((control) => modelLevelRank(extractModelLevel(accessibleText(control))) >= 0);
+    return currentRoutingLevel ? 'signed-in' : 'guest';
   }
 
   function closestUserTurn(node) {
@@ -3579,9 +3706,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           const keptDifferentLevel = route.target && route.target !== 'max' &&
             modelLevelRank(route.target) !== modelLevelRank(route.level) &&
             /\b(?:unavailable|unconfirmed|used current|could not|no compatible)\b/iu.test(route.reason || '');
-          badge.textContent = keptDifferentLevel
-            ? `${prefix} wanted ${modelLevelLabel(route.target)} · used ${modelLevelLabel(route.level)}`
-            : `${prefix} → ${modelLevelLabel(route.level)}`;
+          badge.textContent = route.level === 'guest-default'
+            ? 'Auto unavailable · ChatGPT default'
+            : keptDifferentLevel
+              ? `${prefix} wanted ${modelLevelLabel(route.target)} · used ${modelLevelLabel(route.level)}`
+              : `${prefix} → ${modelLevelLabel(route.level)}`;
           badge.title = route.reason || 'Last per-message routing choice';
         } else {
           badge.textContent = 'Adaptive Auto';
@@ -5903,6 +6032,21 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         const decision = explicitDecision;
         if (!state.settings.adaptiveRouting && !explicitDecision.explicit) {
           return replayNativeSend(snapshot, decision, extractModelLevel(accessibleText(findModelPicker(doc))) || 'unknown', false, 'Adaptive Auto disabled');
+        }
+        const routingComposer = composer && composer.isConnected
+          ? composer
+          : snapshot.surface
+            ? resolveSurfaceComposer(snapshot.surface, null, true)
+            : findComposer(doc);
+        const routingCapability = accountRoutingCapability(doc, routingComposer);
+        if (routingCapability === 'guest') {
+          return replayNativeSend(
+            snapshot,
+            decision,
+            'guest-default',
+            false,
+            'signed-out session; intelligence selection unavailable; sent with ChatGPT default',
+          );
         }
         return routeAndReplay(snapshot, decision, false, options.silent === true);
       });
@@ -8321,6 +8465,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     extractPickerLevel,
     modelLevelRank,
     modelLevelLabel,
+    accountRoutingCapability,
     parseRouteOverride,
     buildAttachmentProfile,
     classifyPrompt,
