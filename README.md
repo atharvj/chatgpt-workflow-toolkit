@@ -1,6 +1,6 @@
 # ChatGPT Workflow Toolkit
 
-A userscript built around **Adaptive Auto: model-effort routing for every message**. On each send—including edited resends—it uses the prompt, attachment difficulty, and relevant conversation context to choose the lowest likely-sufficient intelligence level. This aims to preserve accuracy while reducing wait time and unnecessary reasoning-token use; uncertain or answer-checking tasks favor stronger levels.
+A userscript built around **Adaptive Auto: model-effort routing for every message**. On each send—including edited resends—it uses the prompt, attachment difficulty, and relevant conversation context to choose the lowest likely-sufficient intelligence level. This aims to preserve accuracy while reducing wait time and unnecessary reasoning-token use; uncertain tasks favor stronger levels, while unavailable plan levels fall back without blocking normal messages.
 
 ## Features
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.18
+// @version      1.4.19
 // @description  Adaptive Auto chooses ChatGPT's model effort for every message; also ask separately, continue laggy chats, and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.18';
+  const VERSION = '1.4.19';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -5260,7 +5260,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             refreshed.specialMode !== originalSnapshot.specialMode) return false;
           refreshed.beforeReplay = null;
           refreshed.silent = originalSnapshot.silent;
-          refreshed.fallbackToCurrentModel = originalSnapshot.fallbackToCurrentModel;
           refreshed.draftValidator = originalSnapshot.draftValidator;
           snapshot = refreshed;
         }
@@ -5548,8 +5547,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       };
       const current = extractModelLevel(accessibleText(picker));
       const hasAlternatePicker = pickerCandidates.length > pickerAttempt + 1;
+      const automaticFallbackAllowed = !manual && !decision.explicit;
       const replayWithCurrentModel = async (reason) => {
-        if (!snapshot.fallbackToCurrentModel || routingIsStrict(decision) || state.adaptiveCancelled) return false;
+        if (!automaticFallbackAllowed || state.adaptiveCancelled) return false;
         const validation = validateSendSnapshot(snapshot);
         if (!validation.ok) return false;
         closeModelMenu(picker);
@@ -5564,10 +5564,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       };
 
       if (snapshot.specialMode) {
-        if (routingIsStrict(decision) && modelLevelRank(current) < strictMinimumRank) {
-          if (!silent) toast(`${snapshot.specialMode} did not expose a confirmed ${modelLevelLabel(target)}-or-stronger level. Your accuracy-checked draft was not sent.`, 8_000);
-          return false;
-        }
         if (!silent) toast(`Adaptive Auto kept the current model because ${snapshot.specialMode} controls model compatibility.`);
         return replayNativeSend(snapshot, decision, current || 'unknown', manual, `kept current for ${snapshot.specialMode}`);
       }
@@ -5578,13 +5574,12 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       }
       if (!picker) {
         if (routingIsStrict(decision)) {
+          if (await replayWithCurrentModel('accuracy level unavailable because model control was unavailable')) return true;
           if (!silent) toast(`Adaptive Auto could not find ChatGPT’s model control for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
           return false;
         }
-        if (target === 'instant' && snapshot.fallbackToCurrentModel) {
-          return replayWithCurrentModel('model control unavailable');
-        }
         if (target === 'instant') {
+          if (await replayWithCurrentModel('model control unavailable')) return true;
           if (!silent) toast(`Adaptive Auto could not find ChatGPT’s model control for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
           return false;
         }
@@ -5632,11 +5627,12 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
         }
         if (routingIsStrict(decision)) {
+          if (await replayWithCurrentModel('accuracy level unavailable because model control could not be opened')) return true;
           if (!silent) toast(`ChatGPT’s model control could not be opened for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
           return false;
         }
         if (target === 'instant') {
-          if (snapshot.fallbackToCurrentModel) return replayWithCurrentModel('model control could not be opened');
+          if (await replayWithCurrentModel('model control could not be opened')) return true;
           if (!silent) toast('Adaptive Auto chose Instant but could not activate it. Your draft was not sent.', 8_000);
           return false;
         }
@@ -5759,9 +5755,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       });
       const exactTargetVisible = target === 'max' || exactTargetOptions.length > 0;
       if (exactTargetOptions.length > 1) {
-        if (snapshot.fallbackToCurrentModel && !routingIsStrict(decision)) {
-          return replayWithCurrentModel('model menu was ambiguous');
-        }
+        if (await replayWithCurrentModel('model menu was ambiguous')) return true;
         closeModelMenu(picker);
         if (!silent) toast(`ChatGPT showed more than one ${modelLevelLabel(target)} control. Your draft was not sent.`, 8_000);
         return false;
@@ -5771,7 +5765,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
       }
       if (target === 'instant' && !exactTargetVisible) {
-        if (snapshot.fallbackToCurrentModel) return replayWithCurrentModel('Instant was unavailable');
+        if (await replayWithCurrentModel('Instant was unavailable')) return true;
         closeModelMenu(picker);
         if (!silent) toast('Adaptive Auto chose Instant but could not activate it. Your draft was not sent.', 8_000);
         return false;
@@ -5787,12 +5781,12 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         : null;
       const choice = stagedThinkingChoice || chooseModelOption(options || [], target, manual ? 'highest' : state.settings.autoMaxLevel);
       if (!choice || !choice.element) {
+        if (await replayWithCurrentModel('no compatible Auto level was available')) return true;
         if (routingIsStrict(decision)) {
           closeModelMenu(picker);
           if (!silent) toast(`The requested ${modelLevelLabel(target)} level is not available in this account’s current model menu. Your draft was not sent.`, 8_000);
           return false;
         }
-        if (snapshot.fallbackToCurrentModel) return replayWithCurrentModel('no compatible Auto level was available');
         closeModelMenu(picker);
         if (!silent) toast('Adaptive Auto could not find a compatible level. Your draft was not sent.', 8_000);
         return false;
@@ -5803,9 +5797,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         return false;
       }
       if (!stagedThinkingChoice && decision.strict && modelLevelRank(choice.level) < strictMinimumRank) {
-        closeModelMenu(picker);
-        if (!silent) toast(`${modelLevelLabel(target)} or a stronger level is not available in the current picker. Your accuracy-checked draft was not sent.`, 8_000);
-        return false;
+        if (!automaticFallbackAllowed) {
+          closeModelMenu(picker);
+          if (!silent) toast(`${modelLevelLabel(target)} or a stronger level is not available in the current picker. Your accuracy-checked draft was not sent.`, 8_000);
+          return false;
+        }
       }
 
       let selectionConfirmed = choice.level === current;
@@ -5899,13 +5895,14 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             closeModelMenu(picker);
             return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
           }
-          if (snapshot.fallbackToCurrentModel) return replayWithCurrentModel('Instant selection was not confirmed');
+          if (await replayWithCurrentModel('Instant selection was not confirmed')) return true;
           closeModelMenu(picker);
           if (!silent) toast(`ChatGPT did not confirm ${modelLevelLabel(target)}. Your draft was not sent.`, 8_000);
           return false;
         }
         closeModelMenu(picker);
         if (routingIsStrict(decision)) {
+          if (await replayWithCurrentModel(`${modelLevelLabel(choice.level)} selection was not confirmed`)) return true;
           if (!silent) toast(`ChatGPT did not confirm ${modelLevelLabel(choice.level)}. Your draft was not sent.`, 8_000);
           return false;
         }
@@ -5996,7 +5993,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         snapshot.beforeReplay = suppliedBeforeReplay;
       }
       snapshot.silent = options.silent === true;
-      snapshot.fallbackToCurrentModel = options.fallbackToCurrentModel === true;
       state.adaptiveCancelled = false;
 
       const task = Promise.resolve().then(async () => {
@@ -6990,7 +6986,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         composer,
         silent: true,
         routingText: job.question,
-        fallbackToCurrentModel: true,
         draftValidator: (candidate) => fallbackComposerHasPrompt(candidate, prompt),
         beforeReplay: async () => {
           const currentComposer = findComposer(doc);
@@ -7222,7 +7217,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           sent = await smartRouteAndSend({
             composer,
             silent: true,
-            fallbackToCurrentModel: true,
             routingText: job.question,
             beforeReplay: async () => {
               const currentComposer = findComposer(doc);

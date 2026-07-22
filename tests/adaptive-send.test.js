@@ -20,6 +20,7 @@ async function createHarness(options = {}) {
     reflectOptionSelection = true,
     attachmentMarkup = '',
     conversationMarkup = '',
+    routingDiscoveryTimeout = null,
   } = options;
   const pickerMarkup = includePicker
     ? `<button type="button" data-testid="model-switcher" aria-controls="model-menu" aria-expanded="false">${pickerLevel}</button>`
@@ -113,7 +114,9 @@ async function createHarness(options = {}) {
     });
   }
 
-  const app = toolkit.createApp(document, dom.window);
+  const app = toolkit.createApp(document, dom.window, routingDiscoveryTimeout == null
+    ? {}
+    : { routingDiscoveryTimeout });
   await app.start();
 
   return {
@@ -2366,7 +2369,7 @@ test('uncertain answer recheck prefers the inherited higher level but accepts th
   assert.match(harness.composer.value, /independently verify the stated answer or result/iu);
 });
 
-test('claimed-answer challenge never downgrades below High when only weaker levels exist', async (t) => {
+test('claimed-answer challenge uses the strongest available weaker level instead of blocking Send', async (t) => {
   const prompt = 'How did you get 12V and 4V?';
   const harness = await createHarness({
     prompt,
@@ -2378,15 +2381,17 @@ test('claimed-answer challenge never downgrades below High when only weaker leve
   harness.sendButton.click();
   await finishAdaptiveSend(harness);
 
-  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'instant');
-  assert.equal(harness.counters.optionClicks, 0);
-  assert.equal(harness.counters.sends, 0);
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'medium');
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(harness.counters.sends, 1);
   assert.equal(harness.counters.requestSubmits, 0);
-  assert.equal(harness.composer.value, prompt, 'the verification suffix is added only after a safe model is confirmed');
-  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.ok(harness.composer.value.startsWith(prompt));
+  assert.match(harness.composer.value, /independently verify the stated answer or result/iu);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'medium');
 });
 
-test('claimed-answer challenge stays unsent when the model control is unavailable', async (t) => {
+test('claimed-answer challenge uses the current model with its accuracy guard when the control is unavailable', async (t) => {
   const prompt = "I don't get why the answer is 12V and 4V.";
   const harness = await createHarness({ prompt, includePicker: false });
   t.after(() => harness.cleanup());
@@ -2394,11 +2399,13 @@ test('claimed-answer challenge stays unsent when the model control is unavailabl
   harness.sendButton.click();
   await finishAdaptiveSend(harness);
 
-  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.counters.sends, 1);
   assert.equal(harness.counters.requestSubmits, 0);
-  assert.equal(harness.composer.value, prompt);
-  assert.equal(harness.app.state.lastRouteDecision, null);
-  assert.match(harness.document.querySelector('#cgs-toast').textContent, /requested High level.+not sent/iu);
+  assert.ok(harness.composer.value.startsWith(prompt));
+  assert.match(harness.composer.value, /independently verify the stated answer or result/iu);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.match(harness.app.state.lastRouteDecision.reason, /accuracy level unavailable.*used current model/iu);
+  assert.doesNotMatch(harness.document.querySelector('#cgs-toast').textContent, /draft was not sent/iu);
 });
 
 test('claimed-answer challenge may use a confirmed stronger level when High is unavailable', async (t) => {
@@ -2419,7 +2426,7 @@ test('claimed-answer challenge may use a confirmed stronger level when High is u
   assert.equal(harness.app.state.lastRouteDecision.level, 'extra-high');
 });
 
-test('claimed-answer challenge stays unsent when ChatGPT does not confirm High', async (t) => {
+test('claimed-answer challenge falls back with its accuracy guard when ChatGPT does not confirm High', async (t) => {
   const prompt = 'Explain why 12V is correct.';
   const harness = await createHarness({
     prompt,
@@ -2432,11 +2439,14 @@ test('claimed-answer challenge stays unsent when ChatGPT does not confirm High',
   await finishAdaptiveSend(harness);
 
   assert.ok(harness.counters.optionClicks >= 1);
-  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.counters.sends, 1);
   assert.equal(harness.counters.requestSubmits, 0);
-  assert.equal(harness.composer.value, prompt);
-  assert.equal(harness.app.state.lastRouteDecision, null);
-  assert.match(harness.document.querySelector('#cgs-toast').textContent, /did not confirm High|draft was not sent/iu);
+  assert.ok(harness.composer.value.startsWith(prompt));
+  assert.match(harness.composer.value, /independently verify the stated answer or result/iu);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+  assert.match(harness.app.state.lastRouteDecision.reason, /High selection was not confirmed.*used current model/iu);
+  assert.doesNotMatch(harness.document.querySelector('#cgs-toast').textContent, /draft was not sent/iu);
 });
 
 test('claimed-answer challenge never sends after the composer remounts during accuracy staging', async (t) => {
@@ -2670,7 +2680,7 @@ test('production BasicTrigger uses ArrowDown when synthetic pointerdown is ignor
   assert.equal(harness.counters.sends, 1);
 });
 
-test('ambiguous duplicate target rows are never clicked or sent', async (t) => {
+test('ambiguous duplicate target rows are not clicked and ordinary Auto sends with the current model', async (t) => {
   const prompt = 'what is 2+2';
   const harness = await createProductionIntelligenceHarness({
     prompt,
@@ -2684,10 +2694,12 @@ test('ambiguous duplicate target rows are never clicked or sent', async (t) => {
   await finishAdaptiveSend(harness);
 
   assert.equal(harness.counters.optionClicks, 0);
-  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.counters.sends, 1);
   assert.equal(harness.composer.value, prompt);
-  assert.equal(harness.app.state.lastRouteDecision, null);
-  assert.match(harness.document.querySelector('#cgs-toast').textContent, /more than one Instant control.*draft was not sent/iu);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'extra-high');
+  assert.match(harness.app.state.lastRouteDecision.reason, /model menu was ambiguous.*used current model/iu);
+  assert.doesNotMatch(harness.document.querySelector('#cgs-toast').textContent, /draft was not sent/iu);
 });
 
 test('automatic routing selects every available direct Intelligence level', async (t) => {
@@ -2741,6 +2753,46 @@ test('automatic routing selects every available direct Intelligence level', asyn
       }
     });
   }
+});
+
+test('a plan without Pro selects its strongest available lower level and still sends', async (t) => {
+  const prompt = 'Design and implement a production compiler end to end. Specify the parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument for every optimization.';
+  const harness = await createHarness({
+    prompt,
+    pickerLevel: 'Medium',
+    modelLevels: ['Instant', 'Medium', 'High', 'Extra High'],
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.app.state.lastRouteDecision.target, 'pro');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'extra-high');
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'extra-high');
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(harness.counters.sends, 1);
+});
+
+test('an unrecognized limited-plan menu falls back to the current model instead of blocking Send', async (t) => {
+  const prompt = 'Design and implement a production compiler end to end. Specify the parser, type checker, optimizer, concurrency model, migration plan, exhaustive tests, security review, benchmarks, and a formal correctness argument for every optimization.';
+  const harness = await createHarness({
+    prompt,
+    pickerLevel: 'Medium',
+    modelLevels: ['Use plan default', 'Upgrade to Pro'],
+    routingDiscoveryTimeout: 120,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(harness.counters.optionClicks, 0);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'pro');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'medium');
+  assert.match(harness.app.state.lastRouteDecision.reason, /no compatible Auto level.*used current model/iu);
+  assert.doesNotMatch(harness.document.querySelector('#cgs-toast').textContent, /draft was not sent/iu);
 });
 
 test('Power slider moves Extra High through High and Medium to Instant before sending', async (t) => {
@@ -3197,7 +3249,7 @@ test('simple math falls back from a High-only Intelligence menu to the base-mode
   assert.equal(app.state.lastRouteDecision.level, 'instant');
 });
 
-test('alternate picker probes share one budget and keep the draft when Instant cannot be activated', async (t) => {
+test('alternate picker probes share one budget and fall back without blocking when Instant cannot be activated', async (t) => {
   const dom = new JSDOM(`<!doctype html><html><body><main><div data-composer-surface="true">
     <form>
       <button type="button" class="__composer-pill" id="radix-model-timeout" data-testid="model-switcher" aria-haspopup="menu" aria-expanded="false">GPT-5.5</button>
@@ -3237,20 +3289,14 @@ test('alternate picker probes share one budget and keep the draft when Instant c
   const elapsed = Date.now() - startedAt;
 
   assert.ok(elapsed < 300, `both picker probes must share one 160ms discovery budget, received ${elapsed}ms`);
-  assert.equal(sends, 0, 'Auto must not silently send with High after choosing Instant');
-  assert.equal(app.state.lastRouteDecision, null);
-  const warning = 'Adaptive Auto chose Instant but could not activate it. Your draft was not sent.';
+  assert.equal(sends, 1, 'ordinary Auto must preserve Send when this plan exposes no compatible level');
+  assert.equal(app.state.lastRouteDecision.target, 'instant');
+  assert.match(app.state.lastRouteDecision.reason, /used current model/iu);
   const toast = document.querySelector('#cgs-toast');
-  assert.equal(toast.textContent, warning);
+  assert.doesNotMatch(toast.textContent, /draft was not sent/iu);
   assert.equal(composer.value, 'what is 2+2');
-  assert.deepEqual(composerInputValues, [], 'showing the warning must not dispatch input or alter the draft');
-  assert.equal(composer.contains(toast), false, 'the warning toast must remain outside the native composer');
-  const warningTextParents = [];
-  const walker = document.createTreeWalker(document.body, dom.window.NodeFilter.SHOW_TEXT);
-  while (walker.nextNode()) {
-    if (walker.currentNode.nodeValue.includes(warning)) warningTextParents.push(walker.currentNode.parentElement.id);
-  }
-  assert.deepEqual(warningTextParents, ['cgs-toast'], 'the warning text must exist only in the injected toast');
+  assert.deepEqual(composerInputValues, [], 'falling back must not rewrite the user draft');
+  assert.equal(composer.contains(toast), false, 'the toolkit toast remains outside the native composer');
 });
 
 test('alternate picker gets an immediate scan after the shared wait budget is exhausted', async (t) => {
@@ -3700,7 +3746,7 @@ test('a recognized current intelligence level overrides an unrelated exact login
   assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
 });
 
-test('account-menu label variants override contradictory guest controls', async () => {
+test('account-menu label variants override contradictory guest controls and preserve signed-in Send', async () => {
   for (const ariaLabel of ['Account menu', 'Open user menu']) {
     const harness = await createHarness({ prompt: 'what is 2+2', includePicker: false });
     try {
@@ -3718,15 +3764,16 @@ test('account-menu label variants override contradictory guest controls', async 
       harness.sendButton.click();
       await finishAdaptiveSend(harness);
 
-      assert.equal(harness.counters.sends, 0);
-      assert.equal(harness.app.state.lastRouteDecision, null);
+      assert.equal(harness.counters.sends, 1);
+      assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+      assert.match(harness.app.state.lastRouteDecision.reason, /model control unavailable.*used current model/iu);
     } finally {
       harness.cleanup();
     }
   }
 });
 
-test('third-party login dialogs and unrelated login test IDs never enable guest fallback', async (t) => {
+test('third-party login dialogs never enable guest mode while ordinary Auto still fails open', async (t) => {
   const harness = await createHarness({ prompt: 'what is 2+2', includePicker: false });
   t.after(() => harness.cleanup());
   const dialog = harness.document.createElement('div');
@@ -3750,9 +3797,10 @@ test('third-party login dialogs and unrelated login test IDs never enable guest 
   harness.sendButton.click();
   await finishAdaptiveSend(harness);
 
-  assert.equal(harness.counters.sends, 0);
-  assert.equal(harness.app.state.lastRouteDecision, null);
-  assert.match(harness.document.querySelector('#cgs-toast').textContent, /draft was not sent/iu);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+  assert.match(harness.app.state.lastRouteDecision.reason, /model control unavailable.*used current model/iu);
+  assert.doesNotMatch(harness.document.querySelector('#cgs-toast').textContent, /draft was not sent/iu);
 });
 
 test('live signed-in evidence overrides a snapshot captured while guest auth chrome was visible', async (t) => {
@@ -3770,9 +3818,10 @@ test('live signed-in evidence overrides a snapshot captured while guest auth chr
 
   const sent = await harness.app.smartRouteAndSend({ composer: harness.composer, snapshot });
 
-  assert.equal(sent, false);
-  assert.equal(harness.counters.sends, 0);
-  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.equal(sent, true);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+  assert.match(harness.app.state.lastRouteDecision.reason, /model control unavailable.*used current model/iu);
 });
 
 test('ordinary prompt with no picker fails open and sends exactly once', async (t) => {
@@ -3789,7 +3838,7 @@ test('ordinary prompt with no picker fails open and sends exactly once', async (
   assert.match(harness.app.state.lastRouteDecision.reason, /model control unavailable/iu);
 });
 
-test('simple math with no picker stays unsent instead of silently using the current level', async (t) => {
+test('simple math with no picker uses the current model instead of blocking Send', async (t) => {
   const prompt = 'what is 2+2';
   const harness = await createHarness({ prompt, includePicker: false });
   t.after(() => harness.cleanup());
@@ -3806,11 +3855,12 @@ test('simple math with no picker stays unsent instead of silently using the curr
   await finishAdaptiveSend(harness);
 
   assert.equal(feedbackClicks, 0, 'a popup that merely mentions model feedback must not be treated as a picker');
-  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.counters.sends, 1);
   assert.equal(harness.counters.requestSubmits, 0);
   assert.equal(harness.composer.value, prompt);
-  assert.equal(harness.app.state.lastRouteDecision, null);
-  assert.match(harness.document.querySelector('#cgs-toast').textContent, /could not find.*model control.*draft was not sent/iu);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+  assert.match(harness.app.state.lastRouteDecision.reason, /model control unavailable.*used current model/iu);
+  assert.doesNotMatch(harness.document.querySelector('#cgs-toast').textContent, /draft was not sent/iu);
 });
 
 test('explicit override with no picker fails closed and keeps the draft unsent', async (t) => {
@@ -3936,7 +3986,7 @@ test('a visible but inactive Deep Research shortcut cannot keep simple arithmeti
   assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
 });
 
-test('active special mode cannot bypass the High minimum for a claimed-answer challenge', async (t) => {
+test('active special mode keeps its compatible model and preserves the claimed-answer accuracy guard', async (t) => {
   const prompt = "I don't get why the answer is 12V and 4V.";
   const harness = await createHarness({
     prompt,
@@ -3950,10 +4000,12 @@ test('active special mode cannot bypass the High minimum for a claimed-answer ch
 
   assert.equal(harness.counters.pickerOpens, 0);
   assert.equal(harness.counters.optionClicks, 0);
-  assert.equal(harness.counters.sends, 0);
-  assert.equal(harness.composer.value, prompt);
-  assert.equal(harness.app.state.lastRouteDecision, null);
-  assert.match(harness.document.querySelector('#cgs-toast').textContent, /did not expose a confirmed High-or-stronger level.+not sent/iu);
+  assert.equal(harness.counters.sends, 1);
+  assert.ok(harness.composer.value.startsWith(prompt));
+  assert.match(harness.composer.value, /independently verify the stated answer or result/iu);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+  assert.match(harness.app.state.lastRouteDecision.reason, /kept current for Deep Research/iu);
 });
 
 test('a delayed native submit after replay consumes its permit without routing again', async (t) => {
@@ -4022,7 +4074,7 @@ test('Send becoming disabled during model switching keeps the draft and never fa
   assert.match(harness.document.querySelector('#cgs-toast').textContent, /Send control is not ready/iu);
 });
 
-test('ordinary unconfirmed Instant switch keeps the draft unsent', async (t) => {
+test('ordinary unconfirmed Instant switch sends with the confirmed current model', async (t) => {
   const harness = await createHarness({
     prompt: 'Thanks!',
     pickerLevel: 'High',
@@ -4033,13 +4085,15 @@ test('ordinary unconfirmed Instant switch keeps the draft unsent', async (t) => 
   harness.sendButton.click();
   await finishAdaptiveSend(harness);
 
-  assert.equal(harness.counters.optionClicks, 1);
-  assert.equal(harness.counters.sends, 0);
+  assert.ok(harness.counters.optionClicks >= 1);
+  assert.equal(harness.counters.sends, 1);
   assert.equal(harness.counters.requestSubmits, 0);
   assert.equal(harness.composer.value, 'Thanks!');
   assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'high');
-  assert.equal(harness.app.state.lastRouteDecision, null);
-  assert.match(harness.document.querySelector('#cgs-toast').textContent, /did not confirm Instant.*draft was not sent/iu);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'high');
+  assert.match(harness.app.state.lastRouteDecision.reason, /Instant selection was not confirmed.*used current model/iu);
+  assert.doesNotMatch(harness.document.querySelector('#cgs-toast').textContent, /draft was not sent/iu);
 });
 
 test('explicit unconfirmed switch stays unsent', async (t) => {

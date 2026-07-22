@@ -1091,7 +1091,7 @@ test('fallback routing failure sends once with the current model instead of stra
   }
 });
 
-test('fallback never sends a claimed-answer challenge with an unverified weak model', async () => {
+test('fallback sends a claimed-answer challenge with the current model and an accuracy guard', async () => {
   const jobId = 'fallback_accuracy_guard_1234';
   const storageKey = `chatgptSidecar.job.v1.${jobId}`;
   const question = "I don't get why the answer is 12V and 4V.";
@@ -1119,7 +1119,19 @@ test('fallback never sends a claimed-answer challenge with an unverified weak mo
   const locks = createIfAvailableLockManager();
   Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
   let sendCount = 0;
-  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sendCount += 1; });
+  let sentPrompt = '';
+  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+    sendCount += 1;
+    const composer = dom.window.document.querySelector('#prompt-textarea');
+    sentPrompt = composer.value;
+    composer.value = '';
+    const userTurn = dom.window.document.createElement('article');
+    userTurn.dataset.testid = 'conversation-turn-fallback-accuracy';
+    userTurn.innerHTML = `<div data-message-author-role="user"></div>`;
+    userTurn.querySelector('div').textContent = sentPrompt;
+    dom.window.document.querySelector('main').insertBefore(userTurn, dom.window.document.querySelector('form'));
+    dom.window.history.pushState({}, '', `/c/fallback-accuracy#cwt-job=${jobId}`);
+  });
   const app = toolkit.createApp(dom.window.document, dom.window, {
     initialJobId: jobId,
     pageInstanceId: 'fallback_accuracy_destination_1234',
@@ -1128,13 +1140,11 @@ test('fallback never sends a claimed-answer challenge with an unverified weak mo
 
   try {
     await app.start();
-    const saved = stored.get(storageKey);
-    assert.equal(sendCount, 0);
-    assert.equal(saved.question, question, 'storage and recovery keep the original user question');
-    assert.equal(saved.sendAttempted, false);
-    assert.match(dom.window.document.querySelector('#prompt-textarea').value, /independently verify the stated answer or result/iu);
-    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /interrupted before Send/iu);
-    assert.equal(dom.window.document.querySelector('#cgs-recovery-question').value, question);
+    assert.equal(sendCount, 1);
+    assert.match(sentPrompt, /I don't get why the answer is 12V and 4V/iu);
+    assert.match(sentPrompt, /independently verify the stated answer or result/iu);
+    assert.equal(stored.has(storageKey), false, 'the acknowledged one-shot job is cleaned up');
+    assert.equal(dom.window.document.querySelector('#cgs-recovery-backdrop').hidden, true);
   } finally {
     if (app.state.observer) app.state.observer.disconnect();
     if (previousGM === undefined) delete globalThis.GM;
@@ -1664,7 +1674,7 @@ test('freshly reloaded branch auto-sends once even when its model control is una
   }
 });
 
-test('freshly reloaded branch keeps a claimed-answer challenge unsent without High', async () => {
+test('freshly reloaded branch sends a claimed-answer challenge with its accuracy guard without High', async () => {
   const jobId = 'native_accuracy_guard_job_1234';
   const question = 'How did you get 12V and 4V?';
   const dom = new JSDOM(`<!doctype html><html><body><main>
@@ -1684,7 +1694,18 @@ test('freshly reloaded branch keeps a claimed-answer challenge unsent without Hi
     async deleteValue(key) { stored.delete(key); },
   };
   let sendCount = 0;
-  document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sendCount += 1; });
+  let sentPrompt = '';
+  document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+    sendCount += 1;
+    const composer = document.querySelector('#prompt-textarea');
+    sentPrompt = composer.value;
+    composer.value = '';
+    const userTurn = document.createElement('article');
+    userTurn.dataset.testid = 'conversation-turn-native-accuracy';
+    userTurn.innerHTML = '<div data-message-author-role="user"></div>';
+    userTurn.querySelector('div').textContent = sentPrompt;
+    document.querySelector('main').insertBefore(userTurn, document.querySelector('form'));
+  });
   const app = toolkit.createApp(document, dom.window, {
     pageInstanceId: 'native_accuracy_destination_1234',
     routingDiscoveryTimeout: 100,
@@ -1704,14 +1725,13 @@ test('freshly reloaded branch keeps a claimed-answer challenge unsent without Hi
   });
 
   try {
-    assert.equal(await app.runIncomingJob(job), false);
-    assert.equal(sendCount, 0);
+    assert.equal(await app.runIncomingJob(job), true);
+    assert.equal(sendCount, 1);
     assert.equal(job.question, question);
-    assert.equal(job.sendAttempted, false);
-    assert.ok(document.querySelector('#prompt-textarea').value.startsWith(question));
-    assert.match(document.querySelector('#prompt-textarea').value, /independently verify the stated answer or result/iu);
-    assert.match(document.querySelector('#cgs-recovery-reason').textContent, /interrupted before Send/iu);
-    assert.equal(document.querySelector('#cgs-recovery-question').value, question);
+    assert.equal(job.sendAttempted, true);
+    assert.ok(sentPrompt.startsWith(question));
+    assert.match(sentPrompt, /independently verify the stated answer or result/iu);
+    assert.equal(document.querySelector('#cgs-recovery-backdrop').hidden, true);
   } finally {
     app.state.observer.disconnect();
     if (previousGM === undefined) delete globalThis.GM;
