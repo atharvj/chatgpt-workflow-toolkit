@@ -18,6 +18,7 @@ async function createHarness(options = {}) {
     delayedSubmitAfterClick = null,
     disableSendOnOptionClick = false,
     reflectOptionSelection = true,
+    selectionReflectDelay = 0,
     attachmentMarkup = '',
     conversationMarkup = '',
     routingDiscoveryTimeout = null,
@@ -91,7 +92,9 @@ async function createHarness(options = {}) {
       option.textContent = label;
       option.addEventListener('click', () => {
         counters.optionClicks += 1;
-        if (reflectOptionSelection) picker.textContent = label;
+        if (reflectOptionSelection && selectionReflectDelay > 0) {
+          dom.window.setTimeout(() => { picker.textContent = label; }, selectionReflectDelay);
+        } else if (reflectOptionSelection) picker.textContent = label;
         if (disableSendOnOptionClick) sendButton.disabled = true;
         closeMenu();
       });
@@ -413,6 +416,42 @@ test('simple prompt switches High to Instant and replays Send exactly once', asy
   assert.equal(harness.counters.optionClicks, 1);
   assert.equal(harness.counters.sends, 1, 'the captured click itself must not reach ChatGPT');
   assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
+test('a delayed Medium reflection is confirmed before Adaptive Auto sends', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Compare TCP and UDP for a beginner.',
+    pickerLevel: 'Instant',
+    selectionReflectDelay: 800,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'medium');
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'medium');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'medium');
+});
+
+test('an unconfirmed Medium switch never sends with weaker Instant', async (t) => {
+  const harness = await createHarness({
+    prompt: 'Compare TCP and UDP for a beginner.',
+    pickerLevel: 'Instant',
+    reflectOptionSelection: false,
+  });
+  t.after(() => harness.cleanup());
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.ok(harness.counters.optionClicks >= 1);
+  assert.equal(harness.counters.sends, 0);
+  assert.equal(harness.composer.value, 'Compare TCP and UDP for a beginner.');
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /kept your draft unsent rather than use the weaker Instant level/iu);
 });
 
 test('edited historical message click adapts its own editor and never sends the bottom composer', async (t) => {
@@ -2474,7 +2513,7 @@ test('claimed-answer challenge may use a confirmed stronger level when High is u
   assert.equal(harness.app.state.lastRouteDecision.level, 'extra-high');
 });
 
-test('claimed-answer challenge falls back with its accuracy guard when ChatGPT does not confirm High', async (t) => {
+test('claimed-answer challenge never falls back to Instant when ChatGPT does not confirm High', async (t) => {
   const prompt = 'Explain why 12V is correct.';
   const harness = await createHarness({
     prompt,
@@ -2487,14 +2526,11 @@ test('claimed-answer challenge falls back with its accuracy guard when ChatGPT d
   await finishAdaptiveSend(harness);
 
   assert.ok(harness.counters.optionClicks >= 1);
-  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.counters.sends, 0);
   assert.equal(harness.counters.requestSubmits, 0);
-  assert.ok(harness.composer.value.startsWith(prompt));
-  assert.match(harness.composer.value, /independently verify the stated answer or result/iu);
-  assert.equal(harness.app.state.lastRouteDecision.target, 'high');
-  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
-  assert.match(harness.app.state.lastRouteDecision.reason, /High selection was not confirmed.*used current model/iu);
-  assert.doesNotMatch(harness.document.querySelector('#cgs-toast').textContent, /draft was not sent/iu);
+  assert.equal(harness.composer.value, prompt);
+  assert.equal(harness.app.state.lastRouteDecision, null);
+  assert.match(harness.document.querySelector('#cgs-toast').textContent, /kept your draft unsent rather than use the weaker Instant level/iu);
 });
 
 test('claimed-answer challenge never sends after the composer remounts during accuracy staging', async (t) => {

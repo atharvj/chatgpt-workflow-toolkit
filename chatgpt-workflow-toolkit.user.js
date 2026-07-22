@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.20
+// @version      1.4.21
 // @description  Adaptive Auto chooses ChatGPT's model effort for every message; also ask separately, continue laggy chats, and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.20';
+  const VERSION = '1.4.21';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -145,6 +145,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     'pro-ultra': 'Pro Ultra',
     max: 'highest available',
   });
+  const MODEL_SELECTION_CONFIRM_TIMEOUT = 1_200;
 
   const DEFAULT_SETTINGS = Object.freeze({
     openMode: 'popup',
@@ -5836,7 +5837,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         }, {
           root: doc.documentElement,
           win,
-          timeout: 500,
+          timeout: MODEL_SELECTION_CONFIRM_TIMEOUT,
           attributes: true,
         }));
 
@@ -5881,7 +5882,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
                   }, {
                     root: doc.documentElement,
                     win,
-                    timeout: 500,
+                    timeout: MODEL_SELECTION_CONFIRM_TIMEOUT,
                     attributes: true,
                   }));
                   closeModelMenu(verificationPicker);
@@ -5915,13 +5916,16 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           return false;
         }
         closeModelMenu(picker);
-        if (routingIsStrict(decision)) {
-          if (await replayWithCurrentModel(`${modelLevelLabel(choice.level)} selection was not confirmed`)) return true;
-          if (!silent) toast(`ChatGPT did not confirm ${modelLevelLabel(choice.level)}. Your draft was not sent.`, 8_000);
-          return false;
+        const confirmedCurrent = reflected || current;
+        const currentIsSafe = target !== 'max' && modelLevelRank(confirmedCurrent) >= targetRank;
+        if (currentIsSafe && await replayWithCurrentModel(`${modelLevelLabel(choice.level)} selection was not confirmed`)) return true;
+        if (!silent) {
+          const weakerLabel = modelLevelRank(confirmedCurrent) >= 0
+            ? modelLevelLabel(confirmedCurrent)
+            : 'the current model';
+          toast(`ChatGPT did not confirm ${modelLevelLabel(choice.level)}. Adaptive Auto kept your draft unsent rather than use the weaker ${weakerLabel} level. Press Send again to retry.`, 9_000);
         }
-        if (!silent) toast('ChatGPT did not confirm the Auto switch, so this message used the current model.', 6_000);
-        return replayNativeSend(snapshot, decision, reflected || current || 'unknown', manual, 'model switch unconfirmed; used current');
+        return false;
       }
       if (stagedThinkingChoice) {
         await waitForCondition(() => findReasoningPicker(doc, routingComposer()), {
