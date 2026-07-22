@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.19
+// @version      1.4.20
 // @description  Adaptive Auto chooses ChatGPT's model effort for every message; also ask separately, continue laggy chats, and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.19';
+  const VERSION = '1.4.20';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -918,10 +918,17 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return `${text.slice(0, headLength)}\n${tailLength ? text.slice(-tailLength) : ''}`;
   }
 
+  function assistantAsksClarification(value) {
+    const text = lowerText(boundedHeadTailSample(value, 4_000));
+    if (!text) return false;
+    return /(?:^|[.!?]\s+)(?:(?:(?:just\s+)?to\s+(?:clarify|confirm)|(?:when\s+you\s+say|by)\b[^?]{1,120})\s*[,;:]?\s*)?(?:(?:do|did)\s+you\s+mean\b|are\s+you\s+(?:referring\s+to|talking\s+about|asking\s+about)\b|is\s+(?:this|that)\b[^?]{0,120}\byou\s+mean\b|which\b[^?]{0,120}\bdo\s+you\s+mean\b)[^?]{0,240}\?\s*$/iu.test(text);
+  }
+
   function assistantInvitesContinuation(value) {
     const text = lowerText(boundedHeadTailSample(value, 4_000));
     if (!text) return false;
-    return /\b(?:would\s+you\s+like|do\s+you\s+want|want\s+me\s+to|should\s+(?:i|we)|shall\s+(?:i|we)|let\s+me\s+know\s+if\s+you\s+(?:want|would\s+like))\b|(?:^|[.!?]\s+)(?:want\s+to|ready\s+(?:to|for))\b[^.!?]{0,180}\?\s*$|\bif\s+you(?:['’]d|\s+would)?\s*(?:like|want)\s*[,;:]?\s+i\s+can\b|\bi\s+(?:can|could)\s+also\b|\bi\s+can\b.{0,180}\bif\s+you(?:['’]d|\s+would)\s+like\b/iu.test(text);
+    const offersNextStep = /\b(?:would\s+you\s+like|do\s+you\s+want|want\s+me\s+to|should\s+(?:i|we)|shall\s+(?:i|we)|let\s+me\s+know\s+if\s+you\s+(?:want|would\s+like))\b|(?:^|[.!?]\s+)(?:want\s+to|ready\s+(?:to|for))\b[^.!?]{0,180}\?\s*$|\bif\s+you(?:['’]d|\s+would)?\s*(?:like|want)\s*[,;:]?\s+i\s+can\b|\bi\s+(?:can|could)\s+also\b|\bi\s+can\b.{0,180}\bif\s+you(?:['’]d|\s+would)\s+like\b/iu.test(text);
+    return offersNextStep || assistantAsksClarification(text);
   }
 
   function inlineStyleHidesContent(value) {
@@ -2058,7 +2065,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       ? buildAttachmentProfile(context.archivedAttachmentProfile.items || [], context.archivedAttachmentProfile.count)
       : buildAttachmentProfile();
     const hasPriorConversation = context.hasPriorConversation === true || Boolean(
-      context.previousLevel || context.conversationLevel || context.assistantContextLevel || context.awaitingConfirmation,
+      context.previousLevel || context.conversationLevel || context.assistantContextLevel ||
+      context.awaitingConfirmation || context.awaitingClarification,
     ) || historicalAttachments.count > 0 || archivedAttachments.count > 0;
     const previousLevel = strongerRouteLevel(
       context.previousLevel,
@@ -2106,8 +2114,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     const acknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
     const affirmativeConfirmation = !topicReset && context.awaitingConfirmation === true && (
       /^(?:(?:yes|yeah|yep|okay|ok|sure|absolutely|definitely|of\s+course)(?:\s+thing)?(?:[,;:]?\s+(?:please|do\s+(?:it|that)|go\s+ahead|continue|proceed))?|please|go\s+ahead|do\s+it|sounds\s+good(?:\s+to\s+me)?|that\s+works)[?.!\s]*$/iu.test(lower) ||
-      /^(?:(?:yes|yeah|yep|okay|ok|sure|absolutely|definitely|of\s+course)(?:\s+thing)?|go\s+ahead)(?:\s*[,;:]\s*|\s+(?:and|but)\s+)(?:(?:and|but)\s+)?\S.+$/iu.test(lower)
+      /^(?:(?:yes|yeah|yep|okay|ok|sure|absolutely|definitely|of\s+course)(?:\s+thing)?|go\s+ahead)(?:\s*[,;:]\s*|\s+(?:and|but)\s+)(?:(?:and|but)\s+)?\S.+$/iu.test(lower) ||
+      /^(?:(?:yes|yeah|yep|okay|ok|sure|correct|right)\s*[,;:]?\s*)?(?:(?:that|this)(?:['’]s|\s+is)?\s+(?:the\s+)?one|exactly|that(?:['’]s|\s+is)\s+(?:it|what\s+i\s+meant))(?:\s+please)?[?.!\s]*$/iu.test(lower)
     );
+    const clarificationReply = !topicReset && context.awaitingClarification === true &&
+      hasPriorConversation && normalized.length <= 300 && wordCount <= 40;
     const simpleTransform = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:make|rewrite|rephrase|paraphrase|proofread|shorten|summari[sz]e|translate|format|spell|capitalize|lowercase|edit)\b.{0,160}$/iu;
     const compoundReasoning = /\b(?:and|but|then|also)\b.{0,100}\b(?:analy[sz]e|assess|evaluate|verify|validate|confirm|check|compare|recommend|justify|explain|flag|identify|find|solve|decide|detect|review|calculate|ensure|audit|inspect|test|tell)\b|\b(?:weakness(?:es)?|risks?|risky|dangerous|secure|security|thread[\s-]?safe|injection|vulnerabilit\w*|trade-?offs?|edge cases?|hidden assumptions?|better|more accurate|riemann hypothesis|p\s+(?:versus|vs\.?)\s+np)\b|\bwithout\s+changing\s+(?:behavior|behaviour|semantics|output)\b|^(?:please\s+)?make\s+sure\b|^(?:please\s+)?make\s+(?:a|an)\s+(?:plan|strategy|argument|recommendation|decision)\b/iu;
     const continuation = /^(?:why(?:\s+(?:not|though))?|how(?:\s+(?:so|exactly|did\s+you\s+know))?|really|seriously|correct|right|wrong|sources?|evidence|proof|examples?|meaning|where\s+did\s+you\s+get\s+that|what\s+do\s+you\s+mean|i(?:['’]m|\s+am)\s+(?:lost|confused)|(?:i\s+)?(?:still\s+)?(?:(?:do\s+not|don['’]?t)\s+(?:follow|understand|get\s+it))|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:elaborate(?:\s+(?:more|on\s+that))?|go\s+deeper|clarify|show\s+(?:me\s+)?the\s+steps)|clarify\s+that|say\s+that\s+another\s+way|put\s+that\s+differently|break\s+that\s+down|go\s+(?:over\s+that\s+again|through\s+it\s+once\s+more)|expand\s+on\s+that|explain\s+(?:further|why|your\s+reasoning)|show\s+your\s+work|walk\s+me\s+through\s+your\s+logic|continue(?: and (?:finish|complete) it)?|continue\s+from\s+there|go on|fix (?:that|it)|try again|prove (?:it|that)|finish (?:that|it)|run\s+through\s+that\s+again|walk\s+me\s+through\s+it\s+again|where\s+did\s+that\s+come\s+from|source\s+for\s+that|cite\s+that|recalculate (?:that|this|it)|re[\s-]?evaluate (?:the\s+)?(?:answer|result|that|this|it)|check your logic|your answer and mine disagree|(?:do\s+not|don['’]?t)\s+make\s+mistakes|answer\s+carefully)[?.!]*$/iu;
@@ -2218,7 +2229,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       /^(?:(?:what|how)\s+about\b.{1,120}|what\s+if\b.{1,120}|and\b.{1,120})[?.!]*$/iu,
       /^(?:(?:does|will|would|can|could)\s+it\s+work\b.{0,100}|should\s+i\s+(?:sign|take|use|keep|remove)\s+it\b.{0,100}|can\s+i\s+(?:deploy|take|use|move|delete|send)\s+it\b.{0,100}|where\s+should\s+i\s+(?:put|place|save|store)\s+it\b.{0,100}|what\s+should\s+i\s+do\s+with\s+it\b.{0,100}|what\s+is\s+it|how\s+does\s+it\s+work|why\s+is\s+it\s+(?:wrong|incorrect)|what\s+about\s+it)[?.!]*$/iu,
     ].some((pattern) => pattern.test(contextProbe));
-    const contextDependent = mentionsKnownAttachment || explicitOlderMaterialReference || affirmativeConfirmation || !topicReset && (
+    const contextDependent = mentionsKnownAttachment || explicitOlderMaterialReference || affirmativeConfirmation || clarificationReply || !topicReset && (
       longRangeContextReference ||
       continuation.test(contextProbe) || implicitContextFollowUp.test(contextProbe) || genericCheckFollowUp.test(contextProbe) ||
       !externalOrdinalTopic && (explicitContextTask.test(contextProbe) || indexedContextTask.test(contextProbe) || definiteContextObject.test(contextProbe)) ||
@@ -4868,6 +4879,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         archivedConversationLevel,
         assistantContextLevel: latestAssistant ? assistantTextContextLevel(latestAssistant.text) : '',
         awaitingConfirmation: assistants.length > 0 && assistantInvitesContinuation(assistants[assistants.length - 1].text),
+        awaitingClarification: assistants.length > 0 && assistantAsksClarification(assistants[assistants.length - 1].text),
         latestAssistantText: assistants.length > 0 ? boundedHeadTailSample(assistants[assistants.length - 1].text, 4_000) : '',
         archivedMeaningfulTurnCount,
         archivedSampledTextLength: transcript.length,
@@ -4986,6 +4998,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           textOptions: routingTextOptions,
         }),
         awaitingConfirmation: assistantInvitesContinuation(latestAssistantText),
+        awaitingClarification: assistantAsksClarification(latestAssistantText),
         latestAssistantText,
         archivedMeaningfulTurnCount,
         archivedSampledTextLength,
@@ -5073,6 +5086,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         retainedPrefixTurns: editTurn ? conversation.retainedTurns : null,
         assistantContextLevel: conversation.assistantContextLevel,
         awaitingConfirmation: conversation.awaitingConfirmation,
+        awaitingClarification: conversation.awaitingClarification,
         latestAssistantText: conversation.latestAssistantText,
         archivedMeaningfulTurnCount: conversation.archivedMeaningfulTurnCount,
         archivedSampledTextLength: conversation.archivedSampledTextLength,
@@ -6017,6 +6031,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           ),
           assistantContextLevel: strongerRouteLevel(snapshot.assistantContextLevel, transferredContext && transferredContext.assistantContextLevel),
           awaitingConfirmation: snapshot.awaitingConfirmation || Boolean(transferredContext && transferredContext.awaitingConfirmation),
+          awaitingClarification: snapshot.awaitingClarification || Boolean(transferredContext && transferredContext.awaitingClarification),
           latestAssistantText: transferredContext && transferredContext.latestAssistantText || snapshot.latestAssistantText,
           archivedMeaningfulTurnCount: Math.max(
             snapshot.archivedMeaningfulTurnCount || 0,

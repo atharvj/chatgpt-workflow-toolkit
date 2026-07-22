@@ -245,7 +245,8 @@ test('short confirmations inherit only when the latest assistant invited the nex
   for (const prompt of [
     'Yes.', 'Okay.', 'Sure.', 'Sure thing.', 'Definitely.', 'Of course.',
     'That works.', 'Sounds good to me.', 'Yes, do it.', 'Yes, go ahead.',
-    'Okay, continue.', 'Go ahead.',
+    'Okay, continue.', 'Go ahead.', 'Yes, that one.', "Yes, that's the one.",
+    'That is the one.', 'Exactly.', "That's what I meant.",
   ]) {
     const result = assertClassifiesAs(prompt, 'pro', {
       previousLevel: 'pro',
@@ -275,6 +276,32 @@ test('short confirmations inherit only when the latest assistant invited the nex
     });
     assert.equal(result.inherited, true, prompt);
   }
+});
+
+test('short answers to an assistant clarification inherit the task being clarified', () => {
+  for (const prompt of [
+    'Gauge theory.',
+    'The second one.',
+    'I meant quantum field theory.',
+    'No, string theory.',
+    'Python.',
+    'The option on the left.',
+  ]) {
+    const result = assertClassifiesAs(prompt, 'pro', {
+      previousLevel: 'pro',
+      hasPriorConversation: true,
+      awaitingClarification: true,
+    });
+    assert.equal(result.inherited, true, prompt);
+  }
+
+  const standalone = toolkit.classifyPrompt('Gauge theory.', {
+    previousLevel: 'pro',
+    hasPriorConversation: true,
+    awaitingClarification: false,
+  });
+  assert.notEqual(standalone.target, 'pro');
+  assert.equal(standalone.inherited, false);
 });
 
 test('elliptical follow-ups inherit difficulty while standalone lookalikes do not', () => {

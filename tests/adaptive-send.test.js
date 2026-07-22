@@ -1959,7 +1959,7 @@ test('acknowledgments do not evict the last meaningful hard task from routing co
 test('a confirmation reply inherits difficulty only after the assistant offers the next step', async (t) => {
   const hardTask = 'Design and implement a production compiler with formal verification, a threat model, concurrency analysis, migrations, exhaustive tests, and benchmarks.';
   const offered = await createHarness({
-    prompt: 'Yes, do it.',
+    prompt: 'Yes, that one.',
     pickerLevel: 'Instant',
     conversationMarkup: `
       <article data-testid="conversation-turn-confirm-user" data-message-author-role="user"><div>${hardTask}</div></article>
@@ -1977,6 +1977,14 @@ test('a confirmation reply inherits difficulty only after the assistant offers t
     'Let me know if you want more.',
     'Ready to continue?',
     'Ready for the next step?',
+    'Did you mean this theory?',
+    'Do you mean gauge theory?',
+    'Are you referring to quantum field theory?',
+    'Are you asking about the second theory?',
+    'Is this the theory you mean?',
+    'Which theory do you mean?',
+    'Just to clarify, did you mean this theory?',
+    'When you say “that theory,” do you mean gauge theory?',
   ]) {
     offer.textContent = invitation;
     await wait(offered.window, 0);
@@ -1985,6 +1993,21 @@ test('a confirmation reply inherits difficulty only after the assistant offers t
   offered.sendButton.click();
   await finishAdaptiveSend(offered);
   assert.equal(offered.app.state.lastRouteDecision.target, 'pro');
+
+  const clarified = await createHarness({
+    prompt: 'Gauge theory.',
+    pickerLevel: 'Instant',
+    conversationMarkup: `
+      <article data-testid="conversation-turn-clarify-user" data-message-author-role="user"><div>${hardTask}</div></article>
+      <article data-testid="conversation-turn-clarify-assistant" data-message-author-role="assistant"><div class="markdown">Did you mean gauge theory?</div></article>`,
+  });
+  t.after(() => clarified.cleanup());
+  const clarificationSnapshot = clarified.app.captureSendSnapshot(clarified.composer);
+  assert.equal(clarificationSnapshot.awaitingClarification, true);
+  clarified.sendButton.click();
+  await finishAdaptiveSend(clarified);
+  assert.equal(clarified.app.state.lastRouteDecision.target, 'pro');
+  assert.equal(clarified.app.state.lastRouteDecision.level, 'pro');
 
   const plain = await createHarness({
     prompt: 'Yes.',
@@ -2144,6 +2167,31 @@ test('fallback transcript supplies difficulty for a context-dependent side quest
   assert.equal(harness.picker.textContent, 'Extra High');
   assert.equal(harness.counters.sends, 1);
   assert.equal(harness.app.state.lastRouteDecision.target, 'extra-high');
+});
+
+test('fallback transcript preserves a short answer to a difficult clarification', async (t) => {
+  const jobId = 'fallback_clarification_route_job_1234';
+  const question = 'Gauge theory.';
+  const expected = toolkit.buildSideFallbackPrompt(
+    'USER:\nDesign and implement a production compiler with formal verification, a threat model, concurrency analysis, migrations, exhaustive tests, and benchmarks.\n\nASSISTANT:\nDid you mean gauge theory?',
+    question,
+    'ask',
+    jobId,
+  );
+  const harness = await createHarness({ prompt: expected, pickerLevel: 'Instant' });
+  t.after(() => harness.cleanup());
+
+  const sent = await harness.app.smartRouteAndSend({
+    composer: harness.composer,
+    routingText: question,
+    silent: true,
+    draftValidator: (composer) => toolkit.fallbackDraftTextMatches(composer.value, expected, jobId),
+  });
+
+  assert.equal(sent, true);
+  assert.equal(harness.picker.textContent, 'Pro');
+  assert.equal(harness.app.state.lastRouteDecision.target, 'pro');
+  assert.equal(harness.counters.sends, 1);
 });
 
 test('fallback transcript keeps an explicitly referenced hard first message beyond the recent window', async (t) => {

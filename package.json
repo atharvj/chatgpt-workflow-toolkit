@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-workflow-toolkit",
-  "version": "1.4.19",
+  "version": "1.4.20",
   "private": true,
   "description": "Per-message Adaptive Auto model-effort routing, separate contextual chats, handoffs, and UI cleanup for ChatGPT.",
   "main": "chatgpt-workflow-toolkit.user.js",
