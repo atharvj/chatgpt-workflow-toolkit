@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.17
-// @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
+// @version      1.4.18
+// @description  Adaptive Auto chooses ChatGPT's model effort for every message; also ask separately, continue laggy chats, and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
 // @homepageURL  https://github.com/atharvj/chatgpt-workflow-toolkit
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.17';
+  const VERSION = '1.4.18';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -3443,7 +3443,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       <div id="cgs-settings-backdrop" hidden>
         <section id="cgs-settings" role="dialog" aria-modal="true" aria-labelledby="cgs-settings-title">
           <div class="cgs-panel-head">
-            <div><h2 id="cgs-settings-title">ChatGPT Workflow Toolkit</h2><p>Branches, handoffs, and per-message model routing</p></div>
+            <div><h2 id="cgs-settings-title">ChatGPT Workflow Toolkit</h2><p>Adaptive model effort for every message, plus separate chats and handoffs</p></div>
             <button class="cgs-icon-button" type="button" data-cgs-action="close-settings" aria-label="Close settings">×</button>
           </div>
           <label class="cgs-setting">

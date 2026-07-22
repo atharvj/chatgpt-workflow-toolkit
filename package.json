@@ -1,8 +1,8 @@
 {
   "name": "chatgpt-workflow-toolkit",
-  "version": "1.4.17",
+  "version": "1.4.18",
   "private": true,
-  "description": "Conversation branching, lightweight handoffs, adaptive model routing, and focused UI cleanup for ChatGPT.",
+  "description": "Per-message Adaptive Auto model-effort routing, separate contextual chats, handoffs, and UI cleanup for ChatGPT.",
   "main": "chatgpt-workflow-toolkit.user.js",
   "type": "commonjs",
   "repository": {
