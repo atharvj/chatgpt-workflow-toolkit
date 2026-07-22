@@ -3908,6 +3908,34 @@ test('active Deep Research bypasses model switching and sends once', async (t) =
   assert.match(harness.app.state.lastRouteDecision.reason, /kept current for Deep Research/iu);
 });
 
+test('a visible but inactive Deep Research shortcut cannot keep simple arithmetic on Medium', async (t) => {
+  const harness = await createHarness({
+    prompt: 'what is 4+1',
+    pickerLevel: 'Medium',
+  });
+  t.after(() => harness.cleanup());
+  const shortcut = harness.document.createElement('button');
+  shortcut.type = 'button';
+  shortcut.dataset.testid = 'composer-deep-research-button';
+  shortcut.textContent = 'Deep research';
+  harness.composer.closest('form').prepend(shortcut);
+  const explicitlyInactive = harness.document.createElement('button');
+  explicitlyInactive.type = 'button';
+  explicitlyInactive.dataset.testid = 'composer-inactive-tool';
+  explicitlyInactive.textContent = 'Deep research';
+  harness.composer.closest('form').prepend(explicitlyInactive);
+
+  harness.sendButton.click();
+  await finishAdaptiveSend(harness);
+
+  assert.equal(toolkit.extractModelLevel(toolkit.accessibleText(harness.picker)), 'instant');
+  assert.equal(harness.counters.pickerOpens, 1);
+  assert.equal(harness.counters.optionClicks, 1);
+  assert.equal(harness.counters.sends, 1);
+  assert.equal(harness.app.state.lastRouteDecision.target, 'instant');
+  assert.equal(harness.app.state.lastRouteDecision.level, 'instant');
+});
+
 test('active special mode cannot bypass the High minimum for a claimed-answer challenge', async (t) => {
   const prompt = "I don't get why the answer is 12V and 4V.";
   const harness = await createHarness({

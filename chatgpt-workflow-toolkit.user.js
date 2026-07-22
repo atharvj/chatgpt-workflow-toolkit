@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.16
+// @version      1.4.17
 // @description  Branch or hand off conversations, ask separately with context, hide Start writing, and adapt model effort per message.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.16';
+  const VERSION = '1.4.17';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -3705,7 +3705,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           const prefix = route.manual ? 'Manual' : 'Auto';
           const keptDifferentLevel = route.target && route.target !== 'max' &&
             modelLevelRank(route.target) !== modelLevelRank(route.level) &&
-            /\b(?:unavailable|unconfirmed|used current|could not|no compatible)\b/iu.test(route.reason || '');
+            /\b(?:unavailable|unconfirmed|used current|kept current|could not|no compatible)\b/iu.test(route.reason || '');
           badge.textContent = route.level === 'guest-default'
             ? 'Auto unavailable · ChatGPT default'
             : keptDifferentLevel
@@ -5031,12 +5031,20 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       const active = uniqueElements(scopes.flatMap((scope) => [...scope.querySelectorAll(
         '[aria-pressed="true"], [aria-checked="true"], [data-state="active"], [data-state="on"], [data-state="checked"], [data-selected="true"]',
       )])).filter((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`) && !routingControls.has(node));
-      const ambiguousSpecial = uniqueElements(scopes.flatMap((scope) =>
-        [...scope.querySelectorAll('button, [role="button"], [data-testid*="tool"], [data-testid*="mode"]')]))
-        .filter((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`) &&
-          node.getAttribute('aria-pressed') !== 'false' && node.getAttribute('aria-checked') !== 'false' &&
-          !['off', 'closed', 'inactive'].includes(lowerText(node.getAttribute('data-state'))) && specialPattern.test(accessibleText(node)));
-      const labels = uniqueElements([...active, ...ambiguousSpecial]).map(accessibleText).filter(Boolean).sort();
+      // A visible tool shortcut is not evidence that the tool is active. In
+      // particular, ChatGPT can render a plain "Deep research" button with no
+      // aria-pressed/data-state value. Treating that button as selected keeps
+      // the current model and makes trivial prompts appear to route to Medium
+      // (or whichever level was already selected). Only accept an un-ARIA'd
+      // special-mode control when its test ID positively says active/selected.
+      const selectedSpecial = uniqueElements(scopes.flatMap((scope) =>
+        [...scope.querySelectorAll('[data-testid*="tool"], [data-testid*="mode"]')])).filter((node) => {
+        const testId = lowerText(node.getAttribute('data-testid'));
+        return /(?:^|[-_])(?:active|selected)(?:[-_]|$)/iu.test(testId) &&
+          !/(?:^|[-_])(?:inactive|unselected)(?:[-_]|$)/iu.test(testId) &&
+          isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`) && specialPattern.test(accessibleText(node));
+      });
+      const labels = uniqueElements([...active, ...selectedSpecial]).map(accessibleText).filter(Boolean).sort();
       const special = labels.find((label) => specialPattern.test(label)) || '';
       return { signature: labels.join('\n'), special };
     }
