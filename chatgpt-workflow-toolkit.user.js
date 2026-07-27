@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.4.21
-// @description  Adaptive Auto chooses ChatGPT's model effort for every message; also ask separately, continue laggy chats, and hide Start writing.
+// @version      1.5.0
+// @description  Ask questions in separate contextual chats, continue laggy conversations with a handoff, and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
 // @homepageURL  https://github.com/atharvj/chatgpt-workflow-toolkit
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.4.21';
+  const VERSION = '1.5.0';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -64,8 +64,6 @@
   const TARGET_FINGERPRINT_MAX_LENGTH = 1_200;
   const SELECTED_QUOTE_MAX_LENGTH = 2_000;
   const ACCURACY_GUARD_INSTRUCTION = 'Before explaining, independently verify the stated answer or result. Do not assume it is correct; if it is wrong, say so and give the corrected result.';
-  const ROUTE_OVERRIDE_PATTERN = /^\s*!route\s*:\s*(extra\s*-?\s*high|x\s*-?\s*high|xhigh|pro\s*-?\s*extended|pro\s*-?\s*ultra|pro\s*-?\s*standard|instant|medium|high|ultra|pro|max|highest|auto)(?=\s|:|;|$)/iu;
-  const USER_ACKNOWLEDGMENT_PATTERN = /^(?:thanks?(?:\s+you)?|thank\s+you|ok(?:ay)?|got\s+it|cool|great|yes|yeah|yep|sure(?:\s+thing)?|absolutely|definitely|sounds\s+good(?:\s+to\s+me)?|that\s+works(?:\s+for\s+me)?|of\s+course|no|hello|hi|hey|bye|go\s+ahead|please\s+do)[.!,\s]*$/iu;
   const SELECTION_PILL_GAP = 7;
   const SELECTION_PILL_MARGIN = 8;
   const SELECTION_PILL_FALLBACK_WIDTH = 112;
@@ -119,40 +117,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     'button[aria-label^="Send"]',
   ];
   const SUBMISSION_CONTROL_SELECTOR = 'button, input[type="submit"], [role="button"]';
-  const MODEL_OPTION_CONTAINER_SELECTOR = '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="radio"], [data-radix-collection-item], [data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-radio-item"]';
-  const MODEL_OPTION_SELECTOR = `${MODEL_OPTION_CONTAINER_SELECTOR}, button`;
-  const MODEL_MENU_ROOT_SELECTOR = '[role="menu"], [role="listbox"], [role="radiogroup"], [data-radix-menu-content], [data-radix-popper-content-wrapper], [data-headlessui-menu-items], [data-slot="dropdown-menu-content"], [data-slot="popover-content"], [data-state="open"][role="dialog"], [data-testid="composer-intelligence-picker-content"], [data-testid*="model-menu"], [data-testid*="model-picker-menu"], [data-testid*="intelligence-menu"]';
-  const ROUTE_LEVEL_RANK = Object.freeze({
-    instant: 0,
-    auto: 0,
-    medium: 1,
-    high: 2,
-    'extra-high': 3,
-    ultra: 4,
-    pro: 5,
-    'pro-extended': 6,
-    'pro-ultra': 7,
-  });
-  const ROUTE_LEVEL_LABEL = Object.freeze({
-    instant: 'Instant',
-    auto: 'Instant',
-    medium: 'Medium',
-    high: 'High',
-    'extra-high': 'Extra High',
-    ultra: 'Ultra',
-    pro: 'Pro',
-    'pro-extended': 'Pro Extended',
-    'pro-ultra': 'Pro Ultra',
-    max: 'highest available',
-  });
-  const MODEL_SELECTION_CONFIRM_TIMEOUT = 1_200;
-
   const DEFAULT_SETTINGS = Object.freeze({
     openMode: 'popup',
-    autoSend: false,
-    autoRouting: false,
-    adaptiveRouting: true,
-    autoMaxLevel: 'highest',
     hideStartWriting: true,
     showTurnButtons: true,
   });
@@ -234,20 +200,6 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       color: var(--text-primary, #111827);
       background: transparent;
     }
-    .cgs-auto-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      padding: 4px 7px;
-      border-radius: 999px;
-      color: #087f5b;
-      background: rgba(16, 163, 127, .12);
-      font-size: 11px;
-      font-weight: 700;
-    }
-    .cgs-auto-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #10a37f; }
-    .cgs-auto-badge[data-enabled="false"] { color: var(--text-secondary, #6b7280); background: rgba(127, 127, 127, .12); }
-    .cgs-auto-badge[data-enabled="false"]::before { background: #9ca3af; }
     #cgs-settings-backdrop {
       position: fixed;
       inset: 0;
@@ -411,7 +363,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     }
     @media (max-width: 720px) {
       #cgs-dock { right: 10px; bottom: 68px; }
-      .cgs-dock-label, .cgs-auto-badge { display: none; }
+      .cgs-dock-label { display: none; }
       #cgs-dialog-backdrop { right: 8px; bottom: 8px; left: 8px; height: min(50vh, 380px); height: min(50dvh, 380px); }
       #cgs-toast { top: 10px; right: 10px; left: 10px; width: auto; max-width: none; }
     }
@@ -426,13 +378,6 @@ The request should sound natural, for example: “Okay, let’s continue here. I
 
   function lowerText(value) {
     return normalizeText(value).toLocaleLowerCase('en-US');
-  }
-
-  function separateAdjacentLevelBadge(value) {
-    return String(value == null ? '' : value).replace(
-      /\b(instant|fast|auto|thinking|medium|standard|high|extended|heavy|ultra|pro)(?=\d+(?:\.\d+)+)/giu,
-      '$1 ',
-    );
   }
 
   function clampInteger(value, fallback, minimum, maximum) {
@@ -577,12 +522,6 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const source = raw && typeof raw === 'object' ? raw : {};
     return {
       openMode: source.openMode === 'tab' ? 'tab' : 'popup',
-      autoSend: source.autoSend === true,
-      autoRouting: source.autoRouting === true,
-      adaptiveRouting: source.adaptiveRouting !== false,
-      autoMaxLevel: ['high', 'extra-high', 'highest'].includes(source.autoMaxLevel)
-        ? source.autoMaxLevel
-        : 'highest',
       hideStartWriting: source.hideStartWriting !== false,
       showTurnButtons: source.showTurnButtons !== false,
     };
@@ -765,13 +704,8 @@ The request should sound natural, for example: “Okay, let’s continue here. I
 
   function requiresAnswerVerification(value, context = {}) {
     const raw = String(value == null ? '' : value).slice(0, QUESTION_MAX_LENGTH);
-    const withoutBom = raw.replace(/^\uFEFF/u, '');
-    const overrideMatch = withoutBom.match(ROUTE_OVERRIDE_PATTERN);
-    const routedPrompt = overrideMatch
-      ? withoutBom.slice(overrideMatch[0].length).replace(/^\s*(?::|;)?\s*/u, '')
-      : raw;
-    const topicResetMatch = normalizeText(routedPrompt).match(/^(?:(?:new|unrelated|separate)\s+(?:question|topic)|changing\s+(?:the\s+)?(?:question|topics?)|on\s+(?:an?\s+)?unrelated\s+note)\s*[.:,;!?—–-]\s*(.+)$/iu);
-    const prompt = topicResetMatch ? topicResetMatch[1] : routedPrompt;
+    const topicResetMatch = normalizeText(raw).match(/^(?:(?:new|unrelated|separate)\s+(?:question|topic)|changing\s+(?:the\s+)?(?:question|topics?)|on\s+(?:an?\s+)?unrelated\s+note)\s*[.:,;!?—–-]\s*(.+)$/iu);
+    const prompt = topicResetMatch ? topicResetMatch[1] : raw;
     const fullText = lowerText(prompt);
     const laterVerificationClause = /\b(?:but|and|then|first|also)\b.{0,160}\b(?:check|recheck|double-check|verify|confirm|validate|correct|right|wrong|accurate)\b/iu.test(fullText);
     if (!fullText || !laterVerificationClause && (
@@ -917,19 +851,6 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     const headLength = Math.ceil((limit - 1) / 2);
     const tailLength = Math.max(0, limit - headLength - 1);
     return `${text.slice(0, headLength)}\n${tailLength ? text.slice(-tailLength) : ''}`;
-  }
-
-  function assistantAsksClarification(value) {
-    const text = lowerText(boundedHeadTailSample(value, 4_000));
-    if (!text) return false;
-    return /(?:^|[.!?]\s+)(?:(?:(?:just\s+)?to\s+(?:clarify|confirm)|(?:when\s+you\s+say|by)\b[^?]{1,120})\s*[,;:]?\s*)?(?:(?:do|did)\s+you\s+mean\b|are\s+you\s+(?:referring\s+to|talking\s+about|asking\s+about)\b|is\s+(?:this|that)\b[^?]{0,120}\byou\s+mean\b|which\b[^?]{0,120}\bdo\s+you\s+mean\b)[^?]{0,240}\?\s*$/iu.test(text);
-  }
-
-  function assistantInvitesContinuation(value) {
-    const text = lowerText(boundedHeadTailSample(value, 4_000));
-    if (!text) return false;
-    const offersNextStep = /\b(?:would\s+you\s+like|do\s+you\s+want|want\s+me\s+to|should\s+(?:i|we)|shall\s+(?:i|we)|let\s+me\s+know\s+if\s+you\s+(?:want|would\s+like))\b|(?:^|[.!?]\s+)(?:want\s+to|ready\s+(?:to|for))\b[^.!?]{0,180}\?\s*$|\bif\s+you(?:['’]d|\s+would)?\s*(?:like|want)\s*[,;:]?\s+i\s+can\b|\bi\s+(?:can|could)\s+also\b|\bi\s+can\b.{0,180}\bif\s+you(?:['’]d|\s+would)\s+like\b/iu.test(text);
-    return offersNextStep || assistantAsksClarification(text);
   }
 
   function inlineStyleHidesContent(value) {
@@ -1430,133 +1351,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     return true;
   }
 
-  function accountRoutingCapability(doc, composer = findComposer(doc)) {
-    if (!doc || typeof doc.querySelectorAll !== 'function') return 'unknown';
-    const structurallyExcluded = (node) => {
-      if (!node || node.closest(`#${UI_ROOT_ID}`) || node.closest(TURN_SELECTOR) || node.closest(ROLE_SELECTOR) ||
-        node.closest('[role="dialog"], [role="menu"], [role="listbox"], [role="radiogroup"], [data-radix-popper-content-wrapper], [data-slot*="popover" i]')) return true;
-      const form = node.closest('form');
-      return Boolean(form && form.querySelector(LOCAL_COMPOSER_SELECTOR));
-    };
-    const excluded = (node) => structurallyExcluded(node) || !isMountedAndNotHidden(node);
-    const collectPageActions = () => {
-      const root = doc.body || doc.documentElement;
-      if (!root || typeof doc.createTreeWalker !== 'function') {
-        return [...doc.querySelectorAll('a, button, [role="button"]')];
-      }
-      const walker = doc.createTreeWalker(root, 1, {
-        acceptNode(node) {
-          const tag = lowerText(node.localName);
-          const role = lowerText(node.getAttribute('role'));
-          const testId = lowerText(node.getAttribute('data-testid'));
-          const slot = lowerText(node.getAttribute('data-slot'));
-          if (node !== root && (
-            node.id === UI_ROOT_ID || testId.startsWith('conversation-turn-') ||
-            node.hasAttribute('data-message-author-role') ||
-            ['dialog', 'menu', 'listbox', 'radiogroup'].includes(role) ||
-            node.hasAttribute('data-radix-popper-content-wrapper') || slot.includes('popover') ||
-            node.hidden || node.getAttribute('aria-hidden') === 'true' || node.hasAttribute('inert') ||
-            ['script', 'style', 'template'].includes(tag) ||
-            tag === 'form' && node.querySelector(LOCAL_COMPOSER_SELECTOR) ||
-            tag === 'article' && node.querySelector(ROLE_SELECTOR)
-          )) return 2;
-          return tag === 'a' || tag === 'button' || role === 'button' ? 1 : 3;
-        },
-      });
-      const actions = [];
-      let node = walker.nextNode();
-      while (node) {
-        actions.push(node);
-        node = walker.nextNode();
-      }
-      return actions;
-    };
-    const primaryScope = composerScope(composer);
-    const routingScopes = uniqueElements([
-      primaryScope,
-      primaryScope && primaryScope.parentElement && !primaryScope.parentElement.matches('main, body, html')
-        ? primaryScope.parentElement
-        : null,
-    ]);
-    const routingLevelEvidence = uniqueElements(routingScopes.flatMap((scope) =>
-      [...scope.querySelectorAll('button')])).some((control) =>
-      isProbablyVisible(control) && !control.closest(`#${UI_ROOT_ID}`) &&
-      modelLevelRank(elementPickerLevel(control, { trigger: true })) >= 0);
-    if (routingLevelEvidence) return 'signed-in';
-    const profileCandidates = [...doc.querySelectorAll([
-      'button[data-testid*="profile" i]',
-      'a[data-testid*="profile" i]',
-      '[role="button"][data-testid*="profile" i]',
-      'button[data-testid*="account-menu" i]',
-      'a[data-testid*="account-menu" i]',
-      '[role="button"][data-testid*="account-menu" i]',
-      'button[data-testid*="user-menu" i]',
-      'a[data-testid*="user-menu" i]',
-      '[role="button"][data-testid*="user-menu" i]',
-      'button[aria-label*="profile" i]',
-      'button[aria-label*="account" i]',
-      'button[aria-label*="user menu" i]',
-    ].join(', '))].filter((node) => !excluded(node));
-    const profileEvidence = profileCandidates.some((node) => {
-      const hint = lowerText(`${node.getAttribute('data-testid')} ${node.getAttribute('aria-label')}`);
-      return /\bprofile\b|\b(?:account|user)[\s_-]+menu\b|\b(?:open|manage|your)\s+account\b/iu.test(hint);
-    });
-    if (profileEvidence) return 'signed-in';
-    const signals = (node) => [
-      node.getAttribute('aria-label'),
-      node.getAttribute('title'),
-      node.innerText,
-      node.textContent,
-    ].map(normalizeText).filter(Boolean);
-    const hasExactLabel = (node, pattern) => signals(node).some((value) => pattern.test(value));
-    const authKind = (node) => {
-      const testId = lowerText(node.getAttribute('data-testid')).replace(/[_\s]+/gu, '-');
-      let path = '';
-      const href = normalizeText(node.getAttribute('href'));
-      if (href) {
-        try {
-          const url = new URL(href, doc.location && doc.location.href || 'https://chatgpt.com/');
-          const hostname = lowerText(url.hostname);
-          const trustedHost = hostname === 'chatgpt.com' || hostname.endsWith('.chatgpt.com') ||
-            hostname === 'openai.com' || hostname.endsWith('.openai.com');
-          if (!trustedHost) return 'external';
-          path = lowerText(url.pathname);
-        } catch (_error) { path = ''; }
-      }
-      if (/^(?:auth-)?(?:log-?in|sign-?in)(?:-(?:button|link|cta))?$/u.test(testId) ||
-        /\/(?:auth\/)?(?:log-?in|sign-?in)(?:\/|$)/u.test(path)) return 'login';
-      if (/^(?:auth-)?(?:sign-?up|register|create-account)(?:-(?:button|link|cta))?$/u.test(testId) ||
-        /\/(?:auth\/)?(?:sign-?up|register|create-account)(?:\/|$)/u.test(path)) return 'signup';
-      return '';
-    };
-    const loginLabel = /^(?:log|sign)\s*in(?:\s+to\s+chatgpt)?$/iu;
-    const signupLabel = /^(?:sign\s*up|create(?:\s+an?)?\s+account|register)(?:\s+for\s+(?:chatgpt|free))?$/iu;
-    const rawAuthCandidates = collectPageActions();
-    const authCandidates = uniqueElements(rawAuthCandidates).filter((node) => !structurallyExcluded(node)).map((node) => ({
-      node,
-      isLogin: hasExactLabel(node, loginLabel),
-      isSignup: hasExactLabel(node, signupLabel),
-    })).filter((entry) => entry.isLogin || entry.isSignup).map((entry) => ({
-      ...entry,
-      kind: authKind(entry.node),
-    })).filter((entry) => entry.kind !== 'external' && !excluded(entry.node));
-    let visibleLogin = false;
-    let visibleSignup = false;
-    let strongLogin = false;
-    for (const entry of authCandidates) {
-      visibleLogin ||= entry.isLogin;
-      visibleSignup ||= entry.isSignup;
-      strongLogin ||= entry.isLogin && entry.kind === 'login';
-    }
-    const signedOutEvidence = strongLogin || visibleLogin && visibleSignup;
-    if (!signedOutEvidence) return 'unknown';
-    const currentRoutingLevel = uniqueElements([
-      findReasoningPicker(doc, composer),
-      findModelPicker(doc, composer),
-    ]).some((control) => modelLevelRank(extractModelLevel(accessibleText(control))) >= 0);
-    return currentRoutingLevel ? 'signed-in' : 'guest';
-  }
-
   function closestUserTurn(node) {
     const element = node && (node.nodeType === 1 ? node : node.parentElement);
     if (!element || typeof element.closest !== 'function') return null;
@@ -1756,1090 +1550,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     if (control.matches('button[type="submit"], input[type="submit"]') &&
       !/\b(?:cancel|discard|close)\b/iu.test(label)) return true;
     return /^(?:send|resend|submit|save\s*(?:&|and)\s*(?:send|submit)|send\s+message|send\s+prompt)$/iu.test(label);
-  }
-
-  function extractModelLevel(value) {
-    const text = lowerText(separateAdjacentLevelBadge(value))
-      .replace(/[–—·|/()]+/gu, ' ')
-      .replace(/[_]+/gu, '-')
-      .replace(/\s+/gu, ' ');
-    if (!text) return '';
-    if (/\bautomatic(?:ally)?\s+switch/iu.test(text)) {
-      return /^(?:gpt[-\s\d.]+\s+)?instant\b/iu.test(text) ? 'instant' : '';
-    }
-
-    const patterns = [
-      ['pro-ultra', /\bpro\s*(?:-|\s)\s*(?:ultra|maximum|max)\b/iu],
-      ['pro-extended', /\bpro\s*(?:-|\s)\s*extended\b/iu],
-      ['pro', /\bpro\s*(?:-|\s)\s*standard\b/iu],
-      ['extra-high', /\b(?:extra\s*-?\s*high|x\s*-?\s*high|xhigh|thinking\s+heavy)\b|\b(?:reasoning effort|thinking time|intelligence level)\s*:?\s*heavy\b/iu],
-      ['ultra', /\bultra\b|\bmaximum reasoning\b/iu],
-      ['instant', /\binstant\b|^fast(?:\s|$)/iu],
-      ['high', /\bhigh\b|\bextended reasoning\b|\bthinking\s+extended\b|\b(?:reasoning effort|thinking time|intelligence level)\s*:?\s*extended\b/iu],
-      ['medium', /\bmedium\b|\bstandard reasoning\b|\bthinking(?:\s+(?:standard|medium|light))?\b|\b(?:reasoning effort|thinking time|intelligence level)\s*:?\s*standard\b/iu],
-      ['pro', /\bpro\b/iu],
-      ['auto', /^(?:gpt[-\s\d.]+\s+)?auto(?:\s|$)/iu],
-    ];
-    const match = patterns.find(([, pattern]) => pattern.test(text));
-    return match ? match[0] : '';
-  }
-
-  function isModelUpsellLabel(value) {
-    const text = lowerText(value).replace(/[–—·|/()]+/gu, ' ').replace(/\s+/gu, ' ');
-    return Boolean(text && (
-      /^(?:upgrade|unlock|subscribe|try|get|view plans?|change plans?|switch plans?)\b/iu.test(text) ||
-      /\b(?:upgrade|unlock|subscribe|subscription|purchase|paywall|requires? (?:a )?(?:paid |different )?plan|plan required|not available|locked|available only (?:on|with|for))\b/iu.test(text) ||
-      /\bavailable (?:only )?(?:on|with|for) (?:plus|pro|team|business|enterprise)\b/iu.test(text)
-      || /\b(?:included with|requires?) (?:plus|pro|team|business|enterprise)\b/iu.test(text)
-      || /\b(?:plus|pro|team|business|enterprise)(?: plan)? only\b/iu.test(text)
-      || /\b(?:plus|pro|team|business|enterprise) required\b/iu.test(text)
-    ));
-  }
-
-  function extractPickerLevel(value, options = {}) {
-    const text = lowerText(separateAdjacentLevelBadge(value)).replace(/[–—·|/()]+/gu, ' ').replace(/\s+/gu, ' ');
-    if (!text || /^(?:configure|settings?|automatic switching)\b/iu.test(text) || isModelUpsellLabel(text) || /\bhigh school\b/iu.test(text)) return '';
-    if (options.allowBareEffort === true) {
-      if (/^standard(?:\s+standard)?(?:\s+reasoning)?$/iu.test(text)) return 'medium';
-      if (/^extended(?:\s+extended)?(?:\s+reasoning)?$/iu.test(text)) return 'high';
-      if (/^heavy(?:\s+heavy)?(?:\s+reasoning)?$/iu.test(text)) return 'extra-high';
-    }
-    const prefixedEffort = text.match(/^(?:(?:model|reasoning effort|thinking time|intelligence level)\s*:?\s*|(?:(?:gpt[-\s]?)?\d+(?:\.\d+)+|o\d+(?:[-.][\w]+)*)\s+)(instant|fast|auto|standard|medium|extended|high|heavy|extra\s*-?\s*high|ultra)\b/iu);
-    if (prefixedEffort) {
-      const effort = lowerText(prefixedEffort[1]).replace(/\s*-?\s+/gu, '-');
-      if (effort === 'instant' || effort === 'fast') return 'instant';
-      if (effort === 'auto') return 'auto';
-      if (effort === 'standard' || effort === 'medium') return 'medium';
-      if (effort === 'extended' || effort === 'high') return 'high';
-      if (effort === 'heavy' || effort === 'extra-high') return 'extra-high';
-      if (effort === 'ultra') return 'ultra';
-    }
-    const level = extractModelLevel(text);
-    if (!level) return '';
-    if (['pro', 'pro-extended', 'pro-ultra', 'extra-high', 'ultra'].includes(level)) return level;
-    if (level === 'instant') {
-      return /^(?:gpt[-\s\d.]+\s+)?(?:instant|fast)\b|\binstant\s+(?:mode|model|answers?|reasoning)\b/iu.test(text) ? level : '';
-    }
-    if (level === 'medium') {
-      return /^(?:(?:gpt[-\s\d.]+\s+)(?:[a-z][\w-]*\s+){0,2}|(?:reasoning effort|thinking time|intelligence level)\s*:?\s*)?(?:thinking\s+)?(?:medium|standard|thinking)\b|\b(?:medium|standard)\s+reasoning\b/iu.test(text) ? level : '';
-    }
-    if (level === 'high') {
-      return /^(?:(?:gpt[-\s\d.]+\s+)(?:[a-z][\w-]*\s+){0,2}|(?:reasoning effort|thinking time|intelligence level)\s*:?\s*)?(?:thinking\s+)?high\b|\bthinking\s+(?:high|extended)\b|\b(?:high|extended)\s+reasoning\b/iu.test(text) ? level : '';
-    }
-    if (level === 'auto') return /^(?:gpt[-\s\d.]+\s+)?auto\b/iu.test(text) ? level : '';
-    return '';
-  }
-
-  function modelLevelRank(value) {
-    const level = ROUTE_LEVEL_RANK[value] == null ? extractModelLevel(value) : value;
-    return ROUTE_LEVEL_RANK[level] == null ? -1 : ROUTE_LEVEL_RANK[level];
-  }
-
-  function modelLevelLabel(value) {
-    return ROUTE_LEVEL_LABEL[value] || ROUTE_LEVEL_LABEL[extractModelLevel(value)] || 'current model';
-  }
-
-  function parseRouteOverride(value) {
-    const firstLine = String(value == null ? '' : value).replace(/^\uFEFF/u, '').split(/\r?\n/u, 1)[0];
-    const match = firstLine.match(ROUTE_OVERRIDE_PATTERN);
-    if (!match) return null;
-    const token = lowerText(match[1]).replace(/\s*-\s*|\s+/gu, '-');
-    if (token === 'extra-high' || token === 'x-high' || token === 'xhigh') return 'extra-high';
-    if (token === 'pro-standard') return 'pro';
-    if (token === 'highest') return 'max';
-    return token;
-  }
-
-  function attachmentByteSizeFromText(value) {
-    const match = String(value == null ? '' : value).match(/\b(\d+(?:\.\d+)?)\s*(bytes?|[kmgt]i?b)\b/iu);
-    if (!match) return 0;
-    const amount = Number(match[1]);
-    if (!Number.isFinite(amount) || amount < 0) return 0;
-    const unit = lowerText(match[2]);
-    const multiplier = unit.startsWith('t') ? 1024 ** 4
-      : unit.startsWith('g') ? 1024 ** 3
-        : unit.startsWith('m') ? 1024 ** 2
-          : unit.startsWith('k') ? 1024
-            : 1;
-    return Math.round(amount * multiplier);
-  }
-
-  function attachmentNameFromLabel(value) {
-    const label = normalizeText(value);
-    if (!label) return '';
-    const segments = label.split('|').map((part) => part.trim()).filter(Boolean);
-    for (const rawSegment of segments) {
-      const segment = rawSegment
-        .replace(/^(?:(?:remove|delete|open|preview|download)\s+)?(?:the\s+)?(?:file|attachment)\s*:?\s*/iu, '')
-        .replace(/\s+\(?(?:\d+(?:\.\d+)?\s*(?:bytes?|[kmgt]i?b))\)?$/iu, '')
-        .trim();
-      const match = segment.match(/([\p{L}\p{N}][^/\\|\n]{0,180}\.[a-z0-9]{1,12})$/iu);
-      if (match) return match[1].trim();
-    }
-    return '';
-  }
-
-  function attachmentKind(name, mime = '', label = '') {
-    const lowerName = lowerText(name);
-    const lowerMime = lowerText(mime);
-    const lowerLabel = lowerText(label);
-    const extensionMatch = lowerName.match(/\.([a-z0-9]{1,12})$/iu);
-    const extension = extensionMatch ? extensionMatch[1] : '';
-    if (lowerMime.startsWith('image/') || /^(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|tiff?|webp)$/u.test(extension)) return 'image';
-    if (lowerMime.startsWith('audio/') || /^(?:aac|flac|m4a|mp3|ogg|wav|wma)$/u.test(extension)) return 'audio-video';
-    if (lowerMime.startsWith('video/') || /^(?:avi|m4v|mkv|mov|mp4|mpeg|mpg|webm|wmv)$/u.test(extension)) return 'audio-video';
-    if (/\b(?:zip|compressed|archive)\b/u.test(lowerMime) || /^(?:7z|bz2|gz|rar|tar|tgz|xz|zip)$/u.test(extension)) return 'archive';
-    if (/^(?:csv|db|db3|json|jsonl|ndjson|numbers|ods|parquet|sqlite|sqlite3|sql|tsv|xls|xlsb|xlsm|xlsx)$/u.test(extension) ||
-      /(?:\b(?:json|ndjson|csv|tab-separated|database|sqlite|parquet|excel)\b|spreadsheet)/u.test(`${lowerMime} ${lowerLabel}`)) return 'structured-data';
-    if (/^(?:c|cc|cpp|cs|css|dart|ex|exs|go|h|hpp|html|ipynb|java|js|jsx|kt|kts|lua|m|php|pl|py|r|rb|rs|scala|sh|sol|swift|toml|ts|tsx|vue|xml|ya?ml)$/u.test(extension) ||
-      /\b(?:source code|notebook|javascript|typescript|python|shellscript)\b/u.test(`${lowerMime} ${lowerLabel}`)) return 'code';
-    if (/^(?:doc|docx|epub|key|md|odt|pages|pdf|ppt|pptx|rtf|tex|txt)$/u.test(extension) ||
-      /\b(?:pdf|document|presentation|powerpoint|word processing|plain text)\b/u.test(`${lowerMime} ${lowerLabel}`)) return 'document';
-    return 'unknown';
-  }
-
-  function buildAttachmentProfile(values = [], countHint = 0) {
-    const source = Array.isArray(values) ? values.slice(0, 100) : [];
-    const items = source.map((value) => {
-      const record = value && typeof value === 'object' ? value : { label: value };
-      const label = normalizeText(record.label || record.text || record.name || '');
-      const name = normalizeText(record.name || attachmentNameFromLabel(label)).slice(0, 220);
-      const mime = lowerText(record.mime || record.type || '').slice(0, 120);
-      const numericSize = Number(record.size);
-      const size = Number.isFinite(numericSize) && numericSize >= 0
-        ? Math.round(numericSize)
-        : attachmentByteSizeFromText(`${record.size || ''} ${label}`);
-      return {
-        key: normalizeText(record.key || '').slice(0, 240),
-        name,
-        mime,
-        size,
-        kind: attachmentKind(name, mime, label),
-        label: label.slice(0, 240),
-      };
-    });
-    const count = Math.max(clampInteger(countHint, 0, 0, 100), items.length);
-    const kinds = [...new Set(items.map((item) => item.kind).filter(Boolean))].sort();
-    const complexKinds = new Set(['archive', 'audio-video', 'code', 'structured-data']);
-    const complexCount = items.filter((item) => complexKinds.has(item.kind)).length;
-    const largeCount = items.filter((item) => item.size >= 10 * 1024 * 1024).length;
-    const sensitiveCount = items.filter((item) => /\b(?:contract|lease|legal|medical|diagnos\w*|radiology|lab\s+results?|medications?|prescriptions?|health(?:\s+records?)?|bloodwork|bank(?:\s+statements?)?|mortgage|loans?|investments?|insurance(?:\s+polic(?:y|ies))?|tax|financial|security|audit|patient|payroll|ssn|pii)\b/iu.test(
-      `${item.name} ${item.label}`.replace(/[_-]+/gu, ' '),
-    )).length;
-    return {
-      count,
-      items,
-      kinds,
-      describedCount: items.length,
-      unknownCount: Math.max(0, count - items.filter((item) => item.kind !== 'unknown').length),
-      complexCount,
-      largeCount,
-      sensitiveCount,
-      totalBytes: items.reduce((sum, item) => sum + item.size, 0),
-    };
-  }
-
-  function normalizeAttachmentProfile(context = {}) {
-    const supplied = context.attachmentProfile && typeof context.attachmentProfile === 'object'
-      ? context.attachmentProfile
-      : null;
-    if (supplied && Array.isArray(supplied.items)) {
-      return buildAttachmentProfile(supplied.items, Math.max(
-        clampInteger(context.attachmentCount, 0, 0, 100),
-        clampInteger(supplied.count, 0, 0, 100),
-      ));
-    }
-    return buildAttachmentProfile(context.attachmentLabels || [], context.attachmentCount);
-  }
-
-  function combineAttachmentProfiles(...profiles) {
-    const items = [];
-    const stableKeys = new Set();
-    const fallbackKeys = new Set();
-    let unnamedCount = 0;
-    for (const profile of profiles) {
-      if (!profile || typeof profile !== 'object') continue;
-      const sourceItems = Array.isArray(profile.items) ? profile.items : [];
-      unnamedCount += Math.max(0, clampInteger(profile.count, 0, 0, 100) - sourceItems.length);
-      const currentFallbackKeys = new Set();
-      for (const item of sourceItems) {
-        const stableKey = normalizeText(item.key || '');
-        const fallbackKey = lowerText(item.name || item.label || `${item.mime}|${item.size}`);
-        if (stableKey) {
-          if (stableKeys.has(stableKey)) continue;
-          stableKeys.add(stableKey);
-        } else if (fallbackKey && fallbackKeys.has(fallbackKey)) {
-          continue;
-        }
-        if (fallbackKey) currentFallbackKeys.add(fallbackKey);
-        items.push(item);
-      }
-      for (const key of currentFallbackKeys) fallbackKeys.add(key);
-    }
-    return buildAttachmentProfile(items, Math.min(100, items.length + unnamedCount));
-  }
-
-  function strongerRouteLevel(...values) {
-    let strongest = '';
-    for (const value of values) {
-      const level = extractModelLevel(value || '');
-      if (level && modelLevelRank(level) > modelLevelRank(strongest)) strongest = level;
-    }
-    return strongest;
-  }
-
-  function explicitlyReferencesOlderMaterials(value) {
-    const text = normalizeText(value).toLocaleLowerCase('en-US');
-    if (!text) return false;
-    const material = String.raw`(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)`;
-    const action = String.raw`(?:compare|review|analy[sz]e|summari[sz]e|use|open|read|explain)`;
-    return [
-      new RegExp(String.raw`^${action}\s+(?:all|every)\s+(?:the\s+)?(?:(?:uploaded|attached|provided|shared)\s+)?${material}(?:\s+(?:so\s+far|above|earlier|previously|(?:from|in)\s+(?:this|the|our|whole|entire|full)\s+(?:chat|conversation|thread)|(?:i|we|you)\s+(?:uploaded|attached|provided|shared)(?:\s+(?:here|above))?))?[?.!]*$`, 'iu'),
-      new RegExp(String.raw`^${action}\s+(?:the\s+)?(?:first|earliest|oldest|original)\s+(?:uploaded\s+)?${material}(?:\s+(?:here|above|in\s+(?:this|the|our)\s+(?:chat|conversation|thread)))?[?.!]*$`, 'iu'),
-      new RegExp(String.raw`^compare\s+(?:the\s+)?first\s+and\s+last\s+${material}[?.!]*$`, 'iu'),
-      new RegExp(String.raw`^what\s+was\s+in\s+(?:the\s+)?(?:first|earliest|oldest|original)\s+(?:uploaded|attached|provided|shared)\s+${material}[?.!]*$`, 'iu'),
-      new RegExp(String.raw`\b(?:first|earliest|oldest|original)\s+${material}\s+(?:i|we|you)\s+(?:uploaded|attached|provided|shared)\b`, 'iu'),
-      new RegExp(String.raw`^${action}\b.{0,80}\b(?:earlier|previous|older)\s+${material}[?.!]*$`, 'iu'),
-      new RegExp(String.raw`^${action}\b.{0,80}\b${material}\s+from\s+(?:the\s+)?(?:whole|entire|full)\s+(?:chat|conversation|thread)[?.!]*$`, 'iu'),
-    ].some((pattern) => pattern.test(text));
-  }
-
-  function explicitlyReferencesOlderConversation(value) {
-    const text = normalizeText(value).toLocaleLowerCase('en-US')
-      .replace(/[“"][^”"\n]{0,500}[”"]/gu, ' quoted text ')
-      .replace(/‘[^’\n]{0,500}’/gu, ' quoted text ')
-      .replace(/`[^`\n]{0,500}`/gu, ' quoted text ');
-    if (!text) return false;
-    if (explicitlyReferencesOlderMaterials(text)) return true;
-    return [
-      /\b(?:go|look|refer|return)(?:ing)?\s+back\s+to\s+(?:the\s+)?(?:message|turn)\s*(?:#|number\s*)?\d+\b/iu,
-      /\b(?:message|turn)\s*(?:#|number\s*)?\d+\s+(?:from|in)\s+(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
-      /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?:messages?|turns?|questions?|requests?|tasks?|prompts?)\s+(?:ago|back)\b/iu,
-      /\b(?:go|look|refer|return)(?:ing)?\s+back\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?:messages?|turns?|questions?|requests?|tasks?|prompts?)\b/iu,
-      /\b(?:go|look|refer|return)(?:ing)?\s+back(?:\s+to)?\s+(?:the\s+)?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:message|turn|question|request|task|prompt)\b/iu,
-      /\b(?:continue|finish|resume|use|revisit|return\s+to)\s+(?:(?:the|our)\s+)?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:message|turn|question|request|task|prompt)\b/iu,
-      /\b(?:our|your|my)\s+(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|earliest|original)\s+(?:message|turn|question|request|task|prompt|answer|response)\b/iu,
-      /\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:message|turn|question|request|task|prompt)\s+(?:from|in)\s+(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
-      /\b(?:message|turn|question|request|task|prompt)\s+(?:right\s+)?before\s+(?:the\s+)?last\b/iu,
-      /\b(?:message|question|request|task|prompt|answer|response|instructions?|discussion|work|proof)\s+(?:from|at)\s+the\s+(?:very\s+)?beginning\b/iu,
-      /\b(?:from|since|at|near)\s+the\s+(?:very\s+)?(?:start|beginning|top)\s+of\s+(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
-      /\b(?:continue|finish|resume|use|apply|repeat|revisit|return\s+to)\s+(?:(?:the|that|our|your)\s+)?(?:message|question|request|task|prompt|answer|response|instructions?|work|proof|problem)\b.{0,80}\b(?:at|from)\s+the\s+(?:very\s+)?(?:start|beginning)\b/iu,
-      /\b(?:earlier|previously|before)\s+in\s+(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
-      /\b(?:continue|finish|resume|use|revisit|return\s+to|go\s+back\s+to)\s+(?:(?:the|that|our)\s+)?(?:earlier|previous|prior|old)\s+(?:task|request|problem|question|prompt|instructions?|work|discussion|approach|method)\b/iu,
-      /\b(?:continue|finish|resume)\s+what\s+(?:we|you)\s+(?:were|was)\s+(?:doing|working\s+on|discussing)\s+before\b/iu,
-      /\b(?:way|much|far)\s+(?:back|earlier)\s+in\s+(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
-      /\b(?:our|this|the\s+current|current)\s+(?:whole|entire|full)\s+(?:chat|conversation|thread|discussion|history)\b/iu,
-      /\b(?:summari[sz]e|review|use|consider|recap|continue\s+using|look\s+at|read|based\s+on)\b.{0,80}\b(?:(?:our|this|the|the\s+current|current)\s+)?(?:whole|entire|full)\s+(?:chat|conversation|thread|discussion|history|context)\b/iu,
-      /\b(?:summari[sz]e|review|use|consider|recap|continue\s+using|look\s+at|read)\b.{0,80}\b(?:our|this|the|current)\s+(?:chat|conversation|thread|discussion)\s+history\b/iu,
-      /\b(?:everything|all)\s+(?:(?:that\s+)?(?:we|you)\s+)?(?:have\s+)?(?:discussed|said|written|covered|done|decided|used)\s*(?:so\s+far|above|earlier)?\b/iu,
-      /\b(?:use|consider|review|summari[sz]e|recap|continue\s+using|based\s+on)\b.{0,80}\b(?:everything|all)\s+(?:above|earlier|so\s+far|previous\s+messages?)\b/iu,
-      /\b(?:all|every)\s+(?:earlier|previous|prior)\s+(?:messages?|turns?|questions?|requests?|answers?|responses?)\b/iu,
-      /\b(?:recap|summary|review)\s+(?:of\s+)?(?:this|the|our)\s+(?:chat|conversation|thread|discussion)\b/iu,
-    ].some((pattern) => pattern.test(text));
-  }
-
-  function classifyPrompt(value, context = {}) {
-    const raw = String(value == null ? '' : value);
-    const override = parseRouteOverride(raw);
-    if (override && override !== 'auto') {
-      return {
-        target: override === 'max' ? 'max' : override,
-        score: override === 'max' ? 100 : Math.max(0, modelLevelRank(override) * 16),
-        confidence: 1,
-        explicit: true,
-        reasons: ['explicit route override'],
-      };
-    }
-
-    const originalNormalized = normalizeText(raw);
-    const topicResetMatch = originalNormalized.match(/^(?:(?:new|unrelated|separate)\s+(?:question|topic)|changing\s+(?:the\s+)?(?:question|topics?)|on\s+(?:an?\s+)?unrelated\s+note)\s*[.:,;!?—–-]\s*(.+)$/iu);
-    const normalized = normalizeText(topicResetMatch ? topicResetMatch[1] : originalNormalized);
-    const topicReset = Boolean(topicResetMatch);
-    const olderMaterialLongRangeReference = !topicReset && explicitlyReferencesOlderMaterials(normalized);
-    const longRangeContextReference = !topicReset && explicitlyReferencesOlderConversation(raw);
-    const wholeConversationReference = !topicReset && /\b(?:(?:our|this|the\s+current|current)\s+(?:whole|entire|full)\s+(?:chat|conversation|thread|discussion|history)|(?:summari[sz]e|review|use|consider|recap|continue\s+using|look\s+at|read|based\s+on)\b.{0,80}\b(?:(?:our|this|the|the\s+current|current)\s+)?(?:whole|entire|full)\s+(?:chat|conversation|thread|discussion|history|context)|(?:summari[sz]e|review|use|consider|recap|continue\s+using|look\s+at|read)\b.{0,80}\b(?:our|this|the|current)\s+(?:chat|conversation|thread|discussion)\s+history|(?:everything|all)\s+(?:(?:that\s+)?(?:we|you)\s+)?(?:have\s+)?(?:discussed|said|written|covered|done|decided|used)|(?:recap|summary|review)\s+(?:of\s+)?(?:this|the|our)\s+(?:chat|conversation|thread|discussion))\b/iu.test(originalNormalized);
-    const currentAttachments = normalizeAttachmentProfile(context);
-    const historicalAttachments = context.historicalAttachmentProfile && typeof context.historicalAttachmentProfile === 'object'
-      ? buildAttachmentProfile(context.historicalAttachmentProfile.items || [], context.historicalAttachmentProfile.count)
-      : buildAttachmentProfile(context.historicalAttachmentLabels || [], context.historicalAttachmentCount);
-    const archivedAttachments = context.archivedAttachmentProfile && typeof context.archivedAttachmentProfile === 'object'
-      ? buildAttachmentProfile(context.archivedAttachmentProfile.items || [], context.archivedAttachmentProfile.count)
-      : buildAttachmentProfile();
-    const hasPriorConversation = context.hasPriorConversation === true || Boolean(
-      context.previousLevel || context.conversationLevel || context.assistantContextLevel ||
-      context.awaitingConfirmation || context.awaitingClarification,
-    ) || historicalAttachments.count > 0 || archivedAttachments.count > 0;
-    const previousLevel = strongerRouteLevel(
-      context.previousLevel,
-      context.conversationLevel,
-      context.assistantContextLevel,
-      longRangeContextReference && (!olderMaterialLongRangeReference || wholeConversationReference)
-        ? context.archivedConversationLevel
-        : '',
-    );
-    const archivedMeaningfulTurnCount = clampInteger(context.archivedMeaningfulTurnCount, 0, 0, 100_000);
-    const archivedSampledTextLength = clampInteger(context.archivedSampledTextLength, 0, 0, 100_000_000);
-    if (!normalized && currentAttachments.count === 0) {
-      return { target: 'instant', score: 0, confidence: 0.94, explicit: false, reasons: ['empty prompt'] };
-    }
-
-    const lower = normalized.toLocaleLowerCase('en-US');
-    if (/^(?:(?:(?:can|could|would|will)\s+you|i\s+(?:need|want)\s+you\s+to)\s+)?(?:please\s+)?(?:(?:try|attempt)\s+(?:to\s+)?(?:solve|prove|disprove|resolve)|try\s+solving|find\s+a\s+proof\s+of|(?:solve|prove|disprove|resolve))\b.{0,100}\b(?:riemann hypothesis|p\s*(?:versus|vs\.?|=)\s*np|navier[\s-]stokes (?:existence|equations?)|birch and swinnerton-dyer conjecture)\b/iu.test(lower)) {
-      return {
-        target: 'pro',
-        score: 100,
-        confidence: 0.98,
-        explicit: false,
-        reasons: ['named open research problem requires the strongest available reasoning'],
-      };
-    }
-    const classificationSource = topicReset ? normalized : raw;
-    const sample = classificationSource.length <= 24_000
-      ? classificationSource
-      : `${classificationSource.slice(0, 12_000)}\n${classificationSource.slice(-12_000)}`;
-    const sampleLower = sample.toLocaleLowerCase('en-US');
-    const wordCount = (sample.match(/[\p{L}\p{N}_]+/gu) || []).length;
-    const codeLineCount = sample.split(/\r?\n/u).filter((line) => /^\s{4,}|[{}();]|=>|\b(?:const|let|var|def|class|function|import|SELECT)\b/u.test(line)).length;
-    const reasons = [];
-    const strongGroups = new Set();
-    let score = 12;
-    let highStakes = false;
-    let debuggingWork = false;
-    let formalReasoning = false;
-    let longHorizon = false;
-    let expertWork = false;
-    let longRangeMinimumLevel = '';
-    const behaviorPreservation = /\bwithout\s+changing\s+(?:behavior|behaviour|semantics|output)\b|\bpreserve\s+(?:the\s+)?(?:exact\s+)?(?:behavior|behaviour|semantics|output)\b/iu.test(sampleLower);
-    const answerVerification = requiresAnswerVerification(raw, context);
-
-    const acknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
-    const affirmativeConfirmation = !topicReset && context.awaitingConfirmation === true && (
-      /^(?:(?:yes|yeah|yep|okay|ok|sure|absolutely|definitely|of\s+course)(?:\s+thing)?(?:[,;:]?\s+(?:please|do\s+(?:it|that)|go\s+ahead|continue|proceed))?|please|go\s+ahead|do\s+it|sounds\s+good(?:\s+to\s+me)?|that\s+works)[?.!\s]*$/iu.test(lower) ||
-      /^(?:(?:yes|yeah|yep|okay|ok|sure|absolutely|definitely|of\s+course)(?:\s+thing)?|go\s+ahead)(?:\s*[,;:]\s*|\s+(?:and|but)\s+)(?:(?:and|but)\s+)?\S.+$/iu.test(lower) ||
-      /^(?:(?:yes|yeah|yep|okay|ok|sure|correct|right)\s*[,;:]?\s*)?(?:(?:that|this)(?:['’]s|\s+is)?\s+(?:the\s+)?one|exactly|that(?:['’]s|\s+is)\s+(?:it|what\s+i\s+meant))(?:\s+please)?[?.!\s]*$/iu.test(lower)
-    );
-    const clarificationReply = !topicReset && context.awaitingClarification === true &&
-      hasPriorConversation && normalized.length <= 300 && wordCount <= 40;
-    const simpleTransform = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:make|rewrite|rephrase|paraphrase|proofread|shorten|summari[sz]e|translate|format|spell|capitalize|lowercase|edit)\b.{0,160}$/iu;
-    const compoundReasoning = /\b(?:and|but|then|also)\b.{0,100}\b(?:analy[sz]e|assess|evaluate|verify|validate|confirm|check|compare|recommend|justify|explain|flag|identify|find|solve|decide|detect|review|calculate|ensure|audit|inspect|test|tell)\b|\b(?:weakness(?:es)?|risks?|risky|dangerous|secure|security|thread[\s-]?safe|injection|vulnerabilit\w*|trade-?offs?|edge cases?|hidden assumptions?|better|more accurate|riemann hypothesis|p\s+(?:versus|vs\.?)\s+np)\b|\bwithout\s+changing\s+(?:behavior|behaviour|semantics|output)\b|^(?:please\s+)?make\s+sure\b|^(?:please\s+)?make\s+(?:a|an)\s+(?:plan|strategy|argument|recommendation|decision)\b/iu;
-    const continuation = /^(?:why(?:\s+(?:not|though))?|how(?:\s+(?:so|exactly|did\s+you\s+know))?|really|seriously|correct|right|wrong|sources?|evidence|proof|examples?|meaning|where\s+did\s+you\s+get\s+that|what\s+do\s+you\s+mean|i(?:['’]m|\s+am)\s+(?:lost|confused)|(?:i\s+)?(?:still\s+)?(?:(?:do\s+not|don['’]?t)\s+(?:follow|understand|get\s+it))|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:elaborate(?:\s+(?:more|on\s+that))?|go\s+deeper|clarify|show\s+(?:me\s+)?the\s+steps)|clarify\s+that|say\s+that\s+another\s+way|put\s+that\s+differently|break\s+that\s+down|go\s+(?:over\s+that\s+again|through\s+it\s+once\s+more)|expand\s+on\s+that|explain\s+(?:further|why|your\s+reasoning)|show\s+your\s+work|walk\s+me\s+through\s+your\s+logic|continue(?: and (?:finish|complete) it)?|continue\s+from\s+there|go on|fix (?:that|it)|try again|prove (?:it|that)|finish (?:that|it)|run\s+through\s+that\s+again|walk\s+me\s+through\s+it\s+again|where\s+did\s+that\s+come\s+from|source\s+for\s+that|cite\s+that|recalculate (?:that|this|it)|re[\s-]?evaluate (?:the\s+)?(?:answer|result|that|this|it)|check your logic|your answer and mine disagree|(?:do\s+not|don['’]?t)\s+make\s+mistakes|answer\s+carefully)[?.!]*$/iu;
-    const simpleFact = /^(?:(?:define\s+[\p{L}\p{N}'’.-]+(?:\s+[\p{L}\p{N}'’.-]+){0,3}|what\s+(?:color\s+is|(?:planet|country|city|animal|element|number|day|month|year)\s+is|is\s+the\s+(?:capital|largest|smallest|tallest|longest)\b)\s*.{1,80}|how\s+(?:many|much|long|far|old)\b.{1,100}|who\s+(?:wrote|created|invented|painted|discovered)\s+.{1,100}|when\s+did\s+.{1,100}\s+(?:end|begin|start|happen|occur)|where\s+is\s+.{1,100})|(?:define|explain|what(?:['’]s|\s+(?:is|are)))\b.{1,120}\b(?:in simple terms|in one sentence)|what\s+does\b.{0,140}\bmean)[?.!]*$/iu;
-    const simpleMath = /^(?:what is|calculate|compute)?\s*[\d\s()+\-*/^%.=]+\??$/iu;
-    const simpleAdministrative = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:confirm\s+(?:the\s+)?proof\s+of\s+delivery|confirm\s+(?:that\s+)?(?:(?:the|my|your|our|their)\s+)?email\s+address|(?:is|are)\s+(?:this|that|these|those)\s+correct\s+(?:spelling|spellings|grammar|wording|words?)|(?:(?:check|recheck|double[\s-]?check|verify|confirm|validate)\b|tell\s+me\s+(?:whether|if)\b).{0,100}\b(?:weather|temperature|email|inbox|work email|phone number|shipping address|address|appointment time|meeting time|meeting room|booking time|train time|train schedule|bus schedule|booking date|date|coupon code|username|password|file path|file name|solution file|url|link|sentence|translation|reservation|spelling|word|capitalization|verb tense|door|grocery list|customer name|order status|calendar|menu|paragraph|box)\b)\b/iu;
-    const shortWriting = /\b(?:one|two|three|\d+)[\s-]+(?:sentence|line|word)s?\b|\bshort\s+(?:email|reply|message|paragraph)\b/iu;
-    const technical = /\b(?:code|program|function|algorithm|python|javascript|typescript|rust|java|sql|regex|api|database|equation|solve|theorem|prove|proof|derive|rigorous(?:ly)?|quantum|relativity|cryptograph\w*|oauth|cors|access[\s-]?control|denial of service|halting problem|riemann hypothesis|p\s+(?:versus|vs\.?)\s+np|square root|math|physics|chemistry|research|study|analyze|analysis)\b/iu;
-    const normalAnalysis = /\b(?:compare|contrast|plan|recommend|trade-?offs?|pros and cons|evaluate|analy[sz]e|strategy|outline)\b/iu;
-    const advancedFactTopic = /\b(?:halting problem|riemann hypothesis|p\s+(?:versus|vs\.?|=)\s+np|navier[\s-]stokes|birch and swinnerton-dyer|quantum|relativity|formal verification)\b/iu;
-    const safeSimpleFact = simpleFact.test(lower) && wordCount <= 24 && !advancedFactTopic.test(lower) && !compoundReasoning.test(lower);
-    const safeSimpleTransform = simpleTransform.test(lower) && !compoundReasoning.test(lower) && !technical.test(lower) && !normalAnalysis.test(lower);
-    const safeShortWriting = shortWriting.test(lower) && wordCount <= 35 && !technical.test(lower) && !normalAnalysis.test(lower) && !compoundReasoning.test(lower);
-    // Ignore quoted payloads when deciding whether a prompt refers back to the
-    // conversation. For example, translating “Where did that number come
-    // from?” is a standalone transform, not a follow-up to earlier math.
-    const contextProbe = lower
-      .replace(/[“"][^”"\n]{0,500}[”"]/gu, ' quoted text ')
-      .replace(/‘[^’\n]{0,500}’/gu, ' quoted text ')
-      .replace(/`[^`\n]{0,500}`/gu, ' quoted text ');
-    const contextualReference = /\b(?:this|that|them|their|these|those)\b|\b(?:first|second|third|last|next|previous|other)\s+(?:step|part|point|example|sentence|bullet|item|message|option|answer|result|paragraph|section|equation|formula|file|document|image|table|chart|one)\b/iu;
-    const contextualLead = /^(?:(?:can|could|would|will|do|does|did|is|are|should)\b|(?:please\s+)?(?:explain|check|verify|review|fix|help|compare|continue|finish|redo|retry|try|solve|show|tell|change)\b|(?:what|why|how|which)\b)/iu;
-    const simpleUiAction = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:check|uncheck|select|click|tick|press|open|close|copy|confirm)\s+(?:(?:this|that|the)\s+)?(?:[\p{L}\p{N}_-]+\s+){0,2}(?:box|checkbox|button|option|setting|link|dialog|text|menu)|check\s+(?:if|whether)\s+(?:this|that|it)\s+is\s+(?:the\s+)?(?:(?:right|left)\s+)?(?:button|option|link)|confirm\s+(?:this|that|the)?\s*email)\b/iu;
-    const metalinguisticVerification = /^what does\b.{0,160}\b(?:verify|verification|check|confirm|answer)\b.{0,160}\bmean\b/iu.test(lower);
-    const routineOperationalCheck = /\bproof\s+of\s+concept\b.{0,60}\b(?:builds?|runs?|works?)\b/iu.test(lower);
-    const implicitContextFollowUp = /^(?:(?:what\s+(?:should\s+i\s+(?:do|change\s+here)|do\s+(?:i|we)\s+do\s+now|now|next)|(?:now|then)\s+what|(?:okay[,]?\s+)?(?:so\s+)?then\s+what|so\s+what\s+now|and\s+then|where\s+do\s+we\s+go\s+from\s+here)|which\s+one|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:explain\s+more|do\s+the\s+next\s+one|continue\s+from\s+there)|(?:please\s+)?try\s+(?:a\s+)?different\s+approach|your answer and mine disagree)[?.!]*$/iu;
-    const genericCheckFollowUp = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:check|verify|review)(?:\s+(?:this|that|it|again|once\s+more|(?:my|your|the)\s+(?:answer|result|solution|calculation|reasoning|work|proof)))?|recheck(?:\s+(?:this|that|it))?|double[\s-]?check(?:\s+(?:this|that|it))?)[?.!]*$/iu;
-    const explicitContextTask = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:improve|show|summari[sz]e|translate|rewrite|rephrase|shorten|format|simplify|continue|finish|apply|use|reuse|calculate|recalculate|solve|check|verify|explain|review|fix|change|compare)\b.{0,120}\b(?:this|that|it|them|these|those|answer|response|result|solution|code|proof|reasoning|matrix|equation|formula|fix|assumptions?|approach|function)\b/iu;
-    const contextualRevision = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?make\s+(?:this|that|it)\s+(?:better|clearer|shorter|simpler|more\s+(?:accurate|concise|formal|detailed|readable))[?.!]*$/iu;
-    // Indexed references must be phrased as an action/question. A bare “line
-    // 4” or “Part B” may be a bus route or a product name.
-    const indexedContextTask = /^(?:(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:explain|review|check|verify|solve|do|continue|redo|show|use|apply|change|fix)\b.{0,80}\b(?:(?:line|paragraph|section|step|part|equation|formula|figure|table|chart|option|answer|result)\s*(?:number\s*)?(?:[a-z]|\d+|one|two|three|four|five|first|second|third|fourth|fifth)|(?:first|second|third|fourth|fifth|last|next|previous)\s+(?:line|paragraph|section|step|part|equation|formula|figure|table|chart|option|answer|result))|(?:does?|is|are)\s+(?:the\s+)?(?:equation|formula|step|result|answer)\s*(?:number\s*)?(?:[a-z]|\d+)\s+(?:still\s+)?(?:hold|work|apply|change|correct|valid|true|false)\b|what\s+does\s+the\s+(?:(?:first|second|third|fourth|fifth|last|next|previous)\s+(?:line|paragraph|section|step|equation|formula|figure|table|chart|option|answer|result)|(?:line|paragraph|section|step|equation|formula|figure|table|chart|option|answer|result)\s*(?:number\s*)?(?:[a-z]|\d+))\s+mean\b|(?:what|how)\s+about\s+(?:part|option)\s+[a-z0-9]+)\b/iu;
-    const definiteContextObject = /\b(?:that|this|those|these)\s+(?:answer|response|result|solution|calculation|proof|reasoning|code|function|error|fix|approach|assumptions?|equation|formula|matrix|attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?|paragraph|section|step)\b|\bthe\s+(?:answer(?!\s+key\b)|response|result|solution|calculation|reasoning|error|fix|approach|assumptions?|equation|formula|paragraph|section|step)\b/iu;
-    const namedMaterialReference = /\b(?:(?:attached|uploaded|earlier|previous|this|that)\s+(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)|the\s+(?:(?:attached|uploaded|earlier|previous)\s+)?(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)|(?:open|read|review|analy[sz]e|use|using|summari[sz]e|explain|check|verify|compare|from)\s+(?:the|this|that|those|these|attached|uploaded|earlier|previous)\s+(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)|what\s+do(?:es)?\s+(?:the|this|that|these|those)\s+(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)\s+(?:say|show|contain|mean))\b/iu;
-    const genericMaterialCompound = /\b(?:attachment\s+theory|file\s+system|document\s+object\s+model|table\s+of\s+contents|image\s+sensor|spreadsheet\s+software)\b/iu;
-    const literalQuotedTextTransform = /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:rewrite|rephrase|paraphrase|proofread|shorten|summari[sz]e|translate|format|spell|capitalize|lowercase|edit)\s+(?:the\s+)?(?:text|phrase|word|name|filename|file\s+name|string|sentence)\b/iu.test(lower);
-    const filenameProbe = literalQuotedTextTransform ? contextProbe : lower;
-    const filenameMentioned = (name) => {
-      if (!name || name.length < 3) return false;
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-      return new RegExp(`(?:^|[^\\p{L}\\p{N}_.-])${escaped}(?=$|[^\\p{L}\\p{N}_.-]|\\.(?=\\s|$))`, 'iu').test(filenameProbe);
-    };
-    const matchingKnownAttachments = combineAttachmentProfiles(
-      buildAttachmentProfile(historicalAttachments.items.filter((item) => filenameMentioned(lowerText(item.name)))),
-      buildAttachmentProfile(archivedAttachments.items.filter((item) => filenameMentioned(lowerText(item.name)))),
-    );
-    const mentionsKnownAttachment = matchingKnownAttachments.count > 0;
-    const explicitOlderMaterialReference = explicitlyReferencesOlderMaterials(contextProbe);
-    const explicitPriorWorkReference = [
-      /\b(?:previous|earlier|prior|above|last)\s+(?:answers?|responses?|results?|solutions?|calculations?|proofs?|reasoning|code|formulas?|equations?|work|analysis|approaches?|steps?|questions?|instructions?|explanations?|messages?|discussion|context)\b/iu,
-      /\b(?:answers?|responses?|results?|solutions?|calculations?|proofs?|reasoning|code|formulas?|equations?|work|analysis|approaches?|steps?|questions?|instructions?|explanations?|messages?)\s+(?:above|earlier|previously|from\s+before)\b/iu,
-      /\b(?:your|our)\s+(?:(?:previous|earlier|last)\s+)?(?:answers?|responses?|results?|solutions?|calculations?|proofs?|reasoning|code|formulas?|equations?|work|analysis|approaches?|steps?|questions?|instructions?|explanations?)\b/iu,
-      /\b(?:we|you)\s+(?:derived|calculated|proved|solved|wrote|explained|discussed|decided|recommended|used|said)\b/iu,
-      /\bwhat\s+you\s+(?:said|wrote|calculated|explained|recommended)\s+(?:earlier|above|before)\b/iu,
-      /\b(?:finish|continue|complete|extend|revise|correct)\s+(?:the|that|our|your)\s+(?:answer|response|solution|calculation|proof|reasoning|code|formula|equation|work|analysis|approach|step|instructions?|explanation)\b/iu,
-    ].some((pattern) => pattern.test(contextProbe));
-    const materialContextReference = namedMaterialReference.test(contextProbe) && !genericMaterialCompound.test(contextProbe) ||
-      mentionsKnownAttachment;
-    const currentMaterialReference = currentAttachments.count > 0 &&
-      /\b(?:attachments?|uploads?|files?|documents?|pdfs?|spreadsheets?|workbooks?|worksheets?|sheets?|csvs?|datasets?|slide\s+decks?|presentations?|images?|screenshots?|diagrams?|tables?|charts?)\b/iu.test(contextProbe);
-    const startsCurrentAttachmentTask = currentMaterialReference &&
-      !mentionsKnownAttachment && !explicitOlderMaterialReference && !explicitPriorWorkReference;
-    const externalOrdinalTopic = /\b(?:the\s+)?(?:first|second|third|fourth|fifth|last|next|previous)\s+(?:file|document|image|table|step|section|paragraph|line|part|question|example|formula|equation|version)\s+(?:of|in|on|for)\s+(?!(?:this|that|these|those|our|your|previous|earlier|above)\b)|\b(?:the\s+)?(?:first|earliest|oldest|original)\s+(?:image\s+sensor|spreadsheet\s+format|pdf\s+specification)\b/iu.test(contextProbe);
-    const ellipticalFollowUp = hasPriorConversation && wordCount <= 40 && [
-      /^(?:same(?:\s+(?:thing|approach|method|format|style|analysis|calculation|proof|code))?\s+(?:but|for|with|using|on)\b|same[?.!]*$)/iu,
-      /^(?:this|that)\s+one\s+too[?.!]*$/iu,
-      /^repeat\s+(?:it|this|that|the\s+same|for|with|using)\b/iu,
-      /^based\s+on\s+(?:the\s+)?(?:above|earlier|previous|prior)\b/iu,
-      /^refactor\b.{0,120}\b(?:it|this|that|the\s+same\s+way|same\s+way)\b/iu,
-      /^(?:actually\s*[,;:]?\s*)?(?:do|write|make|implement|convert|rewrite|refactor)\s+(?:it|this|that)\s+(?:in|with|using)\b/iu,
-      /^(?:use|in|with)\s+(?:python|typescript|javascript|java|rust|c\+\+|c#|go|ruby|swift|kotlin|sql|comments?|type hints?|tests?|examples?)\b[?.!]*$/iu,
-      /^(?:add|include)\s+(?:error handling|comments?|type hints?|tests?|logging|validation|citations?|examples?)\b[?.!]*$/iu,
-      /^(?:try|use)\s+(?:the\s+)?(?:other|second|different|alternative)\s+(?:method|approach|way|option|one)\b[?.!]*$/iu,
-      /^(?:the\s+)?(?:first|second|third|fourth|fifth|last|next|other)\s+one[?.!]*$/iu,
-      /^(?:part|step|section|question)\s*(?:number\s*)?(?:[a-z]|\d+)\s*(?:please)?[?.!]*$/iu,
-      /^(?:be\s+more\s+(?:specific|detailed|concise|clear|rigorous)|(?:one|another)\s+more\s+example|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:expand|elaborate))(?:\s+(?:more|on\s+it))?[?.!]*$/iu,
-      /^(?:(?:make\s+it\s+)?(?:shorter|longer|simpler|clearer|faster|slower|formal|casual|professional|more\s+(?:concise|formal|casual|specific|detailed|rigorous)|less\s+(?:formal|technical|verbose))|(?:more|less)\s+(?:detail|detailed|concise|formal|technical|verbose)|(?:formal|casual|professional)\s+tone)(?:\s+please)?[?.!]*$/iu,
-      /^(?:again|how\s+come|next|keep\s+going|try\s+(?:it\s+)?once\s+more|step[\s-]+by[\s-]+step|in\s+simpler\s+terms|one\s+more|more\s+examples?)(?:\s+please)?[?.!]*$/iu,
-      /^(?:now\s+)?(?:(?:with|without|using)\s+(?:comments?|tests?|examples?|citations?|type\s+hints?|error\s+handling|logging|validation)|no\s+(?:comments?|tests?|examples?|citations?))(?:\s+please)?[?.!]*$/iu,
-      /^(?:(?:use|as)\s+(?:bullets?|a\s+(?:table|list)|markdown)|only\s+show\s+(?:me\s+)?(?:the\s+)?(?:code|answer|result|steps?))(?:\s+please)?[?.!]*$/iu,
-      /^(?:do\s+it\s+)?(?:the\s+)?other\s+(?:way|method|approach|format|style)(?:\s+please)?[?.!]*$/iu,
-      /^(?:fix|correct)\s+(?:the\s+)?(?:errors?|mistakes?|bugs?)|^remove\s+(?:the\s+)?(?:errors?|mistakes?|bugs?|comments?|tests?|examples?|citations?)(?:\s+please)?[?.!]*$/iu,
-      /^(?:do|finish|complete)\s+(?:the\s+)?rest(?:\s+please)?[?.!]*$/iu,
-      /^same\s+thing(?:\s+please)?[?.!]*$/iu,
-      /^(?:please\s+)?(?:do|write|create|generate|draft|try|redo|run|test|deploy|compile|execute|debug|optimi[sz]e|document|lint|implement|build|complete|secure|benchmark|profile|ship|analy[sz]e|inspect|read|audit|open|process)\s+(?:it|them|this|that)\b.{0,80}[?.!]*$/iu,
-      /^(?:please\s+)?make\s+(?:it|them|this|that)(?:\s+please)?[?.!]*$/iu,
-      /^(?:what\s+(?:does|did)\s+it\s+say|what\s+is\s+(?:in|inside)\s+it|(?:does|did)\s+it\s+mention\b.{1,80}|where\s+does\s+it\s+mention\b.{1,80}|find\b.{1,80}\bin\s+it|search\s+it\s+for\b.{1,80}|extract\b.{1,80}\bfrom\s+it|list\s+what\s+is\s+in\s+it|tell\s+me\s+what\s+it\s+says)[?.!]*$/iu,
-      /^(?:proceed|go\s+ahead|go\s+for\s+it|please\s+do|yes\s+please|yes[,]?\s+do\s+(?:it|that)|(?:okay|ok|sure|sounds\s+good)[,;:]?\s+do\s+it|carry\s+on|let['’]?s\s+do\s+it)[?.!]*$/iu,
-      /^(?:whatever\s+you\s+think\s+is\s+best|choose\s+for\s+me|pick\s+(?:one|for\s+me)|you\s+decide|which\s+one\s+do\s+you\s+recommend|what\s+do\s+you\s+recommend|what\s+would\s+you\s+do|use\s+your\s+best\s+judg(?:e)?ment)[?.!]*$/iu,
-      /^no[,;:]?\s+(?:use|do|pick|choose|try|make|write|create|run|apply)\b.{1,100}[?.!]*$/iu,
-      /^(?:pick|choose|use|do|try)\s+(?:the\s+)?(?:first|second|third|other|next|previous|alternative)\s+(?:one|option|method|approach|version|choice)(?:\s+instead)?[?.!]*$/iu,
-      /^(?:use|try|choose|pick)\s+[\p{L}\p{N}+#.-]+\s+instead[?.!]*$/iu,
-      /^(?:tell\s+me\s+more|more\s+please|details|why\s+exactly|(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?be\s+clearer|i\s+(?:am|['’]m)\s+still\s+confused)[?.!]*$/iu,
-      /^(?:(?:using|based on)\s+(?:this|that|these|those)\b|(?:now|then)\s+(?:solve|calculate|find|derive|evaluate|simplify|substitute|continue|do)\b)/iu,
-      /^(?:what\s+(?:happens?\s+when|if|about)|does\s+(?:this|that)\s+change\s+if)\s+[a-z](?:\s*(?:=|==|≠|!=|<=|>=|<|>)\s*[-+]?\w+(?:\.\w+)?|\s+is\s+(?:positive|negative|zero|null|true|false))\b/iu,
-      /^(?:so|then)\s+(?:is|are|does?)\s+[a-z]\s+(?:positive|negative|zero|null|true|false)\b/iu,
-      /^what\s+does\s+[a-z]\s+(?:represent|mean|stand\s+for)\b/iu,
-      /^(?:(?:what|how)\s+about|(?:and|then)\s+for)\s+(?:the\s+)?(?:other|next|previous|first|second|third)\s+(?:one|case|option|part)\b/iu,
-      /^(?:where\s+did\s+(?:this|that)(?:\s+(?:number|value|term|coefficient|factor|formula|assumption))?\s+come\s+from|(?:what|which)\s+(?:assumption|formula|equation|method|rule)\s+did\s+you\s+use)\b/iu,
-      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?show\s+(?:me\s+)?(?:the\s+)?(?:algebra|derivation|calculation|work|steps)\b/iu,
-      /^(?:how\s+did\s+you\s+know\s+to|why\s+did\s+you)\s+(?:divide|multiply|subtract|add|cancel|factor|substitute|differentiate|integrate|choose|use|set)\b/iu,
-      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?explain\s+where\s+(?:the\s+)?(?:number\s+)?[-+]?\d+(?:\.\d+)?\s+came\s+from\b/iu,
-      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:calculate|find|derive|solve|do|explain|check|review)\s+(?:the\s+)?(?:next|other|remaining)\s+(?:value|case|one|part|option)\b/iu,
-      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:do|solve|explain|check|review)\s+(?:(?:part|option)\s+)?[a-z0-9][?.!]*$/iu,
-      /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:explain|simplify)(?:\s+(?:this|that|it))?|go\s+over\s+(?:this|that|it)|(?:give|show)\s+(?:me\s+)?(?:another|one\s+more)\s+example|repeat\s+(?:this|that|it))[?.!]*$/iu,
-      /^(?:(?:what|how)\s+about)\s+(?:the\s+)?(?:last|next|other|previous)\s+(?:example|case)\b/iu,
-      /^(?:(?:what|how)\s+about\s+(?:the\s+)?(?:item|bullet|point|example)\s+(?:[a-z]|\d+)|(?:and|what\s+about)\s+(?:if|when)\s+[a-z]\s+(?:is\s+)?(?:positive|negative|zero|null|true|false))\b/iu,
-      /^(?:(?:what|how)\s+about\b.{1,120}|what\s+if\b.{1,120}|and\b.{1,120})[?.!]*$/iu,
-      /^(?:(?:does|will|would|can|could)\s+it\s+work\b.{0,100}|should\s+i\s+(?:sign|take|use|keep|remove)\s+it\b.{0,100}|can\s+i\s+(?:deploy|take|use|move|delete|send)\s+it\b.{0,100}|where\s+should\s+i\s+(?:put|place|save|store)\s+it\b.{0,100}|what\s+should\s+i\s+do\s+with\s+it\b.{0,100}|what\s+is\s+it|how\s+does\s+it\s+work|why\s+is\s+it\s+(?:wrong|incorrect)|what\s+about\s+it)[?.!]*$/iu,
-    ].some((pattern) => pattern.test(contextProbe));
-    const contextDependent = mentionsKnownAttachment || explicitOlderMaterialReference || affirmativeConfirmation || clarificationReply || !topicReset && (
-      longRangeContextReference ||
-      continuation.test(contextProbe) || implicitContextFollowUp.test(contextProbe) || genericCheckFollowUp.test(contextProbe) ||
-      !externalOrdinalTopic && (explicitContextTask.test(contextProbe) || indexedContextTask.test(contextProbe) || definiteContextObject.test(contextProbe)) ||
-      contextualRevision.test(contextProbe) || materialContextReference || ellipticalFollowUp ||
-      !externalOrdinalTopic && contextualReference.test(contextProbe) && contextualLead.test(contextProbe) ||
-      /^(?:now\s+)?(?:apply|use)\s+(?:that|this|the\s+same)\b|^(?:now\s+)?calculate\s+(?:it|that|this)\b|\b(?:its|their)\s+(?:determinant|value|meaning|effect|result|output)\b/iu.test(contextProbe)
-    );
-    const contextualTransform = contextDependent && (
-      safeSimpleTransform || /\b(?:turn|convert)\b.{0,80}\b(?:into|to)\b.{0,40}\b(?:bullets?|table|list|spanish|english)\b/iu.test(contextProbe)
-    );
-    const ambiguousFollowUp = wordCount <= 40 && !simpleAdministrative.test(lower) && !simpleUiAction.test(lower) && contextDependent;
-    let uncertainBase = false;
-
-    if (acknowledgment.test(lower)) score = 4;
-    else if (simpleMath.test(lower)) score = 6;
-    else if (safeSimpleFact) score = 12;
-    else if (safeSimpleTransform || simpleAdministrative.test(lower) || simpleUiAction.test(lower) || safeShortWriting) score = 12;
-    else if (/\b(?:write|rewrite|summari[sz]e|translate|draft|edit)\b/iu.test(lower)) score = 18;
-    else if (technical.test(lower) || /\b(?:architecture|concurrency|distributed system|security review|threat model)\b/iu.test(lower)) score = 28;
-    else if (normalAnalysis.test(lower)) score = 24;
-    else {
-      score = wordCount > 80 ? 36 : wordCount > 45 ? 28 : 24;
-      uncertainBase = true;
-      reasons.push('unclear complexity favored the safer level');
-    }
-
-    if (answerVerification) {
-      score = Math.max(score, 40);
-      reasons.push('verify a supplied answer before explaining');
-      strongGroups.add('supplied-answer verification');
-    }
-
-    if (longRangeContextReference && (archivedMeaningfulTurnCount >= 20 || archivedSampledTextLength >= 20_000)) {
-      longRangeMinimumLevel = archivedMeaningfulTurnCount >= 80 || archivedSampledTextLength >= 80_000
-        ? 'extra-high'
-        : 'high';
-      score = Math.max(score, longRangeMinimumLevel === 'extra-high' ? 62 : 44);
-      strongGroups.add('large whole-conversation context');
-      reasons.push('large whole-conversation context');
-    }
-
-    const attachmentCount = currentAttachments.count;
-    let attachmentMinimumLevel = '';
-    if (attachmentCount > 0) {
-      score = Math.max(score, 24);
-      reasons.push('attached material');
-      attachmentMinimumLevel = 'medium';
-      if (attachmentCount >= 2) {
-        score = Math.max(score, 34 + Math.min(12, (attachmentCount - 2) * 4));
-        strongGroups.add('multiple attachments');
-        reasons.push('multiple attachments');
-      }
-      if (attachmentCount >= 6) {
-        score = Math.max(score, 62);
-        strongGroups.add('many attachments');
-        reasons.push('many attachments');
-        attachmentMinimumLevel = 'extra-high';
-      }
-      if (currentAttachments.complexCount > 0) {
-        score = Math.max(score, 40);
-        strongGroups.add('complex attachment type');
-        reasons.push('complex attachment type');
-        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
-      }
-      if (currentAttachments.complexCount >= 3) {
-        score = Math.max(score, 62);
-        strongGroups.add('several complex attachments');
-        attachmentMinimumLevel = 'extra-high';
-      }
-      if (currentAttachments.kinds.length >= 3) {
-        score += 8;
-        strongGroups.add('mixed attachment types');
-        reasons.push('mixed attachment types');
-      }
-      if (currentAttachments.largeCount > 0 || currentAttachments.totalBytes >= 25 * 1024 * 1024) {
-        score = Math.max(score, 44);
-        strongGroups.add('large attached material');
-        reasons.push('large attached material');
-        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
-      }
-      if (currentAttachments.sensitiveCount > 0) {
-        score = Math.max(score, 44);
-        highStakes = true;
-        strongGroups.add('sensitive attached material');
-        reasons.push('sensitive attached material');
-        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
-      }
-      if (currentAttachments.unknownCount > 0) {
-        score = Math.max(score, 40);
-        strongGroups.add('unknown attachment type');
-        reasons.push('unknown attachment type favored the safer level');
-        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
-      }
-      const difficultAttachmentTask = /\b(?:audit|debug|diagnose|solve|calculate|reconcile|cross[\s-]?reference|compare\s+(?:across|all|the)|resolve\s+(?:conflicts?|contradictions?)|verify\s+(?:the\s+)?(?:calculations?|formulas?|claims?|answers?|data)|find\s+(?:inconsistencies|contradictions|errors)|read\s+(?:handwritten|every)|(?:analy[sz]e|interpret)\s+(?:(?:this|that|the|an?)\s+)?(?:[\p{L}-]+\s+){0,2}(?:chart|diagram|scan|data|results?|x[\s-]?ray|mri|image))\b/iu.test(lower);
-      if (difficultAttachmentTask) {
-        score = Math.max(score + 8, 44);
-        strongGroups.add('difficult attachment analysis');
-        reasons.push('difficult attachment analysis');
-        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
-      }
-      if (!normalized && (currentAttachments.unknownCount > 0 || attachmentCount > 1)) {
-        score = Math.max(score, 40);
-        attachmentMinimumLevel = modelLevelRank(attachmentMinimumLevel) < ROUTE_LEVEL_RANK.high ? 'high' : attachmentMinimumLevel;
-        reasons.push('attachment-only request favored the safer level');
-      }
-    }
-
-    let contextualMinimumLevel = strongerRouteLevel(attachmentMinimumLevel, longRangeMinimumLevel);
-    let inheritedContext = false;
-    const useConversationContext = contextDependent && !metalinguisticVerification &&
-      !simpleAdministrative.test(lower) && !simpleUiAction.test(lower) &&
-      (!contextualTransform || hasPriorConversation) && !startsCurrentAttachmentTask;
-    if (useConversationContext || answerVerification && !topicReset) {
-      const baseMinimum = answerVerification ? 'high'
-        : continuation.test(lower) && !hasPriorConversation ? 'high'
-          : 'medium';
-      let inheritedLevel = topicReset ? '' : previousLevel;
-      if (contextualTransform && !wholeConversationReference && modelLevelRank(inheritedLevel) > ROUTE_LEVEL_RANK.high) inheritedLevel = 'high';
-      const contextFloor = strongerRouteLevel(baseMinimum, inheritedLevel);
-      contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, contextFloor);
-      inheritedContext = Boolean(!topicReset && previousLevel && hasPriorConversation);
-      score = Math.max(score, answerVerification || continuation.test(lower) && !hasPriorConversation ? 40 : 24);
-      reasons.push(answerVerification
-        ? 'recheck the previous answer at High or above'
-        : inheritedContext ? 'follow-up inherited relevant conversation difficulty' : 'uncertain follow-up kept a safer context level');
-
-      let historical = historicalAttachments;
-      if (mentionsKnownAttachment) historical = matchingKnownAttachments;
-      else if (explicitOlderMaterialReference || wholeConversationReference) {
-        historical = combineAttachmentProfiles(historicalAttachments, archivedAttachments);
-      } else if (currentMaterialReference) historical = buildAttachmentProfile();
-      else if (materialContextReference && historical.count === 0) historical = archivedAttachments;
-      if (historical.count > 0) {
-        reasons.push('follow-up uses earlier attached material');
-        contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, 'medium');
-        if (historical.count >= 2 || historical.complexCount > 0 || historical.largeCount > 0 || historical.sensitiveCount > 0) {
-          contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, 'high');
-          score = Math.max(score, 44);
-          strongGroups.add('earlier attached material');
-        }
-        if (historical.count >= 6 || historical.complexCount >= 3) {
-          contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, 'extra-high');
-          score = Math.max(score, 62);
-          strongGroups.add('many earlier attachments');
-        }
-      }
-    } else if (ambiguousFollowUp && !contextualTransform && !metalinguisticVerification) {
-      contextualMinimumLevel = strongerRouteLevel(contextualMinimumLevel, 'medium');
-      score = Math.max(score, 24);
-      reasons.push('uncertain follow-up kept a safer context level');
-    }
-
-    const addSignal = (pattern, points, code, strong = true) => {
-      if (!pattern.test(sampleLower)) return false;
-      score += points;
-      reasons.push(code);
-      if (strong) strongGroups.add(code);
-      return true;
-    };
-
-    debuggingWork = addSignal(/\b(?:debug|bug|failing test|failure|exception|stack trace|traceback|segmentation fault|root cause)\b|(?:type|reference|syntax|runtime|value)error\s*:/iu, 14, 'debugging');
-    formalReasoning = addSignal(/\b(?:prove|derive|derivation|rigorous(?:ly)?|formal correctness|correctness argument|justify every)\b|\b(?:write|give|show|construct|explain|review)\b.{0,80}\bproof\b/iu, 14, 'formal reasoning');
-    addSignal(/\b(?:architecture|concurren(?:cy|t)|race condition|thread[\s-]?safe(?:ty)?|secure|security|injection|vulnerabilit\w*|threat model|performance|scalab(?:le|ility)|migration|rollback|distributed system|multi-tenant)\b/iu, 14, 'architecture or risk');
-    addSignal(/\b(?:synthesi[sz]e|systematic review|primary sources?|conflicting (?:evidence|studies)|multiple sources?|citations?|cite (?:the )?(?:official|primary))\b/iu, 10, 'source synthesis');
-    if (!metalinguisticVerification && !routineOperationalCheck && !simpleAdministrative.test(lower) && !simpleUiAction.test(lower)) {
-      addSignal(/\b(?:verify|verification|tests?|test suite|edge cases?|double[\s-]?check|exhaustive|benchmarks?|every case|correctness)\b|\bwithout\s+changing\s+(?:behavior|behaviour|semantics|output)\b/iu, 10, 'verification');
-    }
-
-    const numberedTasks = (sample.match(/(?:^|\n)\s*(?:\d+[.)]|[-*])\s+/gu) || []).length;
-    const taskVerbs = new Set((sampleLower.match(/\b(?:design|implement|review|explain|compare|test|verify|benchmark|migrate|document|optimi[sz]e|debug|prove|specify)\b/gu) || []));
-    const listSeparators = (sample.match(/[,;]/gu) || []).length;
-    if (numberedTasks >= 3 || taskVerbs.size >= 4 ||
-      strongGroups.has('architecture or risk') && listSeparators >= 5 ||
-      /\b(?:three|four|five|six|several|multiple)\s+(?:tasks?|steps?|parts?|policies|options)\b/iu.test(sampleLower)) {
-      score += 8;
-      reasons.push('multiple subtasks');
-      strongGroups.add('multiple subtasks');
-    }
-
-    const constraintHits = sampleLower.match(/\b(?:must|should|without|only|at least|at most|under \d+|do not|don\W?t|require[ds]?|include)\b/gu) || [];
-    if (constraintHits.length >= 4) {
-      score += 8;
-      reasons.push('many constraints');
-      strongGroups.add('many constraints');
-    }
-
-    if (wordCount > 4_000) {
-      score += 16;
-      reasons.push('very large input');
-      strongGroups.add('very large input');
-    } else if (wordCount > 1_200 || codeLineCount > 100) {
-      score += 8;
-      reasons.push('large input');
-      strongGroups.add('large input');
-    }
-
-    const personalHighStakes = /\b(?:my|i|me)\b.{0,80}\b(?:medical|medicine|medication|dose|dosage|symptom|diagnosis|legal|lawsuit|contract|tax|investment|financial|stocks?|warfarin|pregnan|chest pain|emergency room|\ber\b|cancer)\b|\b(?:can i take|should i take|can i sue)\b/iu.test(sampleLower);
-    const medicalDecision = /\b(?:dose|dosage|medication|medication list|medicine|drug|symptoms?|diagnosis|lab results?|radiology|medical imag\w*|x[\s-]?ray|mri|ct scan|pregnan\w*|warfarin|ibuprofen|tylenol|acetaminophen|alcohol|chest pain|heart attack|stroke|sepsis|meningitis|blood clot|headache|mole|cancer|ambulance|emergency room|\ber\b)\b/iu.test(sampleLower) &&
-      /\b(?:warning signs?|signs?|symptoms?|safe|serious|abnormalit\w*|cancer|go|call|take|use|stop|start|increase|decrease|mix|combine|summari[sz]e|analy[sz]e|explain|interpret|review|should|can|could)\b/iu.test(sampleLower);
-    const legalDecision = /\b(?:contract|lease|agreement|lawsuit|legal|tax|lawyer|landlord|employer|evict\w*|arrest\w*|fire[ds]?)\b/iu.test(sampleLower) &&
-      /\b(?:need|rights?|enforceable|valid|legal|liable|liability|landlord|employer|evict\w*|arrest\w*|fire[ds]?|sign|sue|file|owe|should|can|could)\b/iu.test(sampleLower);
-    const financialDecision = /\b(?:stocks?|shares?|investment|portfolio|crypto|bitcoin|nft|fraud|scam|mortgage|loan|retirement)\b/iu.test(sampleLower) &&
-      /\b(?:safe|scam|fraud|report|buy|sell|invest|trade|withdraw|refinance|should|can i|could i)\b/iu.test(sampleLower);
-    const securityAction = /\b(?:safe|sufficient|correct(?:ly)?|uses?|store|commit|expose|prevent|protect|implement|design|encrypt|hash(?:er|ing)?|verif(?:y|ier|ication)|analy[sz]e|assess|review|audit|check|sanitize|escape|cause)\b/iu.test(sampleLower);
-    const coreSecurityTerm = /\b(?:passwords?|credentials?|api keys?|secret keys?|(?:api|access|refresh|auth|session|bearer|secret) tokens?|md5|sha-?1|bcrypt|argon2|jwt|tls|aes(?:-gcm)?|encryption|cryptograph\w*|crypto|authentication|authorization|oauth|openid connect|session cookies?|access[\s-]?control|cors|denial of service|prompt injection|sql injection|xss|csrf|vulnerabilit\w*|security)\b/iu.test(sampleLower);
-    const runtimeSecurityRisk = /\b(?:localstorage|eval)\b/iu.test(sampleLower) &&
-      /\b(?:passwords?|credentials?|tokens?|secrets?|keys?|auth\w*|user input|user data|safe|secure|injection)\b/iu.test(sampleLower);
-    const injectionDefense = /\b(?:html|sql|user input)\b/iu.test(sampleLower) &&
-      /\b(?:sanitize|escape|injection)\b/iu.test(sampleLower);
-    const secureTarget = /\bsecure\b/iu.test(sampleLower) && /\b(?:make|design|implement|keep|ensure|is|are|review|assess)\b/iu.test(sampleLower);
-    const securityDecision = !simpleAdministrative.test(lower) && !simpleUiAction.test(lower) &&
-      (securityAction && (coreSecurityTerm || runtimeSecurityRisk || injectionDefense) || secureTarget);
-    const sensitiveDocumentReview = /\b(?:contract|lease|medical report|lab results?)\b.{0,100}\b(?:flag|identify|find|review|check)\b.{0,80}\b(?:risks?|risky|dangerous|clauses?|findings?)\b|\b(?:flag|identify|find|review|check)\b.{0,80}\b(?:risks?|risky|dangerous|clauses?|findings?)\b.{0,100}\b(?:contract|lease|medical report|lab results?)\b/iu.test(sampleLower);
-    if (personalHighStakes || medicalDecision || legalDecision || financialDecision || /\bcan i sue\b/iu.test(sampleLower) || sensitiveDocumentReview) {
-      score += 12;
-      highStakes = true;
-      reasons.push('personal high-stakes question');
-      strongGroups.add('personal high-stakes question');
-    }
-    if (securityDecision) {
-      highStakes = true;
-      reasons.push('security-sensitive work');
-      strongGroups.add('security-sensitive work');
-    }
-
-    if (/\b(?:end[- ]to[- ]end|production|repo(?:sitory)?[- ]scale|whole (?:repository|codebase)|long[- ]running|from scratch|complete implementation|design and implement|compiler)\b/iu.test(sampleLower)) {
-      score += 16;
-      longHorizon = true;
-      reasons.push('long-horizon work');
-      strongGroups.add('long-horizon work');
-    }
-    if (/\b(?:expert|novel|research[- ]level|graduate[- ]level|olympiad|formal verification|publication[- ]quality|state of the art|optimizer|type checker)\b/iu.test(sampleLower)) {
-      score += 16;
-      expertWork = true;
-      reasons.push('expert-level work');
-      strongGroups.add('expert-level work');
-    }
-    if (/\b(?:take your time|highest accuracy|maximum accuracy|be meticulous|do not make (?:any )?mistakes|check every|fully rigorous)\b/iu.test(sampleLower)) {
-      score += 10;
-      reasons.push('accuracy priority');
-      strongGroups.add('accuracy priority');
-    }
-    if (/\b(?:quick answer|answer quickly|don\W?t overthink|do not overthink|least tokens?|be brief|briefly)\b/iu.test(sampleLower)) {
-      if (!strongGroups.size && !highStakes && !answerVerification && !debuggingWork) {
-        score -= 8;
-        reasons.push('speed priority');
-      } else {
-        reasons.push('brief response without lowering reasoning');
-      }
-    }
-
-    score = Math.max(0, Math.min(100, score));
-    let target = score < 20
-      ? 'instant'
-      : score < 40
-        ? 'medium'
-        : score < 60
-          ? 'high'
-          : score < 80
-            ? 'extra-high'
-            : 'pro';
-
-    const boundaries = [20, 40, 60, 80];
-    const margin = Math.min(...boundaries.map((boundary) => Math.abs(score - boundary)));
-    const confidence = Math.max(0.45, Math.min(0.94, 0.58 + Math.min(margin, 10) * 0.018 + Math.min(strongGroups.size, 3) * 0.045));
-
-    if (highStakes && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
-    if (debuggingWork && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
-    if (formalReasoning && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
-    if (behaviorPreservation && technical.test(lower) && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
-    if (answerVerification && modelLevelRank(target) < ROUTE_LEVEL_RANK.high) target = 'high';
-
-    const targetBeforeUncertainty = target;
-    const upperBoundary = { instant: 20, medium: 40, high: 60, 'extra-high': 80 }[target];
-    const saferTarget = { instant: 'medium', medium: 'high', high: 'extra-high', 'extra-high': 'pro' }[target];
-    const uncertaintyBand = target === 'medium' ? 6 : 4;
-    let uncertaintyPromotionCandidate = false;
-    if (!answerVerification && upperBoundary && saferTarget && upperBoundary - score >= 1 &&
-      upperBoundary - score <= uncertaintyBand) {
-      target = saferTarget;
-      uncertaintyPromotionCandidate = true;
-    }
-    if (modelLevelRank(target) >= ROUTE_LEVEL_RANK['extra-high'] && strongGroups.size < 2) target = 'high';
-    if (modelLevelRank(target) >= ROUTE_LEVEL_RANK.pro && (
-      strongGroups.size < 3 || !(longHorizon || expertWork || (highStakes && strongGroups.has('source synthesis')))
-    )) {
-      target = 'extra-high';
-    }
-    if (contextualMinimumLevel && modelLevelRank(target) < modelLevelRank(contextualMinimumLevel)) {
-      target = contextualMinimumLevel;
-    }
-
-    const uncertaintyEscalated = uncertaintyPromotionCandidate &&
-      modelLevelRank(target) > modelLevelRank(targetBeforeUncertainty);
-    if (uncertaintyEscalated) reasons.unshift('uncertainty safety margin chose the higher level');
-    return {
-      target,
-      score,
-      confidence: inheritedContext ? Math.max(confidence, 0.82) : confidence,
-      explicit: false,
-      inherited: inheritedContext,
-      strict: answerVerification,
-      minimumLevel: answerVerification ? 'high' : '',
-      uncertain: uncertaintyEscalated || uncertainBase,
-      reasons: reasons.length ? reasons : [score < 20 ? 'short everyday request' : 'general complexity'],
-    };
-  }
-
-  function maxRouteRank(maxSetting) {
-    if (maxSetting === 'high') return ROUTE_LEVEL_RANK.high;
-    if (maxSetting === 'extra-high') return ROUTE_LEVEL_RANK['extra-high'];
-    return Number.POSITIVE_INFINITY;
-  }
-
-  function elementPickerLevel(element, options = {}) {
-    if (!element || typeof element !== 'object') return '';
-    const visibleFirst = options.trigger === true
-      ? [
-        element.getAttribute && element.getAttribute('aria-label'),
-        element.innerText,
-        element.textContent,
-        element.getAttribute && element.getAttribute('title'),
-      ]
-      : [
-        element.innerText,
-        element.textContent,
-        element.getAttribute && element.getAttribute('aria-label'),
-        element.getAttribute && element.getAttribute('title'),
-      ];
-    const signals = [...new Set(visibleFirst.map(normalizeText).filter(Boolean))];
-    for (const signal of signals) {
-      const level = extractPickerLevel(signal, { allowBareEffort: options.allowBareEffort === true });
-      if (level) return level;
-    }
-    return extractPickerLevel(accessibleText(element), { allowBareEffort: options.allowBareEffort === true });
-  }
-
-  function optionLevel(option) {
-    if (typeof option === 'string') return extractPickerLevel(option, { allowBareEffort: true });
-    if (!option || typeof option !== 'object') return '';
-    return option.level
-      ? extractModelLevel(option.level)
-      : option.nodeType === 1
-        ? elementPickerLevel(option, { allowBareEffort: true })
-        : extractPickerLevel(option.label || option.text || '', { allowBareEffort: true });
-  }
-
-  function chooseModelOption(options, target, maxSetting = 'highest') {
-    const cap = maxRouteRank(maxSetting);
-    const recognized = [];
-    for (const option of Array.isArray(options) ? options : []) {
-      const level = optionLevel(option);
-      const rank = modelLevelRank(level);
-      if (!level || rank < 0 || rank > cap) continue;
-      if (option && typeof option === 'object' && option.nodeType === 1 && (
-        option.disabled || option.closest('[aria-disabled="true"], [data-disabled="true"], :disabled')
-      )) continue;
-      recognized.push({ element: typeof option === 'string' ? null : option, option, level, rank });
-    }
-    if (!recognized.length) return null;
-    recognized.sort((left, right) => left.rank - right.rank);
-
-    if (target === 'max') {
-      const selected = recognized[recognized.length - 1];
-      return { ...selected, selectedLevel: selected.level, requestedLevel: 'max', fallback: false };
-    }
-
-    const canonicalTarget = ROUTE_LEVEL_RANK[target] == null ? extractModelLevel(target) : target;
-    let desiredRank = modelLevelRank(canonicalTarget);
-    if (desiredRank < 0) return null;
-    desiredRank = Math.min(desiredRank, cap);
-    const exact = recognized.find((entry) => entry.rank === desiredRank && entry.level === canonicalTarget) ||
-      recognized.find((entry) => entry.rank === desiredRank && canonicalTarget === 'instant' && entry.level === 'auto');
-    const sameFamilyFallback = canonicalTarget === 'ultra'
-      ? [...recognized].reverse().find((entry) => entry.level === 'extra-high')
-      : null;
-    const selected = exact || sameFamilyFallback || recognized.find((entry) => entry.rank >= desiredRank) || recognized[recognized.length - 1];
-    return {
-      ...selected,
-      selectedLevel: selected.level,
-      requestedLevel: canonicalTarget,
-      fallback: selected.level !== canonicalTarget,
-    };
-  }
-
-  function isPlausiblePickerButton(button, allowGenericPopup = false) {
-    if (!button || !isProbablyVisible(button) || button.closest(`#${UI_ROOT_ID}`)) return false;
-    const testId = lowerText(button.getAttribute('data-testid'));
-    if (/\b(?:model-(?:picker|switcher)|intelligence|reasoning|thinking-time)\b/iu.test(testId)) return true;
-    if (elementPickerLevel(button, { trigger: true })) return true;
-    return allowGenericPopup && (button.hasAttribute('aria-controls') || button.hasAttribute('aria-expanded') || button.hasAttribute('aria-haspopup'));
-  }
-
-  function findModelPicker(doc, composer = findComposer(doc)) {
-    if (!doc || !composer) return null;
-    const form = composer.closest && composer.closest('form');
-    const localScopes = uniqueElements([
-      composerScope(composer),
-      form && form.parentElement && !form.parentElement.matches('main, body, html') ? form.parentElement : null,
-      composer.parentElement && !composer.parentElement.matches('main, body, html') ? composer.parentElement : null,
-    ]);
-    const scopes = uniqueElements([
-      ...localScopes,
-      composer.closest && composer.closest('main'),
-      doc.querySelector('main'),
-      doc,
-    ]);
-    const preferred = [
-      'button[data-testid*="model-picker"]',
-      'button[data-testid*="model-switcher"]',
-      'button[data-testid="model-switcher-dropdown-button"]',
-      'button[aria-label*="model" i]',
-    ];
-    const localPreferred = [
-      ...preferred,
-      'button[data-testid*="intelligence"]',
-      'button[aria-label*="intelligence" i]',
-    ];
-    for (const scope of scopes) {
-      const isLocal = localScopes.includes(scope);
-      for (const selector of localScopes.includes(scope) ? localPreferred : preferred) {
-        const candidate = [...scope.querySelectorAll(selector)].find((button) => isPlausiblePickerButton(button, isLocal));
-        if (candidate) return candidate;
-      }
-    }
-    for (const scope of localScopes) {
-      const fallback = [...scope.querySelectorAll('button')].find((button) => {
-        if (!isProbablyVisible(button) || button.closest(`#${UI_ROOT_ID}`)) return false;
-        return Boolean(elementPickerLevel(button, { trigger: true }));
-      });
-      if (fallback) return fallback;
-    }
-    return null;
-  }
-
-  function findReasoningPicker(doc, composer = findComposer(doc)) {
-    if (!doc || !composer) return null;
-    const form = composer.closest && composer.closest('form');
-    const localScopes = uniqueElements([
-      composerScope(composer),
-      form && form.parentElement && !form.parentElement.matches('main, body, html') ? form.parentElement : null,
-      composer.parentElement && !composer.parentElement.matches('main, body, html') ? composer.parentElement : null,
-    ]);
-    const scopes = uniqueElements([
-      ...localScopes,
-      composer.closest && composer.closest('main'),
-      doc.querySelector('main'),
-      doc,
-    ]);
-    const primary = findModelPicker(doc, composer);
-    const explicitPreferred = [
-      'button[data-testid*="reasoning"]',
-      'button[data-testid*="thinking-time"]',
-      'button[data-testid*="intelligence"]',
-      'button[aria-label*="reasoning effort" i]',
-      'button[aria-label*="thinking time" i]',
-      'button[aria-label*="intelligence level" i]',
-    ];
-    const genericPreferred = [
-      '[data-composer-surface="true"] button.__composer-pill[aria-haspopup="menu"][id^="radix-"]',
-      'button.__composer-pill[aria-haspopup="menu"][id^="radix-"]',
-    ];
-    const findDistinct = (candidateScopes, selectors, allowGenericPopup, requireLevel = false) => {
-      for (const scope of candidateScopes) {
-        for (const selector of selectors) {
-          const candidates = [...scope.querySelectorAll(selector)].filter((button) =>
-            button !== primary && isPlausiblePickerButton(button, allowGenericPopup));
-          const candidate = requireLevel
-            ? candidates.find((button) => Boolean(elementPickerLevel(button, { trigger: true })))
-            : candidates[0];
-          if (candidate) return candidate;
-        }
-      }
-      return null;
-    };
-    const nonLocalScopes = scopes.filter((scope) => !localScopes.includes(scope));
-    const preferred = findDistinct(localScopes, explicitPreferred, true) ||
-      findDistinct(localScopes, genericPreferred, true, true) ||
-      findDistinct(nonLocalScopes, explicitPreferred, false) ||
-      findDistinct(nonLocalScopes, genericPreferred, false, true);
-    if (preferred) return preferred;
-    for (const scope of localScopes) {
-      const candidate = [...scope.querySelectorAll('button')].find((button) => {
-        if (button === primary || !isProbablyVisible(button) || button.closest(`#${UI_ROOT_ID}`)) return false;
-        return Boolean(elementPickerLevel(button, { trigger: true }));
-      });
-      if (candidate) return candidate;
-    }
-    return null;
-  }
-
-  function findModelOptions(root, picker = null, excluded = new Set()) {
-    if (!root) return null;
-    const contextText = lowerText(`${accessibleText(picker)} ${accessibleText(root)}`);
-    const allowBareEffort = /\b(?:reasoning|thinking time|intelligence level|effort)\b/iu.test(contextText);
-    const candidates = [...root.querySelectorAll(MODEL_OPTION_SELECTOR)];
-    const isCandidate = (candidate) => {
-      if (excluded.has(candidate) || candidate === picker || candidate.contains(picker) || !isProbablyVisible(candidate) ||
-        candidate.closest('[data-state="closed"], [aria-hidden="true"], [hidden]') || candidate.closest(`#${UI_ROOT_ID}`)) return false;
-      if (candidate.disabled || candidate.closest('[aria-disabled="true"], [data-disabled="true"], :disabled')) return false;
-      const outerOption = candidate.closest(MODEL_OPTION_CONTAINER_SELECTOR);
-      if (outerOption && isModelUpsellLabel(accessibleText(outerOption))) return false;
-      if (outerOption && outerOption !== candidate &&
-        elementPickerLevel(outerOption, { allowBareEffort }) === elementPickerLevel(candidate, { allowBareEffort })) return false;
-      return !isModelUpsellLabel(accessibleText(candidate)) && Boolean(elementPickerLevel(candidate, { allowBareEffort }));
-    };
-    const recognized = candidates.filter(isCandidate);
-    if (recognized.length || root.nodeType !== 1 || root.matches('html, body, main')) return recognized;
-
-    // ChatGPT sometimes renders a new popover with clickable plain div/span
-    // rows before accessibility roles or test IDs are attached. This fallback
-    // is intentionally limited to the already-scoped, newly changed menu root.
-    const textRows = uniqueElements([...root.querySelectorAll('div, span, p, strong')].slice(0, 500).filter((candidate) => {
-      if (!isCandidate(candidate)) return false;
-      const level = elementPickerLevel(candidate, { allowBareEffort });
-      return ![...candidate.children].some((child) =>
-        elementPickerLevel(child, { allowBareEffort }) === level);
-    }));
-    const distinctLevels = new Set(textRows.map(optionLevel).filter(Boolean));
-    return distinctLevels.size >= 2 ? textRows : [];
-  }
-
-  function currentIntelligenceOptions(doc, picker = null) {
-    if (!doc) return [];
-    const controlledIds = new Set(normalizeText(picker && picker.getAttribute('aria-controls')).split(/\s+/u).filter(Boolean));
-    const pickerId = normalizeText(picker && picker.id);
-    const roots = [...doc.querySelectorAll('[data-testid="composer-intelligence-picker-content"]')]
-      .filter(isMountedAndNotHidden)
-      .map((root) => {
-        const menu = root.closest('[data-radix-menu-content][role="menu"], [role="menu"], [role="listbox"]');
-        const controlledAncestor = [...controlledIds].some((id) => {
-          const controlled = doc.getElementById(id);
-          return controlled && (controlled === root || controlled.contains(root));
-        });
-        let score = 0;
-        if (controlledAncestor || menu && controlledIds.has(normalizeText(menu.id))) score += 100;
-        if (menu && pickerId && normalizeText(menu.getAttribute('aria-labelledby')).split(/\s+/u).includes(pickerId)) score += 100;
-        if (menu && menu.getAttribute('data-state') === 'open') score += 20;
-        return { root, score };
-      })
-      .sort((left, right) => right.score - left.score);
-
-    const bestScore = roots.length ? roots[0].score : -1;
-    const eligibleRoots = roots.filter(({ score }) => score === bestScore);
-    if (eligibleRoots.length > 1) return [];
-
-    for (const { root } of eligibleRoots) {
-      const rowSelector = '[role="menuitemradio"], [role="radio"], [role="option"], [data-radix-collection-item], button';
-      const allRows = [...root.querySelectorAll(rowSelector)].filter((row) => {
-        if (!isMountedAndNotHidden(row) || row.closest(`#${UI_ROOT_ID}`) ||
-          row.matches('[aria-disabled="true"], [data-disabled], :disabled') || isModelUpsellLabel(accessibleText(row))) return false;
-        const level = elementPickerLevel(row, { allowBareEffort: true });
-        if (!level) return false;
-        const outerRow = row.parentElement && row.parentElement.closest(rowSelector);
-        return !outerRow || !root.contains(outerRow) ||
-          elementPickerLevel(outerRow, { allowBareEffort: true }) !== level;
-      });
-      if (allRows.length) {
-        const grouped = new Map();
-        for (const row of allRows) {
-          const group = row.closest('[role="group"], [role="radiogroup"]') || root;
-          if (!grouped.has(group)) grouped.set(group, []);
-          grouped.get(group).push(row);
-        }
-        const groupedRows = [...grouped.values()].map((rows) => ({
-          rows,
-          distinct: new Set(rows.map(optionLevel).filter(Boolean)).size,
-          checked: rows.some((row) => row.matches('[aria-checked="true"], [aria-selected="true"], [data-state="checked"]')),
-        })).sort((left, right) => right.distinct - left.distinct || Number(right.checked) - Number(left.checked) || right.rows.length - left.rows.length);
-        if (groupedRows[0] && groupedRows[0].rows.length) return groupedRows[0].rows;
-      }
-      const fallback = findModelOptions(root, picker) || [];
-      if (fallback.length) return fallback;
-    }
-    return [];
-  }
-
-  function activePowerSlider(doc, picker = null) {
-    if (!doc) return null;
-    const candidates = [...doc.querySelectorAll(
-      '[data-testid="composer-model-picker-slider-simple-view"][data-active="true"] [aria-keyshortcuts~="ArrowLeft"][aria-keyshortcuts~="ArrowRight"]',
-    )].filter((candidate) => isProbablyVisible(candidate) && !candidate.closest('[inert], [aria-hidden="true"], [hidden]') &&
-      !candidate.closest('[data-state="closed"]') && !candidate.closest(`#${UI_ROOT_ID}`));
-    if (!picker) return candidates.length === 1 ? candidates[0] : null;
-    const controlledIds = new Set(normalizeText(picker.getAttribute('aria-controls')).split(/\s+/u).filter(Boolean));
-    const pickerId = normalizeText(picker.id);
-    const associated = candidates.filter((candidate) => {
-      const menu = candidate.closest('[data-radix-menu-content][role="menu"], [role="menu"], [role="listbox"]');
-      if (!menu) return false;
-      return controlledIds.has(normalizeText(menu.id)) || pickerId &&
-        normalizeText(menu.getAttribute('aria-labelledby')).split(/\s+/u).includes(pickerId);
-    });
-    return associated.length === 1 ? associated[0] : null;
-  }
-
-  function powerSliderLevel(control) {
-    if (!control || !control.ownerDocument) return '';
-    const descriptions = normalizeText(control.getAttribute('aria-describedby')).split(/\s+/u).filter(Boolean)
-      .map((id) => control.ownerDocument.getElementById(id))
-      .filter(Boolean)
-      .map((node) => normalizeText(node.textContent));
-    return extractModelLevel(descriptions.join(' ')) || elementPickerLevel(control, { allowBareEffort: true });
-  }
-
-  function findInstantOption(root, picker = null, excluded = new Set()) {
-    return findModelOptions(root, picker, excluded).find((candidate) => {
-      const level = optionLevel(candidate);
-      return level === 'instant' || level === 'auto';
-    }) || null;
   }
 
   function actionControlIsUsable(control) {
@@ -3448,24 +2158,15 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         <button class="cgs-button" type="button" data-cgs-action="open-handoff" aria-label="Continue in fresh chat" title="Continue in a fresh chat with a compact handoff">
           <span aria-hidden="true">↗</span><span class="cgs-dock-label">Continue in fresh chat</span>
         </button>
-        <span class="cgs-auto-badge" data-cgs-auto-badge data-enabled="true" title="Adaptive Auto is ready">Adaptive Auto</span>
         <button class="cgs-icon-button" type="button" data-cgs-action="toggle-settings" aria-label="Open Workflow Toolkit settings" title="Workflow Toolkit settings">⚙</button>
       </div>
 
       <div id="cgs-settings-backdrop" hidden>
         <section id="cgs-settings" role="dialog" aria-modal="true" aria-labelledby="cgs-settings-title">
           <div class="cgs-panel-head">
-            <div><h2 id="cgs-settings-title">ChatGPT Workflow Toolkit</h2><p>Adaptive model effort for every message, plus separate chats and handoffs</p></div>
+            <div><h2 id="cgs-settings-title">ChatGPT Workflow Toolkit</h2><p>Separate contextual chats, handoffs, and interface cleanup</p></div>
             <button class="cgs-icon-button" type="button" data-cgs-action="close-settings" aria-label="Close settings">×</button>
           </div>
-          <label class="cgs-setting">
-            <span><strong>Adaptive Auto for every message</strong><small>On Send—including after editing an earlier message—a fast local heuristic uses your message, attachment type/size/count, and only the conversation that will remain in that branch. It never reads attachment contents or sends anything elsewhere. Hold Alt while sending to bypass it once.</small></span>
-            <input type="checkbox" data-cgs-setting="adaptiveRouting" aria-label="Choose a model level for every message">
-          </label>
-          <label class="cgs-setting">
-            <span><strong>Maximum Auto level</strong><small>“Highest available” allows Extra High and Pro when the prompt has multiple hard-task signals. Prefix a prompt with <code>!route:high</code>, <code>!route:pro</code>, or <code>!route:max</code> for a one-message override; this safety cap still applies.</small></span>
-            <select data-cgs-setting="autoMaxLevel" aria-label="Maximum Adaptive Auto level"><option value="high">High</option><option value="extra-high">Extra High</option><option value="highest">Highest available</option></select>
-          </label>
           <label class="cgs-setting">
             <span><strong>Open side questions in</strong><small>A side window keeps the original instructions visible. Small screens use a tab. Fresh-chat continuation always switches this tab.</small></span>
             <select data-cgs-setting="openMode" aria-label="Open side questions in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
@@ -3478,7 +2179,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             <span><strong>Remove “Start writing”</strong><small>Clears that exact placeholder/control without touching message content.</small></span>
             <input type="checkbox" data-cgs-setting="hideStartWriting" aria-label="Remove Start writing">
           </label>
-          <div class="cgs-version">v${VERSION} · Adaptive choices are estimates, not an accuracy guarantee · <a class="cgs-help-link" href="https://help.openai.com/en/articles/20001354" target="_blank" rel="noopener noreferrer">model availability</a></div>
+          <div class="cgs-version">v${VERSION}</div>
         </section>
       </div>
 
@@ -3583,7 +2284,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       };
     const freshResponseTimeout = clampInteger(options.freshResponseTimeout, 5 * 60 * 1000, 500, 10 * 60 * 1000);
     const freshStabilityMs = clampInteger(options.freshStabilityMs, 650, 20, 5_000);
-    const routingDiscoveryTimeout = clampInteger(options.routingDiscoveryTimeout, 2_500, 50, 10_000);
     const branchNavigationTimeout = clampInteger(options.branchNavigationTimeout, 15_000, 250, 60_000);
     const branchComposerTimeout = clampInteger(options.branchComposerTimeout, 20_000, 250, 60_000);
     const branchActionTimeout = clampInteger(options.branchActionTimeout, 6_000, 100, 20_000);
@@ -3610,27 +2310,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       sideAutomationActive: false,
       incomingRunPromise: null,
       incomingRecoveryAction: false,
-      autoEnsurePromise: null,
-      adaptiveSendPromise: null,
-      activeAdaptiveSnapshot: null,
-      pendingAdaptiveSend: null,
       replayingSend: false,
       submitReplayPermit: null,
-      composingComposer: null,
-      pendingEditSession: null,
-      pendingEditMenuSource: null,
-      nextEditSessionId: 1,
-      lastRouteDecision: null,
-      adaptiveCancelled: false,
-      conversationMutationVersion: 0,
-      conversationMutationHistory: [],
-      conversationRoutingCache: null,
-      editConversationRoutingCache: new Map(),
-      conversationRoutingBuilds: 0,
-      routingComputedVisibility: new WeakMap(),
-      historicalAttachmentCache: new WeakMap(),
-      attachmentScopeIds: new WeakMap(),
-      nextAttachmentScopeId: 1,
       dockUpdateTimer: null,
       dockPositionFrame: null,
       dockResizeObserver: null,
@@ -3701,33 +2382,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         const key = input.dataset.cgsSetting;
         if (input.type === 'checkbox') input.checked = Boolean(state.settings[key]);
         else input.value = String(state.settings[key]);
-      }
-      const badge = element('[data-cgs-auto-badge]');
-      if (badge) {
-        const enabled = state.settings.adaptiveRouting;
-        badge.dataset.enabled = String(enabled);
-        if (!enabled) {
-          badge.textContent = 'Auto off';
-          badge.title = 'Adaptive Auto is disabled';
-        } else if (state.adaptiveSendPromise) {
-          badge.textContent = 'Auto choosing…';
-          badge.title = 'Choosing from the model levels available to this account';
-        } else if (state.lastRouteDecision && state.lastRouteDecision.level) {
-          const route = state.lastRouteDecision;
-          const prefix = route.manual ? 'Manual' : 'Auto';
-          const keptDifferentLevel = route.target && route.target !== 'max' &&
-            modelLevelRank(route.target) !== modelLevelRank(route.level) &&
-            /\b(?:unavailable|unconfirmed|used current|kept current|could not|no compatible)\b/iu.test(route.reason || '');
-          badge.textContent = route.level === 'guest-default'
-            ? 'Auto unavailable · ChatGPT default'
-            : keptDifferentLevel
-              ? `${prefix} wanted ${modelLevelLabel(route.target)} · used ${modelLevelLabel(route.level)}`
-              : `${prefix} → ${modelLevelLabel(route.level)}`;
-          badge.title = route.reason || 'Last per-message routing choice';
-        } else {
-          badge.textContent = 'Adaptive Auto';
-          badge.title = 'Each send is classified locally from the message, attachment metadata, and relevant conversation context; no extra request is used';
-        }
       }
     }
 
@@ -3915,621 +2569,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       state.dockPositionFrame = schedule(updateDockPosition);
     }
 
-    async function ensureInstant(options = {}) {
-      const userInitiated = options.userInitiated === true;
-      if (state.autoEnsurePromise) return state.autoEnsurePromise;
-
-      state.autoEnsurePromise = (async () => {
-        const composer = findComposer(doc);
-        const picker = findReasoningPicker(doc, composer) || findModelPicker(doc, composer);
-        if (!picker) {
-          if (userInitiated) toast('Could not find the model control. Your plan may already use ChatGPT’s default Auto routing.');
-          return { ok: false, reason: 'picker-not-found' };
-        }
-        const current = extractModelLevel(accessibleText(picker));
-        if (current === 'instant' || current === 'auto') {
-          syncSettingsUI();
-          if (userInitiated) toast('Instant is selected. In ChatGPT’s model picker → Configure, keep automatic switching enabled.');
-          return { ok: true, reason: current };
-        }
-
-        const preexistingOptions = new Set(
-          [...doc.querySelectorAll(MODEL_OPTION_SELECTOR)]
-            .filter((candidate) => isProbablyVisible(candidate) && lowerText(accessibleText(candidate)).startsWith('instant')),
-        );
-        picker.click();
-        const option = await waitForCondition(() => {
-          const controlledId = normalizeText(picker.getAttribute('aria-controls'));
-          const menu = controlledId ? doc.getElementById(controlledId) : null;
-          return findInstantOption(menu && menu.isConnected ? menu : doc, picker, preexistingOptions);
-        }, {
-          root: doc.documentElement,
-          win,
-          timeout: 3_000,
-        });
-        if (!option) {
-          if (userInitiated) toast('The Instant option was not available in this account’s model picker.');
-          return { ok: false, reason: 'instant-not-found' };
-        }
-        option.click();
-        win.setTimeout(syncSettingsUI, 100);
-        if (userInitiated) toast('Instant selected. ChatGPT can now auto-route harder prompts to Medium.');
-        return { ok: true, reason: 'selected' };
-      })();
-
-      try {
-        return await state.autoEnsurePromise;
-      } finally {
-        state.autoEnsurePromise = null;
-      }
-    }
-
-    function conversationPath() {
-      try { return new URL(String(win.location.href)).pathname; } catch (_error) { return ''; }
-    }
-
-    function activeConversationTurns(suppliedTurns = null, options = {}) {
-      const turns = Array.isArray(suppliedTurns) ? suppliedTurns : getTurns(doc);
-      const hiddenRoots = [...doc.querySelectorAll(
-        '[hidden], [aria-hidden="true"], [inert], [data-state="closed"], [style], ' +
-        '[class~="hidden"], [class~="invisible"], [class~="sr-only"], [class~="visually-hidden"]',
-      )].filter((root) => {
-        const explicitlyHidden = root.hidden || root.getAttribute('aria-hidden') === 'true' ||
-          root.hasAttribute('inert') || root.getAttribute('data-state') === 'closed' ||
-          inlineStyleHidesContent(root.getAttribute('style')) || classTokensHideContent(root.getAttribute('class'));
-        if (!explicitlyHidden) return false;
-        if (!root.matches(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`) &&
-          !root.querySelector(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`)) return false;
-        const containedTurns = getTurns(root);
-        return containedTurns.length > 0 && (root.matches(TURN_SELECTOR) || containedTurns.length < turns.length);
-      });
-      const anchorIndex = clampInteger(options.anchorIndex, turns.length, 0, turns.length);
-      const computedCandidates = new Set(turns.slice(Math.max(0, anchorIndex - 40), anchorIndex));
-      let recentUsers = 0;
-      let recentAssistants = 0;
-      for (let index = anchorIndex - 1; index >= 0 && (recentUsers < 12 || recentAssistants < 12); index -= 1) {
-        const turn = turns[index];
-        const role = roleOfTurn(turn);
-        if (role === 'user' && recentUsers < 12) {
-          computedCandidates.add(turn);
-          recentUsers += 1;
-        } else if (role === 'assistant' && recentAssistants < 12) {
-          computedCandidates.add(turn);
-          recentAssistants += 1;
-        }
-      }
-      const turnSet = new Set(turns);
-      const attachmentSelector = [
-        '[data-file-id]', '[data-attachment-id]', '[data-testid*="file-pill"]',
-        '[aria-label*="remove file" i]', '[aria-label*="remove attachment" i]',
-        '[data-testid*="attachment"]', 'a[download]', 'a[href^="sandbox:"]',
-      ].join(', ');
-      for (const node of doc.querySelectorAll(attachmentSelector)) {
-        const primary = node.closest(TURN_SELECTOR);
-        const roleNode = primary ? null : node.closest(ROLE_SELECTOR);
-        const turn = primary || roleNode && (roleNode.closest('article') || roleNode);
-        if (turnSet.has(turn)) computedCandidates.add(turn);
-      }
-      if (explicitlyReferencesOlderConversation(options.referenceText || '')) {
-        for (const turn of turns.slice(0, anchorIndex)) computedCandidates.add(turn);
-      }
-      const computedStyle = doc.defaultView && typeof doc.defaultView.getComputedStyle === 'function'
-        ? doc.defaultView.getComputedStyle.bind(doc.defaultView)
-        : null;
-      const computedHiddenCache = new Map();
-      const hasComputedHiddenAncestor = (turn) => {
-        if (!computedStyle || !computedCandidates.has(turn)) return false;
-        let current = turn;
-        for (let depth = 0; current && depth < 10; depth += 1, current = current.parentElement) {
-          if (computedHiddenCache.has(current)) {
-            if (computedHiddenCache.get(current)) return true;
-            continue;
-          }
-          if (!current.hasAttribute('style') && !classMayControlVisibility(current.getAttribute('class'))) {
-            computedHiddenCache.set(current, false);
-            continue;
-          }
-          let hidden = false;
-          try {
-            const style = computedStyle(current);
-            hidden = style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' ||
-              style.contentVisibility === 'hidden';
-          } catch (_error) {
-            hidden = false;
-          }
-          computedHiddenCache.set(current, hidden);
-          state.routingComputedVisibility.set(current, hidden);
-          if (hidden) return true;
-          if (current === doc.body || current === doc.documentElement) break;
-        }
-        return false;
-      };
-      return turns.filter((turn) => {
-        if (!turn || !turn.isConnected || turn.hidden || turn.getAttribute('aria-hidden') === 'true' ||
-          turn.hasAttribute('inert') || turn.getAttribute('data-state') === 'closed' ||
-          inlineStyleHidesContent(turn.getAttribute('style')) || classTokensHideContent(turn.getAttribute('class')) ||
-          hiddenRoots.some((root) => root.contains(turn))) return false;
-        if (hasComputedHiddenAncestor(turn)) return false;
-        return true;
-      });
-    }
-
-    function userTurnLocator(turn) {
-      if (!turn) return null;
-      const testId = normalizeText(turn.getAttribute('data-testid'));
-      const stableTestId = /^conversation-turn-[\w-]+$/u.test(testId) ? testId : '';
-      return {
-        testId: stableTestId,
-        turnIndex: stableTestId ? -1 : getTurns(doc).indexOf(turn),
-      };
-    }
-
-    function locateUserTurn(locator) {
-      if (!locator || typeof locator !== 'object') return null;
-      const testId = normalizeText(locator.testId);
-      if (/^conversation-turn-[\w-]+$/u.test(testId)) {
-        const exact = doc.querySelector(`[data-testid="${testId}"]`);
-        if (exact && roleOfTurn(exact) === 'user') return exact;
-      }
-      const index = clampInteger(locator.turnIndex, -1, -1, 100_000);
-      if (index < 0) return null;
-      const turns = getTurns(doc);
-      return index >= 0 && roleOfTurn(turns[index]) === 'user' ? turns[index] : null;
-    }
-
-    function activeEditSession() {
-      const session = state.pendingEditSession;
-      if (!session) return null;
-      const now = Date.now();
-      let expired = false;
-      if (!session.composerRef) {
-        expired = now - session.startedAt > 15_000;
-      } else if (session.composerRef.isConnected) {
-        session.disconnectedAt = 0;
-      } else {
-        if (!session.disconnectedAt) session.disconnectedAt = now;
-        expired = now - session.disconnectedAt > 5_000;
-      }
-      if (session.path !== conversationPath() || expired || !locateUserTurn(session.turnLocator)) {
-        state.pendingEditSession = null;
-        return null;
-      }
-      return session;
-    }
-
-    function clearEditSession(sessionId = 0) {
-      if (!state.pendingEditSession) return;
-      if (!sessionId || state.pendingEditSession.id === sessionId) state.pendingEditSession = null;
-    }
-
-    function editableUserMessageText(turn) {
-      if (!turn) return '';
-      const roleNode = turn.matches('[data-message-author-role="user"]')
-        ? turn
-        : turn.querySelector('[data-message-author-role="user"]') || turn;
-      const preferred = [...roleNode.querySelectorAll(
-        '[data-message-content], [data-testid="user-message"], [data-testid*="user-message-content"]',
-      )].filter((node) => !node.parentElement || !node.parentElement.closest(
-        '[data-message-content], [data-testid="user-message"], [data-testid*="user-message-content"]',
-      ));
-      const candidates = preferred.map(readableNodeText).filter(Boolean);
-      return (candidates.sort((left, right) => right.length - left.length)[0] || readableNodeText(turn))
-        .slice(0, QUESTION_MAX_LENGTH);
-    }
-
-    function editPortalControlLabel(control) {
-      return lowerText(`${accessibleText(control)} ${control && control.value || ''}`);
-    }
-
-    function isPortalCancelControl(control) {
-      return /^(?:cancel|discard(?: edit)?)$/iu.test(editPortalControlLabel(control));
-    }
-
-    function isPortalSendControl(control) {
-      if (!control) return false;
-      if (control.matches(SEND_BUTTON_SELECTORS.join(', '))) return true;
-      return /^(?:send(?:\s+(?:message|prompt))?|resend|submit|save\s*(?:&|and)\s*(?:send|submit))$/iu.test(
-        editPortalControlLabel(control),
-      );
-    }
-
-    function editPortalScope(composer) {
-      if (!composer) return null;
-      const form = composer.closest('form');
-      const dialog = composer.closest(
-        '[role="dialog"], [data-radix-dialog-content], [data-slot*="dialog"], [data-testid*="edit"], [data-state="open"][data-slot*="popover"]',
-      );
-      if (dialog) return dialog;
-      let ancestor = composer.parentElement;
-      for (let depth = 0; ancestor && depth < 5; depth += 1, ancestor = ancestor.parentElement) {
-        const controls = [...ancestor.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)];
-        if (controls.some(isPortalCancelControl) && controls.some(isPortalSendControl)) return ancestor;
-      }
-      return form;
-    }
-
-    function hasEditPortalEvidence(composer, session) {
-      if (!isEditableComposer(composer) || !session) return false;
-      const turn = locateUserTurn(session.turnLocator);
-      if (!turn) return false;
-      if (closestUserTurn(composer) === turn) return true;
-      const draft = getComposerText(composer);
-      const sourceMatches = Boolean(session.sourceDraft &&
-        composerTextSemanticallyEquals(composer, session.sourceDraft));
-      const scope = editPortalScope(composer);
-      if (!scope || scope.matches('main, body, html')) return false;
-      const form = composer.closest('form');
-      const controls = uniqueElements([
-        ...scope.querySelectorAll(SUBMISSION_CONTROL_SELECTOR),
-        ...(form ? [...doc.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)].filter((control) => control.form === form) : []),
-      ]).filter((control) => isProbablyVisible(control) && !control.closest(`#${UI_ROOT_ID}`));
-      const hasCancel = controls.some(isPortalCancelControl);
-      const hasExactSend = controls.some(isPortalSendControl);
-      const controlled = [...session.controlledIds].some((id) => {
-        const root = doc.getElementById(id);
-        return root && (root === scope || root.contains(composer));
-      });
-      const markerNodes = [];
-      for (let current = composer; current && markerNodes.length < 8; current = current.parentElement) markerNodes.push(current);
-      const markerText = markerNodes.flatMap((node) => [
-        node.getAttribute('data-testid'), node.getAttribute('data-slot'),
-      ]).filter(Boolean).join(' ');
-      const editMarked = controlled || /(?:message|prompt)[-_ ]?edit(?:or|ing|[-_ ]dialog)?|edit(?:or|ing)?[-_ ]?(?:message|prompt)/iu.test(markerText);
-      return hasCancel && hasExactSend && (sourceMatches || editMarked) &&
-        Boolean(draft || session.sourceDraft === '');
-    }
-
-    function sessionPortalControl(control, composer, expectedAction = 'send') {
-      const session = activeEditSession();
-      if (!control || !composer || !session || session.composerRef !== composer ||
-        !composer.isConnected || !hasEditPortalEvidence(composer, session)) return false;
-      const scope = editPortalScope(composer);
-      const form = composer.closest('form');
-      const associated = Boolean(scope && scope.contains(control) || form && control.form === form);
-      if (!associated || !isProbablyVisible(control) || control.closest(`#${UI_ROOT_ID}`)) return false;
-      if (expectedAction === 'cancel') return isPortalCancelControl(control);
-      return isPortalSendControl(control);
-    }
-
-    function editSurfaceBaselineState(composer) {
-      const scope = editPortalScope(composer);
-      const form = composer && composer.closest('form');
-      const controls = scope ? uniqueElements([
-        ...scope.querySelectorAll(SUBMISSION_CONTROL_SELECTOR),
-        ...(form ? [...doc.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)].filter((control) => control.form === form) : []),
-      ]) : [];
-      const markerNodes = [];
-      for (let current = composer; current && markerNodes.length < 8; current = current.parentElement) markerNodes.push(current);
-      const markerText = markerNodes.flatMap((node) => [
-        node.getAttribute('data-testid'), node.getAttribute('data-slot'),
-      ]).filter(Boolean).join(' ');
-      return {
-        draft: getComposerText(composer),
-        hasCancel: controls.some(isPortalCancelControl),
-        editMarked: /(?:message|prompt)[-_ ]?edit(?:or|ing|[-_ ]dialog)?|edit(?:or|ing)?[-_ ]?(?:message|prompt)/iu.test(markerText),
-      };
-    }
-
-    function baselineComposerBecameEditSurface(composer, session) {
-      const baseline = session && session.baselinePositions && session.baselinePositions.get(composer);
-      if (!baseline || !composer || !composer.isConnected) return false;
-      const current = editSurfaceBaselineState(composer);
-      return current.hasCancel && !baseline.editState.hasCancel ||
-        current.editMarked && !baseline.editState.editMarked ||
-        normalizeComposerPayload(baseline.editState.draft) !== normalizeComposerPayload(session.sourceDraft) &&
-          composerTextSemanticallyEquals(composer, session.sourceDraft);
-    }
-
-    function baselineComposerMovedIntoEditSurface(composer, session) {
-      const baseline = session && session.baselinePositions && session.baselinePositions.get(composer);
-      if (!baseline || !composer || !composer.isConnected) return false;
-      const currentForm = composer.closest('form');
-      const moved = composer.parentElement !== baseline.parent || currentForm !== baseline.form ||
-        currentForm && currentForm.parentElement !== baseline.formParent;
-      return Boolean(moved && hasEditPortalEvidence(composer, session));
-    }
-
-    function cancelBelongsToEditSurface(control, actionTurn = null) {
-      const session = activeEditSession();
-      const sessionTurn = session && locateUserTurn(session.turnLocator);
-      const activeSurface = state.activeAdaptiveSnapshot && state.activeAdaptiveSnapshot.surface;
-      const activeTurn = activeSurface && activeSurface.kind === 'edit' ? surfaceTurn(activeSurface) : null;
-      if (actionTurn) {
-        if (actionTurn === sessionTurn || actionTurn === activeTurn) return true;
-        const localComposer = findComposerInScope(actionTurn, control);
-        return Boolean(localComposer && isEditableComposer(localComposer));
-      }
-      if (!session || !session.composerRef || !session.composerRef.isConnected) return false;
-      const composerForm = session.composerRef.closest('form');
-      const controlForm = control.form || control.closest('form');
-      if (composerForm && composerForm === controlForm) return true;
-      const composerPortal = editPortalScope(session.composerRef);
-      return Boolean(composerPortal && composerPortal !== doc && composerPortal.contains(control));
-    }
-
-    function bindEditSession(session) {
-      if (!session || state.pendingEditSession !== session) return;
-      const turn = locateUserTurn(session.turnLocator);
-      if (!turn) {
-        clearEditSession(session.id);
-        return;
-      }
-      const candidates = [...doc.querySelectorAll(LOCAL_COMPOSER_SELECTOR)].filter(isEditableComposer);
-      const eligible = candidates.filter((composer) =>
-        closestUserTurn(composer) === turn ||
-        (!session.baselineComposers.has(composer) || baselineComposerMovedIntoEditSurface(composer, session) ||
-          baselineComposerBecameEditSurface(composer, session)) &&
-          hasEditPortalEvidence(composer, session));
-      if (eligible.length === 1) {
-        session.composerRef = eligible[0];
-        session.formRef = eligible[0].closest('form');
-      }
-    }
-
-    function startEditSession(turn, trigger = null) {
-      if (!turn) return null;
-      const baselineComposers = [...doc.querySelectorAll(LOCAL_COMPOSER_SELECTOR)].filter(isEditableComposer);
-      const session = {
-        id: state.nextEditSessionId,
-        path: conversationPath(),
-        startedAt: Date.now(),
-        turnLocator: userTurnLocator(turn),
-        sourceDraft: editableUserMessageText(turn),
-        controlledIds: new Set(normalizeText(
-          `${trigger && trigger.getAttribute('aria-controls') || ''} ${trigger && trigger.getAttribute('aria-owns') || ''}`,
-        ).split(/\s+/u).filter(Boolean)),
-        baselineComposers: new Set(baselineComposers),
-        baselinePositions: new Map(baselineComposers.map((composer) => {
-          const form = composer.closest('form');
-          return [composer, {
-            parent: composer.parentElement,
-            form,
-            formParent: form && form.parentElement,
-            editState: editSurfaceBaselineState(composer),
-          }];
-        })),
-        composerRef: null,
-        formRef: null,
-        disconnectedAt: 0,
-      };
-      state.nextEditSessionId += 1;
-      state.pendingEditSession = session;
-      win.setTimeout(() => bindEditSession(session), 0);
-      win.setTimeout(() => bindEditSession(session), 100);
-      win.setTimeout(() => bindEditSession(session), 500);
-      return session;
-    }
-
-    function rememberEditMenuSource(turn, trigger) {
-      if (!turn || !trigger) return;
-      const menuSelector = '[role="menu"], [role="listbox"], [data-radix-menu-content], [data-slot*="dropdown-menu"], [data-state][data-slot*="popover"]';
-      state.pendingEditMenuSource = {
-        path: conversationPath(),
-        startedAt: Date.now(),
-        turnLocator: userTurnLocator(turn),
-        triggerRef: trigger,
-        controlledIds: normalizeText(
-          `${trigger.getAttribute('aria-controls') || ''} ${trigger.getAttribute('aria-owns') || ''}`,
-        ).split(/\s+/u).filter(Boolean),
-        menuStates: new Map([...doc.querySelectorAll(menuSelector)].map((menu) => [menu, {
-          hidden: menu.hidden === true,
-          ariaHidden: normalizeText(menu.getAttribute('aria-hidden')),
-          state: normalizeText(menu.getAttribute('data-state')),
-        }])),
-      };
-    }
-
-    function editMenuSourceTurn(control) {
-      const pending = state.pendingEditMenuSource;
-      if (!pending || pending.path !== conversationPath() || Date.now() - pending.startedAt > 10_000) {
-        state.pendingEditMenuSource = null;
-        return null;
-      }
-      const menu = control && control.closest(
-        '[role="menu"], [role="listbox"], [data-radix-menu-content], [data-slot*="dropdown-menu"], [data-state="open"][data-slot*="popover"]',
-      );
-      if (!menu) return null;
-      const controlled = pending.controlledIds.some((id) => {
-        const root = doc.getElementById(id);
-        return root && root.contains(control);
-      }) || normalizeText(
-        `${pending.triggerRef && pending.triggerRef.getAttribute('aria-controls') || ''} ${pending.triggerRef && pending.triggerRef.getAttribute('aria-owns') || ''}`,
-      ).split(/\s+/u).filter(Boolean).some((id) => {
-        const root = doc.getElementById(id);
-        return root && root.contains(control);
-      });
-      const triggerId = normalizeText(pending.triggerRef && pending.triggerRef.id);
-      const labelledByTrigger = triggerId && normalizeText(menu.getAttribute('aria-labelledby'))
-        .split(/\s+/u).includes(triggerId);
-      const previousMenuState = pending.menuStates.get(menu);
-      const newlyOpenedMenu = Date.now() - pending.startedAt <= 3_000 && pending.triggerRef && pending.triggerRef.isConnected && (
-        !previousMenuState || previousMenuState.hidden && !menu.hidden ||
-        previousMenuState.ariaHidden === 'true' && normalizeText(menu.getAttribute('aria-hidden')) !== 'true' ||
-        previousMenuState.state === 'closed' && normalizeText(menu.getAttribute('data-state')) === 'open'
-      );
-      if (!controlled && !labelledByTrigger && !newlyOpenedMenu) return null;
-      return locateUserTurn(pending.turnLocator);
-    }
-
-    function retainedTurnsBefore(editTurn, referenceText = '') {
-      if (!editTurn) return activeConversationTurns();
-      const turns = getTurns(doc);
-      const index = turns.indexOf(editTurn);
-      if (index < 0) return [];
-      const active = new Set(activeConversationTurns(turns, { anchorIndex: index, referenceText }));
-      return turns.slice(0, index).filter((turn) => active.has(turn));
-    }
-
-    function retainedPrefixChangedSince(snapshot, editTurn) {
-      if (!snapshot || snapshot.conversationVersion === state.conversationMutationVersion) return false;
-      const history = state.conversationMutationHistory.filter((entry) =>
-        entry.version > snapshot.conversationVersion);
-      if (!history.length || history[0].version > snapshot.conversationVersion + 1) return true;
-      const retainedAtCapture = Array.isArray(snapshot.retainedPrefixTurns)
-        ? snapshot.retainedPrefixTurns
-        : retainedTurnsBefore(editTurn, snapshot.draft || '');
-      const prefixTurns = new Set(retainedAtCapture);
-      if (history.some((entry) => entry.structural === true)) {
-        const current = retainedTurnsBefore(editTurn, snapshot.draft || '');
-        if (current.length !== retainedAtCapture.length ||
-          current.some((turn, index) => turn !== retainedAtCapture[index])) return true;
-      }
-      return history.some((entry) => entry.turns.some((turn) => prefixTurns.has(turn)));
-    }
-
-    function submissionSurface(composer, options = {}) {
-      if (!isEditableComposer(composer)) return null;
-      const directTurn = closestUserTurn(composer);
-      const suppliedTurn = options.editTurn && roleOfTurn(options.editTurn) === 'user'
-        ? options.editTurn
-        : locateUserTurn(options.turnLocator);
-      const editTurn = directTurn || suppliedTurn;
-      const kind = editTurn ? 'edit' : 'primary';
-      const locator = editTurn ? userTurnLocator(editTurn) : null;
-      const key = editTurn
-        ? `edit:${locator && (locator.testId || locator.turnIndex)}`
-        : 'primary';
-      return {
-        kind,
-        key,
-        sessionId: kind === 'edit' ? clampInteger(options.sessionId, 0, 0, Number.MAX_SAFE_INTEGER) : 0,
-        composerRef: composer,
-        formRef: composer.closest('form'),
-        submitterRef: options.submitter || null,
-        turnLocator: locator,
-      };
-    }
-
-    function surfaceTurn(surface) {
-      return surface && surface.kind === 'edit' ? locateUserTurn(surface.turnLocator) : null;
-    }
-
-    function composerMatchesSurface(composer, surface) {
-      if (!composer || !surface) return false;
-      if (surface.kind === 'primary') return !closestUserTurn(composer);
-      const expectedTurn = surfaceTurn(surface);
-      const session = surface.sessionId && activeEditSession();
-      const sessionMatch = session && session.id === surface.sessionId && (
-        session.composerRef === composer ||
-        session.formRef && composer.closest('form') === session.formRef
-      );
-      return Boolean(expectedTurn && closestUserTurn(composer) === expectedTurn ||
-        expectedTurn && surface.formRef && surface.formRef.isConnected && composer.closest('form') === surface.formRef ||
-        expectedTurn && sessionMatch);
-    }
-
-    function resolveSurfaceComposer(surface, expectedDraft = null, allowAnyText = false) {
-      if (!surface) return null;
-      const original = surface.composerRef;
-      if (original && original.isConnected && isEditableComposer(original) && composerMatchesSurface(original, surface) &&
-        (allowAnyText || expectedDraft == null || composerTextEquals(original, expectedDraft))) return original;
-      if (surface.kind === 'primary') {
-        const primary = findComposer(doc);
-        if (!primary || closestUserTurn(primary)) return null;
-        return allowAnyText || expectedDraft == null || composerTextEquals(primary, expectedDraft) ? primary : null;
-      }
-      const turn = surfaceTurn(surface);
-      if (!turn) return null;
-      const candidates = [];
-      if (surface.formRef && surface.formRef.isConnected) {
-        const formComposer = findComposerInScope(surface.formRef);
-        if (formComposer) candidates.push(formComposer);
-      }
-      candidates.push(...turn.querySelectorAll(LOCAL_COMPOSER_SELECTOR));
-      const session = surface.sessionId && activeEditSession();
-      if (session && session.id === surface.sessionId && session.composerRef && session.composerRef.isConnected) {
-        candidates.push(session.composerRef);
-      }
-      const visible = uniqueElements(candidates).filter((candidate) =>
-        isEditableComposer(candidate) && composerMatchesSurface(candidate, surface));
-      if (expectedDraft != null) {
-        const matching = visible.filter((candidate) => composerTextEquals(candidate, expectedDraft));
-        if (matching.length === 1) return matching[0];
-      }
-      if (allowAnyText && visible.length === 1) return visible[0];
-      if (session && session.id === surface.sessionId && session.composerRef && !session.composerRef.isConnected) {
-        const remounted = [...doc.querySelectorAll(LOCAL_COMPOSER_SELECTOR)].filter((candidate) =>
-          isEditableComposer(candidate) && !session.baselineComposers.has(candidate) &&
-          hasEditPortalEvidence(candidate, session) &&
-          (expectedDraft == null || composerTextEquals(candidate, expectedDraft)));
-        if (remounted.length === 1) {
-          session.composerRef = remounted[0];
-          session.formRef = remounted[0].closest('form');
-          return remounted[0];
-        }
-      }
-      return null;
-    }
-
-    function interactionSurface(target, options = {}) {
-      const node = target && (target.nodeType === 1 ? target : target.parentElement);
-      if (!node) return null;
-      const session = activeEditSession();
-      const form = options.form || node.form || node.closest && node.closest('form');
-      let composer = node.matches && node.matches(LOCAL_COMPOSER_SELECTOR) && isEditableComposer(node)
-        ? node
-        : node.closest && node.closest(LOCAL_COMPOSER_SELECTOR);
-      if (!isEditableComposer(composer)) composer = form && findComposerInScope(form, node);
-      const directTurn = closestUserTurn(node);
-      if (!composer && directTurn) composer = findComposerInScope(directTurn, node);
-      if (!composer && session && session.composerRef &&
-        sessionPortalControl(node, session.composerRef, 'send')) composer = session.composerRef;
-      if (!composer) return null;
-      const primary = findComposer(doc);
-      const composerTurn = directTurn || closestUserTurn(composer);
-      const sessionTurn = session && locateUserTurn(session.turnLocator);
-      let editTurn = composerTurn;
-      if (!editTurn && session && sessionTurn) {
-        const composerForm = composer.closest('form');
-        const bound = session.composerRef === composer ||
-          session.formRef && composerForm && session.formRef === composerForm;
-        const eligibleComposer = !session.baselineComposers.has(composer) ||
-          baselineComposerMovedIntoEditSurface(composer, session) ||
-          baselineComposerBecameEditSurface(composer, session);
-        const newlyMounted = (!session.composerRef || !session.composerRef.isConnected) &&
-          Date.now() - session.startedAt <= 15_000 &&
-          eligibleComposer && hasEditPortalEvidence(composer, session);
-        if (bound || newlyMounted) {
-          editTurn = sessionTurn;
-          session.composerRef = composer;
-          session.formRef = composerForm;
-        }
-      }
-      if (!editTurn && (composer !== primary || !findSendButton(doc, composer))) return null;
-      return submissionSurface(composer, {
-        editTurn,
-        sessionId: editTurn && sessionTurn === editTurn ? session.id : 0,
-        submitter: options.submitter || null,
-      });
-    }
-
-    function sendControlForSurface(surface, composer) {
-      const saved = surface && surface.submitterRef;
-      if (saved && saved.isConnected && isProbablyVisible(saved)) {
-        if (surface.kind === 'edit' && (isEditSubmissionControl(saved, composer, surfaceTurn(surface)) ||
-          sessionPortalControl(saved, composer, 'send'))) return saved;
-        if (surface.kind === 'primary' && saved === findSendButton(doc, composer)) return saved;
-      }
-      if (surface && surface.kind === 'edit') {
-        const editTurn = surfaceTurn(surface);
-        const form = composer.closest('form');
-        const local = [...doc.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)].find((control) => {
-          const associatedForm = control.form || control.closest('form');
-          return (form && associatedForm === form || editTurn && editTurn.contains(control)) &&
-            isEditSubmissionControl(control, composer, editTurn);
-        });
-        if (local) return local;
-        const portal = [...doc.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)].find((control) =>
-          sessionPortalControl(control, composer, 'send'));
-        if (portal) return portal;
-      }
-      return findSendButton(doc, composer);
-    }
-
-    function attachmentStateFromScope(scope, options = {}) {
-      if (!scope || typeof scope.querySelectorAll !== 'function') {
-        return { count: 0, signature: '', profile: buildAttachmentProfile() };
-      }
+    function attachmentState(composer) {
+      const scope = composerScope(composer);
+      if (!scope || typeof scope.querySelectorAll !== 'function') return { count: 0 };
       const selectors = [
         '[data-file-id]',
         '[data-attachment-id]',
@@ -4540,1562 +2582,98 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         'a[download]',
         'a[href^="sandbox:"]',
       ];
-      const rawNodes = uniqueElements(selectors.flatMap((selector) => [...scope.querySelectorAll(selector)]))
-        .filter((node) => (options.includeHidden === true || isProbablyVisible(node)) && !node.closest(`#${UI_ROOT_ID}`))
+      const nodes = uniqueElements(selectors.flatMap((selector) => [...scope.querySelectorAll(selector)]))
+        .filter((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`))
         .filter((node) => {
           const testId = lowerText(node.getAttribute('data-testid'));
-          const ariaLabel = lowerText(node.getAttribute('aria-label'));
-          const title = lowerText(node.getAttribute('title'));
-          if (/\b(?:attachment|file)[-_ ]?(?:add|button|picker|upload)\b|\b(?:add|upload)[-_ ]?(?:attachment|file)\b/iu.test(testId) ||
-            /^(?:add|attach|upload)(?:\s+(?:a|the))?\s+(?:file|files|attachment|attachments)?\b/iu.test(`${ariaLabel} ${title}`.trim())) return false;
-          const ownLabel = normalizeText([
-            ariaLabel,
-            title,
-            node.getAttribute('data-file-name'),
-            node.getAttribute('data-filename'),
-            node.getAttribute('data-name'),
-            [...node.childNodes].filter((child) => child.nodeType === 3).map((child) => child.textContent).join(' '),
-          ].filter(Boolean).join('|'));
-          const label = normalizeText([
-            testId,
-            ownLabel,
-            node.textContent,
-          ].filter(Boolean).join('|'));
-          const stable = node.hasAttribute('data-file-id') || node.hasAttribute('data-attachment-id') ||
-            /file-pill/iu.test(node.getAttribute('data-testid') || '') ||
-            /remove (?:file|attachment)/iu.test(node.getAttribute('aria-label') || '');
-          const genericAttachment = /attachment/iu.test(node.getAttribute('data-testid') || '');
-          if (genericAttachment && !stable && !attachmentNameFromLabel(ownLabel)) {
-            if (node.querySelector('[data-file-id], [data-attachment-id], [data-testid*="file-pill"]')) return false;
-            const fileCardWithPreview = /(?:attachment|file)[-_ ]?(?:card|item|pill)\b/iu.test(testId) &&
-              node.querySelector('img, figure');
-            if (!fileCardWithPreview) return false;
-          }
-          return true;
+          const label = lowerText(`${node.getAttribute('aria-label') || ''} ${node.getAttribute('title') || ''}`);
+          return !/\b(?:attachment|file)[-_ ]?(?:add|button|picker|upload)\b|\b(?:add|upload)[-_ ]?(?:attachment|file)\b/iu.test(testId) &&
+            !/^(?:add|attach|upload)(?:\s+(?:a|the))?\s+(?:file|files|attachment|attachments)?\b/iu.test(label);
         });
-      const stableAnchorSelector = '[data-file-id], [data-attachment-id], [data-testid*="file-pill"]';
-      const genericAnchorSelector = '[data-testid*="attachment"]';
-      const removeSelector = '[aria-label*="remove file" i], [aria-label*="remove attachment" i]';
-      const genericAnchor = (node) => {
-        const ancestors = [];
-        let candidate = node.closest(genericAnchorSelector);
-        while (candidate && (candidate === scope || scope.contains(candidate))) {
-          ancestors.push(candidate);
-          const parent = candidate.parentElement;
-          candidate = parent && parent.closest(genericAnchorSelector);
-        }
-        const removalOwner = ancestors.find((ancestor) => ancestor.querySelector(removeSelector));
-        if (removalOwner) return removalOwner;
-        const scored = ancestors.map((ancestor, index) => {
-          const testId = lowerText(ancestor.getAttribute('data-testid'));
-          let score = /(?:attachment|file)[-_ ]?(?:card|item|pill)\b/iu.test(testId) ? 40 : 0;
-          if (/\b(?:preview|thumbnail|thumb|icon|button|list|tray|menu)\b/iu.test(testId)) score -= 30;
-          return { ancestor, index, score };
-        }).sort((left, right) => right.score - left.score || right.index - left.index);
-        return scored[0] && scored[0].ancestor || node;
-      };
-      const anchors = uniqueElements(rawNodes.map((node) =>
-        node.closest(stableAnchorSelector) || genericAnchor(node) || node));
-      const nodeRecords = [];
-      const seenKeys = new Set();
-      const idlessNames = new Set();
-      const stableNames = new Set();
-      for (const [index, node] of anchors.entries()) {
-        const label = normalizeText([
-          node.getAttribute('data-file-id'),
-          node.getAttribute('data-attachment-id'),
-          node.getAttribute('data-file-name'),
-          node.getAttribute('data-filename'),
-          node.getAttribute('data-name'),
-          node.getAttribute('data-testid'),
-          node.getAttribute('aria-label'),
-          node.getAttribute('title'),
-          node.getAttribute('download'),
-          node.getAttribute('href'),
-          node.querySelector('img[alt]') && node.querySelector('img[alt]').getAttribute('alt'),
-          node.textContent,
-        ].filter(Boolean).join('|')).slice(0, 240);
+      const stableKeys = new Set();
+      for (const [index, node] of nodes.entries()) {
+        const owner = node.closest('[data-file-id], [data-attachment-id], [data-testid*="file-pill"], [data-testid*="attachment"]') || node;
+        const id = normalizeText(owner.getAttribute('data-file-id') || owner.getAttribute('data-attachment-id'));
         const name = normalizeText(
-          node.getAttribute('data-file-name') || node.getAttribute('data-filename') ||
-          node.getAttribute('data-name') || node.getAttribute('download') || attachmentNameFromLabel(label),
-        ).slice(0, 220);
-        const id = normalizeText(node.getAttribute('data-file-id') || node.getAttribute('data-attachment-id'));
-        const normalizedName = lowerText(name);
-        const key = id ? `id:${id}` : name ? `name:${lowerText(name)}` : `node:${index}`;
-        if (seenKeys.has(key) || !id && normalizedName && (idlessNames.has(normalizedName) || stableNames.has(normalizedName))) continue;
-        seenKeys.add(key);
-        if (normalizedName) {
-          if (id) stableNames.add(normalizedName);
-          else idlessNames.add(normalizedName);
-        }
-        nodeRecords.push({
-          key,
-          name,
-          label,
-          mime: node.getAttribute('data-mime-type') || node.getAttribute('data-file-type') || '',
-          size: node.getAttribute('data-file-size') || node.getAttribute('data-size') || attachmentByteSizeFromText(label),
-        });
-      }
-
-      const fileRecords = [];
-      for (const input of scope.querySelectorAll('input[type="file"]')) {
-        const liveInput = Boolean(normalizeText(input.value)) ||
-          /\b(?:uploading|pending|processing)\b/iu.test(`${input.getAttribute('data-state') || ''} ${input.getAttribute('aria-label') || ''}`) ||
-          input.getAttribute('aria-busy') === 'true';
-        if (!liveInput) continue;
-        let files = [];
-        try { files = [...(input.files || [])]; } catch (_error) { files = []; }
-        for (const file of files.slice(0, 100)) {
-          fileRecords.push({ name: file.name, mime: file.type, size: file.size, label: file.name });
-        }
-      }
-      const combined = [...nodeRecords];
-      const knownNames = new Set(nodeRecords.map((item) => lowerText(item.name)).filter(Boolean));
-      for (const file of fileRecords) {
-        if (nodeRecords.length && file.name && knownNames.has(lowerText(file.name))) {
-          const existing = combined.find((item) => lowerText(item.name) === lowerText(file.name));
-          if (existing) {
-            existing.mime = existing.mime || file.mime;
-            existing.size = Number(existing.size) || file.size;
-          }
-        } else if (!nodeRecords.length) {
-          combined.push(file);
-        }
-      }
-      const profile = buildAttachmentProfile(combined, nodeRecords.length || fileRecords.length);
-      const signature = profile.items.map((item) => [item.key, item.name, item.mime, item.size, item.kind].join('|'))
-        .sort().join('\n');
-      return { count: profile.count, signature, profile };
-    }
-
-    function attachmentState(composer, surface = null) {
-      const localScope = surface && surface.kind === 'edit'
-        ? editPortalScope(composer) || composerScope(composer)
-        : composerScope(composer);
-      const local = attachmentStateFromScope(localScope);
-      const editTurn = surface && surface.kind === 'edit'
-        ? surfaceTurn(surface)
-        : closestUserTurn(composer);
-      if (!editTurn || localScope === editTurn) return local;
-      const retained = attachmentStateFromScope(editTurn, { includeHidden: true });
-      const profile = mergeAttachmentProfiles(local.profile, retained.profile);
-      const signature = profile.items.map((item) => [item.key, item.name, item.mime, item.size, item.kind].join('|'))
-        .sort().join('\n');
-      return { count: profile.count, signature, profile };
-    }
-
-    function historicalAttachmentState(turn, shouldScan = true) {
-      if (!turn) return buildAttachmentProfile();
-      if (state.historicalAttachmentCache.has(turn)) return state.historicalAttachmentCache.get(turn);
-      let profile = shouldScan
-        ? attachmentStateFromScope(turn, { includeHidden: true }).profile
-        : buildAttachmentProfile();
-      if (profile.items.length) {
-        let scopeId = state.attachmentScopeIds.get(turn);
-        if (!scopeId) {
-          scopeId = state.nextAttachmentScopeId;
-          state.nextAttachmentScopeId += 1;
-          state.attachmentScopeIds.set(turn, scopeId);
-        }
-        profile = buildAttachmentProfile(profile.items.map((item, index) => ({
-          ...item,
-          key: item.key && item.key.startsWith('id:')
-            ? item.key
-            : `turn:${scopeId}:${item.key || index}`,
-        })), profile.count);
-      }
-      state.historicalAttachmentCache.set(turn, profile);
-      return profile;
-    }
-
-    function attachmentProfileFromText(value) {
-      const text = String(value == null ? '' : value).slice(0, 20_000);
-      const filenameAtEnd = /([^/\\|\n]{1,180}\.(?:pdf|docx?|pptx?|xlsx?|xlsm|numbers|csv|tsv|jsonl?|parquet|sql|db|sqlite|ipynb|zip|7z|rar|tar|gz|png|jpe?g|webp|gif|txt|md|py|js|jsx|ts|tsx|java|rs|go))\s*["'’”`)]*[.!?]?\s*$/iu;
-      const cleanCandidate = (raw) => {
-        const source = String(raw == null ? '' : raw)
-          .trim()
-          .replace(/^(?:is|as|named|called)\s+/iu, '')
-          .replace(/^["'‘“`(]+/u, '');
-        const match = source.match(filenameAtEnd);
-        return match ? match[1].trim().slice(0, 220) : '';
-      };
-      const evidencePatterns = [
-        /\b(?:attached|uploaded|provided)\b(?:\s+(?:the\s+)?(?:file|attachment|document|spreadsheet|image|dataset))?\s*(?:is|as|named|called|:|-)?\s*(.+)$/iu,
-        /\b(?:from|inside|in)\s+(?:the\s+|this\s+|that\s+)?(?:file\s+|document\s+|spreadsheet\s+|dataset\s+)?(.+)$/iu,
-        /^(?:please\s+)?(?:remove|delete|open|preview|download|read|review|analy[sz]e|inspect|check|compare|use)\s+(?:the\s+|this\s+|that\s+)?(?:file\s+|attachment\s+|document\s+|spreadsheet\s+|image\s+|dataset\s+)?(.+)$/iu,
-      ];
-      const sentenceLead = /^(?:create|make|write|generate|rename|call|explain|summari[sz]e|translate|what|why|how|when|where|who|i|we|you|they|he|she|it)\b/iu;
-      const names = [];
-      for (const rawLine of text.split(/\r?\n/u)) {
-        const line = rawLine.trim();
-        if (!line || !filenameAtEnd.test(line)) continue;
-        let name = '';
-        for (const pattern of evidencePatterns) {
-          const match = line.match(pattern);
-          if (!match) continue;
-          name = cleanCandidate(match[1]);
-          if (name) break;
-        }
-        if (!name && !sentenceLead.test(line)) name = cleanCandidate(line);
-        if (name) names.push(name);
-      }
-      const uniqueNames = [...new Map(names.map((name) => [lowerText(name), name])).values()].slice(0, 50);
-      return buildAttachmentProfile(uniqueNames.map((name) => ({ name, label: name })), uniqueNames.length);
-    }
-
-    function mergeAttachmentProfiles(...profiles) {
-      return combineAttachmentProfiles(...profiles);
-    }
-
-    function assistantTextContextLevel(value) {
-      const text = boundedHeadTailSample(value, 12_000);
-      if (!text) return '';
-      const codeLines = text.split(/\r?\n/u).filter((line) => /^\s{4,}|[{}();]|=>|\b(?:const|let|def|class|function|import|SELECT)\b/u.test(line)).length;
-      if (codeLines >= 25 || /\b(?:formal proof|threat model|race condition|stack trace|diagnosis|contract clause|security vulnerability|derive(?:d|s)? the equation)\b/iu.test(text)) return 'high';
-      if (text.length >= 3_000 || codeLines >= 8 || /\b(?:equation|algorithm|architecture|calculation|proof|source code|lab results?)\b/iu.test(text)) return 'medium';
-      return '';
-    }
-
-    function assistantContextLevel(allTurns = getTurns(doc), options = {}) {
-      const assistants = allTurns.filter((turn) => roleOfTurn(turn) === 'assistant');
-      const stopButton = options.ignoreActiveGeneration === true ? null : [...doc.querySelectorAll(
-        'button[data-testid="stop-button"], button[data-testid*="stop-generating"], button[aria-label^="Stop generating" i], button[aria-label^="Stop streaming" i]',
-      )].find(isProbablyVisible);
-      const assistantAcknowledgment = /^(?:you(?:['’]re|\s+are)\s+welcome|no\s+problem|happy\s+to\s+help|glad\s+(?:that\s+)?helped|sure|okay|ok|of\s+course|anytime)[.!,\s]*$/iu;
-      const userAcknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
-      let latestCompletedText = '';
-      const textOptions = options.textOptions || {};
-      for (let index = assistants.length - 1; index >= 0; index -= 1) {
-        const turn = assistants[index];
-        const explicitlyStreaming = turn.matches('[data-is-streaming="true"], [data-streaming="true"], .result-streaming') ||
-          turn.querySelector('[data-is-streaming="true"], [data-streaming="true"], .result-streaming');
-        if (explicitlyStreaming || stopButton && index === assistants.length - 1) continue;
-        const text = extractAssistantHandoff(turn, {
-          ...textOptions,
-          headTailSampleLength: 12_000,
-        });
-        if (!latestCompletedText) latestCompletedText = text;
-        if (!assistantAcknowledgment.test(normalizeText(text))) return assistantTextContextLevel(text);
-        const allTurnIndex = allTurns.indexOf(turn);
-        let precedingUser = null;
-        for (let candidateIndex = allTurnIndex - 1; candidateIndex >= 0; candidateIndex -= 1) {
-          if (roleOfTurn(allTurns[candidateIndex]) === 'user') {
-            precedingUser = allTurns[candidateIndex];
-            break;
-          }
-        }
-        if (precedingUser && !userAcknowledgment.test(normalizeText(readableNodeText(precedingUser, textOptions)))) return '';
-      }
-      return assistantTextContextLevel(latestCompletedText);
-    }
-
-    function latestCompletedAssistantText(allTurns = getTurns(doc), options = {}) {
-      const assistants = allTurns.filter((turn) => roleOfTurn(turn) === 'assistant');
-      const stopButton = options.ignoreActiveGeneration === true ? null : [...doc.querySelectorAll(
-        'button[data-testid="stop-button"], button[data-testid*="stop-generating"], button[aria-label^="Stop generating" i], button[aria-label^="Stop streaming" i]',
-      )].find(isProbablyVisible);
-      const textOptions = options.textOptions || {};
-      for (let index = assistants.length - 1; index >= 0; index -= 1) {
-        const turn = assistants[index];
-        const explicitlyStreaming = turn.matches('[data-is-streaming="true"], [data-streaming="true"], .result-streaming') ||
-          turn.querySelector('[data-is-streaming="true"], [data-streaming="true"], .result-streaming');
-        if (explicitlyStreaming || stopButton && index === assistants.length - 1) continue;
-        return extractAssistantHandoff(turn, {
-          ...textOptions,
-          headTailSampleLength: 4_000,
-        });
-      }
-      return '';
-    }
-
-    function transferredConversationRoutingState(value, referenceText = '') {
-      const raw = String(value == null ? '' : value);
-      const match = raw.match(/--- PREVIOUS CONVERSATION ---\s*\n([\s\S]*?)\n--- END PREVIOUS CONVERSATION ---/u);
-      if (!match) return null;
-      const transcript = match[1].slice(0, SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH);
-      const blocks = [...transcript.matchAll(/(?:^|\n\n)(USER|ASSISTANT):\s*\n([\s\S]*?)(?=\n\n(?:USER|ASSISTANT):\s*\n|$)/gu)]
-        .map((entry, index) => ({ role: lowerText(entry[1]), text: entry[2].trim(), index }));
-      const allUsers = blocks.filter((block) => block.role === 'user');
-      if (!allUsers.length) return null;
-      const archivedMaterials = mergeAttachmentProfiles(
-        ...blocks.map((block) => attachmentProfileFromText(block.text)),
-      );
-      let archivedConversationLevel = '';
-      if (explicitlyReferencesOlderConversation(referenceText)) {
-        for (const block of allUsers) {
-          const attachments = attachmentProfileFromText(block.text);
-          const decision = classifyPrompt(boundedHeadTailSample(block.text, 16_000), { attachmentProfile: attachments });
-          const target = decision.target === 'max' ? 'pro' : extractModelLevel(decision.target);
-          archivedConversationLevel = strongerRouteLevel(archivedConversationLevel, target);
-        }
-      }
-      let level = '';
-      let materials = buildAttachmentProfile();
-      let hasMeaningfulTurn = false;
-      const acknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
-      const users = allUsers.filter((block) =>
-        !acknowledgment.test(normalizeText(block.text)) || attachmentProfileFromText(block.text).count > 0)
-        .slice(-6);
-      const archivedMeaningfulTurnCount = allUsers.filter((block) =>
-        !acknowledgment.test(normalizeText(block.text)) || attachmentProfileFromText(block.text).count > 0).length;
-      for (let userIndex = 0; userIndex < users.length; userIndex += 1) {
-        const block = users[userIndex];
-        const attachments = attachmentProfileFromText(block.text);
-        const decision = classifyPrompt(boundedHeadTailSample(block.text, 16_000), {
-          previousLevel: level,
-          attachmentProfile: attachments,
-          hasPriorConversation: hasMeaningfulTurn,
-          historicalAttachmentProfile: materials,
-        });
-        if (acknowledgment.test(normalizeText(block.text))) {
-          materials = mergeAttachmentProfiles(materials, attachments);
-          continue;
-        }
-        materials = decision.inherited ? mergeAttachmentProfiles(materials, attachments) : attachments;
-        const target = decision.target === 'max' ? 'pro' : extractModelLevel(decision.target);
-        if (target) level = target;
-        hasMeaningfulTurn = true;
-        const nextUserIndex = users[userIndex + 1] ? users[userIndex + 1].index : blocks.length;
-        const generatedMaterials = mergeAttachmentProfiles(...blocks
-          .filter((candidate) => candidate.role === 'assistant' && candidate.index > block.index && candidate.index < nextUserIndex)
-          .map((candidate) => attachmentProfileFromText(candidate.text)));
-        materials = mergeAttachmentProfiles(materials, generatedMaterials);
-      }
-      const assistantAcknowledgment = /^(?:you(?:['’]re|\s+are)\s+welcome|no\s+problem|happy\s+to\s+help|glad\s+(?:that\s+)?helped|sure|okay|ok|of\s+course|anytime)[.!,\s]*$/iu;
-      const assistants = blocks.filter((block) => block.role === 'assistant');
-      const userAcknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
-      let latestAssistant = null;
-      for (let assistantIndex = assistants.length - 1; assistantIndex >= 0; assistantIndex -= 1) {
-        const candidate = assistants[assistantIndex];
-        if (!assistantAcknowledgment.test(normalizeText(candidate.text))) {
-          latestAssistant = candidate;
-          break;
-        }
-        const precedingUser = [...blocks.slice(0, candidate.index)].reverse().find((block) => block.role === 'user');
-        if (precedingUser && !userAcknowledgment.test(normalizeText(precedingUser.text))) break;
-      }
-      return {
-        hasPriorConversation: true,
-        conversationLevel: level,
-        archivedConversationLevel,
-        assistantContextLevel: latestAssistant ? assistantTextContextLevel(latestAssistant.text) : '',
-        awaitingConfirmation: assistants.length > 0 && assistantInvitesContinuation(assistants[assistants.length - 1].text),
-        awaitingClarification: assistants.length > 0 && assistantAsksClarification(assistants[assistants.length - 1].text),
-        latestAssistantText: assistants.length > 0 ? boundedHeadTailSample(assistants[assistants.length - 1].text, 4_000) : '',
-        archivedMeaningfulTurnCount,
-        archivedSampledTextLength: transcript.length,
-        historicalAttachmentProfile: materials,
-        archivedAttachmentProfile: archivedMaterials,
-      };
-    }
-
-    function conversationRoutingState(beforeTurn = null, referenceText = '') {
-      const path = conversationPath();
-      const includeArchivedDifficulty = explicitlyReferencesOlderConversation(referenceText);
-      const cached = state.conversationRoutingCache;
-      if (!beforeTurn && cached && cached.path === path && cached.version === state.conversationMutationVersion &&
-        (!includeArchivedDifficulty || cached.includesArchivedDifficulty)) {
-        return cached.value;
-      }
-      const boundaryLocator = beforeTurn ? userTurnLocator(beforeTurn) : null;
-      const boundaryKey = boundaryLocator
-        ? `${path}|${boundaryLocator.testId || boundaryLocator.turnIndex}|archive:${includeArchivedDifficulty ? 1 : 0}`
-        : '';
-      const editCached = boundaryKey && state.editConversationRoutingCache.get(boundaryKey);
-      if (editCached && editCached.version === state.conversationMutationVersion) return editCached.value;
-      state.conversationRoutingBuilds += 1;
-      const routingTextOptions = {
-        checkComputedVisibility: true,
-        visibilityState: state.routingComputedVisibility,
-        computedVisibilityCache: new Map(),
-      };
-      const allTurns = beforeTurn
-        ? retainedTurnsBefore(beforeTurn, referenceText)
-        : activeConversationTurns(null, { referenceText });
-      const turns = allTurns.filter((turn) => roleOfTurn(turn) === 'user');
-      const materialTurnSet = new Set(allTurns.filter((turn) => {
-        const role = roleOfTurn(turn);
-        return role === 'user' || role === 'assistant';
-      }));
-      const attachmentCandidateSelector = [
-        '[data-file-id]', '[data-attachment-id]', '[data-testid*="file-pill"]',
-        '[aria-label*="remove file" i]', '[aria-label*="remove attachment" i]',
-        '[data-testid*="attachment"]', 'a[download]', 'a[href^="sandbox:"]',
-      ].join(', ');
-      const attachmentCandidates = new Set();
-      for (const node of doc.querySelectorAll(attachmentCandidateSelector)) {
-        const primary = node.closest(TURN_SELECTOR);
-        const roleNode = primary ? null : node.closest(ROLE_SELECTOR);
-        const turn = primary || roleNode && (roleNode.closest('article') || roleNode);
-        if (materialTurnSet.has(turn)) attachmentCandidates.add(turn);
-      }
-      const attachmentProfiles = new Map([...attachmentCandidates].map((turn) => [
-        turn,
-        historicalAttachmentState(turn, true),
-      ]));
-      const archivedMaterials = mergeAttachmentProfiles(...attachmentProfiles.values());
-      let level = '';
-      let archivedConversationLevel = '';
-      let materials = buildAttachmentProfile();
-      let hasMeaningfulTurn = false;
-      let archivedMeaningfulTurnCount = 0;
-      let archivedSampledTextLength = 0;
-      const acknowledgment = USER_ACKNOWLEDGMENT_PATTERN;
-      const recent = [];
-      if (includeArchivedDifficulty) {
-        for (const turn of turns) {
-          const prompt = boundedHeadTailSample(readableNodeText(turn, routingTextOptions), 16_000);
-          const attachments = attachmentProfiles.get(turn) || buildAttachmentProfile();
-          if (!prompt || acknowledgment.test(normalizeText(prompt)) && attachments.count === 0) continue;
-          archivedMeaningfulTurnCount += 1;
-          archivedSampledTextLength += prompt.length;
-          const decision = classifyPrompt(prompt, { attachmentProfile: attachments });
-          const target = decision.target === 'max' ? 'pro' : extractModelLevel(decision.target);
-          archivedConversationLevel = strongerRouteLevel(archivedConversationLevel, target);
-        }
-      }
-      for (let index = turns.length - 1; index >= 0 && recent.length < 6; index -= 1) {
-        const turn = turns[index];
-        const prompt = boundedHeadTailSample(readableNodeText(turn, routingTextOptions), 16_000);
-        const attachments = attachmentProfiles.get(turn) || buildAttachmentProfile();
-        if (!prompt || acknowledgment.test(normalizeText(prompt)) && attachments.count === 0) continue;
-        recent.unshift({ turn, prompt, attachments, turnIndex: allTurns.indexOf(turn) });
-      }
-      for (let recentIndex = 0; recentIndex < recent.length; recentIndex += 1) {
-        const { prompt, attachments, turnIndex } = recent[recentIndex];
-        const decision = classifyPrompt(prompt, {
-          previousLevel: level,
-          attachmentProfile: attachments,
-          hasPriorConversation: hasMeaningfulTurn,
-          historicalAttachmentProfile: materials,
-        });
-        if (acknowledgment.test(normalizeText(prompt))) {
-          materials = mergeAttachmentProfiles(materials, attachments);
-          continue;
-        }
-        if (decision.inherited) materials = mergeAttachmentProfiles(materials, attachments);
-        else materials = attachments;
-        const target = decision.target === 'max' ? 'pro' : extractModelLevel(decision.target);
-        if (target) level = target;
-        hasMeaningfulTurn = true;
-        const nextTurnIndex = recent[recentIndex + 1] ? recent[recentIndex + 1].turnIndex : allTurns.length;
-        const generatedMaterials = mergeAttachmentProfiles(...allTurns
-          .slice(turnIndex + 1, nextTurnIndex)
-          .filter((turn) => roleOfTurn(turn) === 'assistant')
-          .map((turn) => attachmentProfiles.get(turn) || buildAttachmentProfile()));
-        materials = mergeAttachmentProfiles(materials, generatedMaterials);
-      }
-      const latestAssistantText = latestCompletedAssistantText(allTurns, {
-        ignoreActiveGeneration: Boolean(beforeTurn),
-        textOptions: routingTextOptions,
-      });
-      const value = {
-        hasPriorConversation: turns.length > 0,
-        conversationLevel: level,
-        archivedConversationLevel,
-        retainedTurns: beforeTurn ? allTurns : null,
-        assistantContextLevel: assistantContextLevel(allTurns, {
-          ignoreActiveGeneration: Boolean(beforeTurn),
-          textOptions: routingTextOptions,
-        }),
-        awaitingConfirmation: assistantInvitesContinuation(latestAssistantText),
-        awaitingClarification: assistantAsksClarification(latestAssistantText),
-        latestAssistantText,
-        archivedMeaningfulTurnCount,
-        archivedSampledTextLength,
-        historicalAttachmentProfile: materials,
-        archivedAttachmentProfile: archivedMaterials,
-      };
-      if (!beforeTurn) {
-        state.conversationRoutingCache = {
-          path,
-          version: state.conversationMutationVersion,
-          includesArchivedDifficulty: includeArchivedDifficulty,
-          value,
-        };
-      } else if (boundaryKey) {
-        state.editConversationRoutingCache.set(boundaryKey, {
-          version: state.conversationMutationVersion,
-          value,
-        });
-      }
-      return value;
-    }
-
-    function activeToolState(composer) {
-      const primaryComposer = findComposer(doc);
-      const scopes = uniqueElements([
-        composerScope(composer),
-        closestUserTurn(composer) && primaryComposer && primaryComposer !== composer
-          ? composerScope(primaryComposer)
-          : null,
-      ]);
-      if (!scopes.length) return { signature: '', special: '' };
-      const specialPattern = /\b(?:agent(?: mode)?|deep research|canvas|create (?:an )?image|image generation|video generation|voice mode|record mode)\b/iu;
-      const routingControlCandidates = [
-        findModelPicker(doc, composer), findReasoningPicker(doc, composer),
-      ];
-      if (primaryComposer && primaryComposer !== composer) {
-        routingControlCandidates.push(
-          findModelPicker(doc, primaryComposer),
-          findReasoningPicker(doc, primaryComposer),
+          owner.getAttribute('data-file-name') || owner.getAttribute('data-filename') ||
+          owner.getAttribute('data-name') || owner.getAttribute('download') ||
+          owner.getAttribute('aria-label') || owner.textContent,
         );
+        stableKeys.add(id ? `id:${id}` : name ? `name:${lowerText(name)}` : `node:${index}`);
       }
-      const routingControls = new Set(routingControlCandidates.filter(Boolean));
-      const active = uniqueElements(scopes.flatMap((scope) => [...scope.querySelectorAll(
+      let fileCount = 0;
+      for (const input of scope.querySelectorAll('input[type="file"]')) {
+        const liveInput = Boolean(normalizeText(input.value)) || input.getAttribute('aria-busy') === 'true' ||
+          /\b(?:uploading|pending|processing)\b/iu.test(`${input.getAttribute('data-state') || ''} ${input.getAttribute('aria-label') || ''}`);
+        if (!liveInput) continue;
+        try { fileCount += Math.max(1, (input.files || []).length); } catch (_error) { fileCount += 1; }
+      }
+      return { count: Math.max(stableKeys.size, fileCount) };
+    }
+
+    function activeComposerState(composer) {
+      const scope = composerScope(composer);
+      if (!scope) return '';
+      return uniqueElements([...scope.querySelectorAll(
         '[aria-pressed="true"], [aria-checked="true"], [data-state="active"], [data-state="on"], [data-state="checked"], [data-selected="true"]',
-      )])).filter((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`) && !routingControls.has(node));
-      // A visible tool shortcut is not evidence that the tool is active. In
-      // particular, ChatGPT can render a plain "Deep research" button with no
-      // aria-pressed/data-state value. Treating that button as selected keeps
-      // the current model and makes trivial prompts appear to route to Medium
-      // (or whichever level was already selected). Only accept an un-ARIA'd
-      // special-mode control when its test ID positively says active/selected.
-      const selectedSpecial = uniqueElements(scopes.flatMap((scope) =>
-        [...scope.querySelectorAll('[data-testid*="tool"], [data-testid*="mode"]')])).filter((node) => {
-        const testId = lowerText(node.getAttribute('data-testid'));
-        return /(?:^|[-_])(?:active|selected)(?:[-_]|$)/iu.test(testId) &&
-          !/(?:^|[-_])(?:inactive|unselected)(?:[-_]|$)/iu.test(testId) &&
-          isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`) && specialPattern.test(accessibleText(node));
-      });
-      const labels = uniqueElements([...active, ...selectedSpecial]).map(accessibleText).filter(Boolean).sort();
-      const special = labels.find((label) => specialPattern.test(label)) || '';
-      return { signature: labels.join('\n'), special };
+      )])
+        .filter((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`))
+        .map(accessibleText)
+        .filter(Boolean)
+        .sort()
+        .join('\n');
     }
 
-    function captureSendSnapshot(composer = findComposer(doc), suppliedSurface = null) {
-      if (!composer) return null;
-      const surface = suppliedSurface || interactionSurface(composer) || submissionSurface(composer);
-      if (!surface) return null;
-      const editTurn = surfaceTurn(surface);
-      if (surface.kind === 'edit' && !editTurn) return null;
-      const attachments = attachmentState(composer, surface);
-      const tools = activeToolState(composer);
-      const draft = getComposerText(composer);
-      const conversation = conversationRoutingState(editTurn, draft);
-      return {
-        path: conversationPath(),
-        conversationVersion: state.conversationMutationVersion,
-        surface,
-        draft,
-        attachmentCount: attachments.count,
-        attachmentSignature: attachments.signature,
-        attachmentProfile: attachments.profile,
-        hasPriorConversation: conversation.hasPriorConversation,
-        conversationLevel: conversation.conversationLevel,
-        archivedConversationLevel: conversation.archivedConversationLevel,
-        retainedPrefixTurns: editTurn ? conversation.retainedTurns : null,
-        assistantContextLevel: conversation.assistantContextLevel,
-        awaitingConfirmation: conversation.awaitingConfirmation,
-        awaitingClarification: conversation.awaitingClarification,
-        latestAssistantText: conversation.latestAssistantText,
-        archivedMeaningfulTurnCount: conversation.archivedMeaningfulTurnCount,
-        archivedSampledTextLength: conversation.archivedSampledTextLength,
-        historicalAttachmentProfile: conversation.historicalAttachmentProfile,
-        archivedAttachmentProfile: conversation.archivedAttachmentProfile,
-        toolSignature: tools.signature,
-        specialMode: tools.special,
-      };
-    }
-
-    function validateSendSnapshot(snapshot) {
-      if (!snapshot || conversationPath() !== snapshot.path) return { ok: false, reason: 'The conversation changed while Auto was choosing.' };
-      if (snapshot.surface && snapshot.surface.kind === 'edit') {
-        const editTurn = surfaceTurn(snapshot.surface);
-        if (!editTurn) return { ok: false, reason: 'The edited message was closed while Auto was choosing.' };
-        if (hasActiveGeneration(doc)) {
-          return { ok: false, reason: 'ChatGPT started generating while Auto was choosing.' };
-        }
-        if (snapshot.conversationVersion !== state.conversationMutationVersion) {
-          if (retainedPrefixChangedSince(snapshot, editTurn)) {
-            return { ok: false, reason: 'The earlier conversation changed while Auto was choosing.' };
-          }
-          snapshot.conversationVersion = state.conversationMutationVersion;
-        }
-      } else if (snapshot.conversationVersion !== state.conversationMutationVersion) {
-        return { ok: false, reason: 'The conversation changed while Auto was choosing.' };
-      }
-      const composer = snapshot.surface
-        ? resolveSurfaceComposer(snapshot.surface, null, true)
-        : findComposer(doc);
-      let draftMatches = false;
-      if (composer) {
-        try {
-          draftMatches = typeof snapshot.draftValidator === 'function'
-            ? snapshot.draftValidator(composer, snapshot.draft) === true
-            : composerTextEquals(composer, snapshot.draft);
-        } catch (_error) {
-          draftMatches = false;
-        }
-      }
-      if (!composer || !draftMatches) {
-        return { ok: false, reason: 'Your draft changed while Auto was choosing.' };
-      }
-      const attachments = attachmentState(composer, snapshot.surface);
-      if (attachments.count !== snapshot.attachmentCount || attachments.signature !== snapshot.attachmentSignature) {
-        return { ok: false, reason: 'An attachment changed while Auto was choosing.' };
-      }
-      const tools = activeToolState(composer);
-      if (tools.signature !== snapshot.toolSignature) {
-        return { ok: false, reason: 'The active ChatGPT tool changed while Auto was choosing.' };
-      }
-      return { ok: true, composer };
-    }
-
-    function cappedTarget(target) {
-      if (target === 'max') {
-        if (state.settings.autoMaxLevel === 'high') return 'high';
-        if (state.settings.autoMaxLevel === 'extra-high') return 'extra-high';
-        return 'max';
-      }
-      const cap = maxRouteRank(state.settings.autoMaxLevel);
-      const rank = modelLevelRank(target);
-      if (rank <= cap) return target;
-      return state.settings.autoMaxLevel === 'high' ? 'high' : 'extra-high';
-    }
-
-    function previousRouteLevel() {
-      const previous = state.lastRouteDecision;
-      if (!previous || previous.path !== conversationPath() || Date.now() - previous.timestamp > 6 * 60 * 60 * 1000) return '';
-      return previous.level;
-    }
-
-    function rememberRoute(level, decision, manual, reason) {
-      const record = {
-        path: conversationPath(),
-        level: level || decision.target,
-        target: decision.target,
-        timestamp: Date.now(),
-        manual: Boolean(manual),
-        reason: reason || `${decision.reasons && decision.reasons.slice(0, 2).join(' + ') || 'prompt complexity'}; score ${decision.score}`,
-      };
-      state.lastRouteDecision = record;
-      syncSettingsUI();
-      win.setTimeout(() => {
-        if (state.lastRouteDecision === record) record.path = conversationPath();
-      }, 1_500);
-    }
-
-    function armSubmitReplayPermit(composer, kind, draftValidator = null, surface = null) {
-      const form = composer && composer.closest('form');
+    function armAutomationReplayPermit(composer) {
       if (!composer) return;
       state.submitReplayPermit = {
-        form,
-        knownForms: new Set(doc.querySelectorAll('form')),
-        surfaceKey: surface && surface.key || '',
-        path: conversationPath(),
+        form: composer.closest('form'),
+        path: routeKey(win.location.href),
         draft: getComposerText(composer),
-        draftValidator: typeof draftValidator === 'function' ? draftValidator : null,
-        kind,
         consumed: false,
         expiresAt: Date.now() + 3_000,
       };
     }
 
-    function consumeSubmitReplayPermit(event, composer, surface = null) {
+    function consumeAutomationReplayPermit(event, composer) {
       const permit = state.submitReplayPermit;
-      if (!permit) return false;
-      if (Date.now() > permit.expiresAt) {
+      if (!permit || Date.now() > permit.expiresAt || routeKey(win.location.href) !== permit.path ||
+        event.target !== permit.form || !composer || getComposerText(composer) !== permit.draft) {
         state.submitReplayPermit = null;
         return false;
       }
-      if (!event || conversationPath() !== permit.path) return false;
-      const sameSurface = permit.surfaceKey && surface && surface.key === permit.surfaceKey;
-      const exactForm = event.target === permit.form;
-      if (!exactForm && !sameSurface) return false;
       if (permit.consumed) return 'duplicate';
-      const currentDraft = getComposerText(composer);
-      if (currentDraft) {
-        let draftMatches = currentDraft === permit.draft;
-        if (!draftMatches && permit.draftValidator) {
-          try { draftMatches = permit.draftValidator(composer, permit.draft) === true; } catch (_error) { draftMatches = false; }
-        }
-        if (!draftMatches) return false;
-      }
-      if (!exactForm && sameSurface) permit.form = event.target;
       permit.consumed = true;
       return 'allow';
     }
 
-    function mountedEditReplayCandidate(form, submitter = null) {
-      const permit = state.submitReplayPermit;
-      const activeSurface = state.activeAdaptiveSnapshot && state.activeAdaptiveSnapshot.surface;
-      if (!state.replayingSend || !permit || permit.consumed || permit.form && permit.form.isConnected ||
-        !form || !form.isConnected || permit.knownForms && permit.knownForms.has(form) ||
-        !activeSurface || activeSurface.kind !== 'edit' || !permit.surfaceKey ||
-        activeSurface.key !== permit.surfaceKey || conversationPath() !== permit.path) return null;
-      const composers = [...form.querySelectorAll(LOCAL_COMPOSER_SELECTOR)].filter(isEditableComposer);
-      if (composers.length !== 1) return null;
-      const composer = composers[0];
-      const controls = [...form.querySelectorAll(SUBMISSION_CONTROL_SELECTOR)]
-        .filter((control) => isProbablyVisible(control) && !control.closest(`#${UI_ROOT_ID}`));
-      const sendControls = controls.filter(isPortalSendControl);
-      if (!controls.some(isPortalCancelControl) || sendControls.length !== 1 || submitter !== sendControls[0]) return null;
-      let draftMatches = getComposerText(composer) === permit.draft;
-      if (!draftMatches && permit.draftValidator) {
-        try { draftMatches = permit.draftValidator(composer, permit.draft) === true; } catch (_error) { draftMatches = false; }
-      }
-      return draftMatches ? { composer, surface: activeSurface } : null;
-    }
-
-    async function replayNativeSend(snapshot, decision, selectedLevel, manual = false, reason = '') {
-      let validation = validateSendSnapshot(snapshot);
-      if (!validation.ok) {
-        if (!snapshot.silent) toast(`${validation.reason} Review it and press Send again.`, 7_000);
-        return false;
-      }
-      if (state.adaptiveCancelled) {
-        if (!snapshot.silent) toast('Adaptive send cancelled. Your draft is unchanged.');
-        return false;
-      }
-      const runBeforeReplay = async (context) => {
-        if (typeof snapshot.beforeReplay !== 'function') return true;
-        const originalSnapshot = snapshot;
-        const ready = await snapshot.beforeReplay(context);
-        if (state.adaptiveCancelled) return false;
+    async function sendComposerAutomatically(options = {}) {
+      let composer = options.composer && options.composer.isConnected ? options.composer : findComposer(doc);
+      const draftMatches = (candidate) => {
+        if (!candidate || !candidate.isConnected) return false;
+        if (typeof options.draftValidator === 'function') {
+          try { return options.draftValidator(candidate) === true; } catch (_error) { return false; }
+        }
+        return options.expectedDraft == null || composerTextEquals(candidate, options.expectedDraft);
+      };
+      if (!draftMatches(composer) || attachmentState(composer).count) return false;
+      let sendButton = findSendButton(doc, composer);
+      if (!sendButton || sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') return false;
+      if (typeof options.beforeSend === 'function') {
+        const ready = await options.beforeSend({ composer, sendButton });
         if (!ready) return false;
-        if (ready && typeof ready === 'object' && ready.refreshSnapshot === true) {
-          const refreshComposer = ready.composer && ready.composer.isConnected
-            ? ready.composer
-            : snapshot.surface
-              ? resolveSurfaceComposer(snapshot.surface, null, true)
-              : findComposer(doc);
-          const refreshedSurface = snapshot.surface && refreshComposer
-            ? {
-              ...snapshot.surface,
-              composerRef: refreshComposer,
-              formRef: refreshComposer.closest('form'),
-            }
-            : null;
-          const refreshed = captureSendSnapshot(refreshComposer, refreshedSurface);
-          if (!refreshed || refreshed.path !== originalSnapshot.path ||
-            refreshed.attachmentCount !== originalSnapshot.attachmentCount ||
-            refreshed.attachmentSignature !== originalSnapshot.attachmentSignature ||
-            refreshed.toolSignature !== originalSnapshot.toolSignature ||
-            refreshed.specialMode !== originalSnapshot.specialMode) return false;
-          refreshed.beforeReplay = null;
-          refreshed.silent = originalSnapshot.silent;
-          refreshed.draftValidator = originalSnapshot.draftValidator;
-          snapshot = refreshed;
-        }
-        validation = validateSendSnapshot(snapshot);
-        if (state.adaptiveCancelled) return false;
-        if (!validation.ok) {
-          if (!snapshot.silent) toast(`${validation.reason} Review it and press Send again.`, 7_000);
-          return false;
-        }
-        return true;
-      };
-      const sendButton = snapshot.surface
-        ? sendControlForSurface(snapshot.surface, validation.composer)
-        : findSendButton(doc, validation.composer);
-      if (sendButton) {
-        if (sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') {
-          if (!snapshot.silent) toast('ChatGPT’s Send control is not ready. Your draft was not sent.', 7_000);
-          return false;
-        }
-        if (typeof snapshot.beforeReplay === 'function') {
-          if (!await runBeforeReplay({ composer: validation.composer, sendButton })) return false;
-          const currentSendButton = snapshot.surface
-            ? sendControlForSurface(snapshot.surface, validation.composer)
-            : findSendButton(doc, validation.composer);
-          if (!currentSendButton || currentSendButton.disabled || currentSendButton.getAttribute('aria-disabled') === 'true') return false;
-          if (state.adaptiveCancelled) return false;
-          armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator, snapshot.surface);
-          state.replayingSend = true;
-          try { currentSendButton.click(); } finally { state.replayingSend = false; }
-          if (snapshot.surface && snapshot.surface.sessionId) {
-            win.setTimeout(() => clearEditSession(snapshot.surface.sessionId), 3_250);
-          }
-          rememberRoute(selectedLevel, decision, manual, reason);
-          return true;
-        }
-        if (state.adaptiveCancelled) return false;
-        armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator, snapshot.surface);
-        state.replayingSend = true;
-        try { sendButton.click(); } finally { state.replayingSend = false; }
-        if (snapshot.surface && snapshot.surface.sessionId) {
-          win.setTimeout(() => clearEditSession(snapshot.surface.sessionId), 3_250);
-        }
-        rememberRoute(selectedLevel, decision, manual, reason);
-        return true;
+        if (ready && typeof ready === 'object' && ready.composer) composer = ready.composer;
       }
-      const form = validation.composer.closest('form');
-      if (form && typeof form.requestSubmit === 'function') {
-        if (typeof snapshot.beforeReplay === 'function') {
-          if (!await runBeforeReplay({ composer: validation.composer, form })) return false;
-        }
-        const currentForm = validation.composer.closest('form');
-        if (!currentForm || !currentForm.isConnected || typeof currentForm.requestSubmit !== 'function') return false;
-        if (state.adaptiveCancelled) return false;
-        armSubmitReplayPermit(validation.composer, 'adaptive-replay', snapshot.draftValidator, snapshot.surface);
-        state.replayingSend = true;
-        try { currentForm.requestSubmit(); } catch (_error) { return false; } finally { state.replayingSend = false; }
-        if (snapshot.surface && snapshot.surface.sessionId) {
-          win.setTimeout(() => clearEditSession(snapshot.surface.sessionId), 3_250);
-        }
-        rememberRoute(selectedLevel, decision, manual, reason);
-        return true;
-      }
-      if (!snapshot.silent) toast('ChatGPT’s Send control changed. Your draft is ready; press Send again.', 7_000);
-      return false;
-    }
-
-    function routingIsStrict(decision) {
-      return Boolean(decision && (decision.explicit || decision.strict));
-    }
-
-    function programmaticClick(node) {
-      if (!node || typeof node.click !== 'function') return false;
+      if (!draftMatches(composer) || attachmentState(composer).count) return false;
+      sendButton = findSendButton(doc, composer);
+      if (!sendButton || sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') return false;
+      armAutomationReplayPermit(composer);
+      state.replayingSend = true;
       try {
-        node.click();
+        sendButton.click();
         return true;
-      } catch (_error) {
-        return false;
-      }
-    }
-
-    function modelControlMenuRoots(picker) {
-      const roots = [];
-      const controlledIds = normalizeText(picker && picker.getAttribute('aria-controls')).split(/\s+/u).filter(Boolean);
-      for (const id of controlledIds) {
-        const controlled = doc.getElementById(id);
-        if (controlled) roots.push(controlled);
-      }
-      const pickerId = normalizeText(picker && picker.id);
-      if (pickerId) {
-        for (const candidate of doc.querySelectorAll('[aria-labelledby]')) {
-          if (normalizeText(candidate.getAttribute('aria-labelledby')).split(/\s+/u).includes(pickerId)) roots.push(candidate);
-        }
-      }
-      roots.push(...doc.querySelectorAll('[data-testid="composer-intelligence-picker-content"]'));
-      return uniqueElements(roots);
-    }
-
-    function modelControlActivationSnapshot(picker) {
-      return {
-        expanded: normalizeText(picker && picker.getAttribute('aria-expanded')),
-        state: normalizeText(picker && picker.getAttribute('data-state')),
-        roots: modelControlMenuRoots(picker).map((root) => ({
-          root,
-          connected: root.isConnected,
-          hidden: root.hidden === true,
-          ariaHidden: normalizeText(root.getAttribute('aria-hidden')),
-          state: normalizeText(root.getAttribute('data-state')),
-          visible: isProbablyVisible(root),
-        })),
-      };
-    }
-
-    function modelControlActivationChanged(picker, before) {
-      const after = modelControlActivationSnapshot(picker);
-      if (after.expanded !== before.expanded || after.state !== before.state || after.roots.length !== before.roots.length) return true;
-      return after.roots.some((entry, index) => {
-        const previous = before.roots[index];
-        return !previous || entry.root !== previous.root || entry.connected !== previous.connected || entry.hidden !== previous.hidden ||
-          entry.ariaHidden !== previous.ariaHidden || entry.state !== previous.state || entry.visible !== previous.visible;
-      });
-    }
-
-    function dispatchModelControlPointer(node) {
-      if (!node || typeof node.dispatchEvent !== 'function') return false;
-      let rect = null;
-      try { rect = node.getBoundingClientRect && node.getBoundingClientRect(); } catch (_error) { rect = null; }
-      const clientX = rect && Number.isFinite(rect.left) ? rect.left + Math.max(0, rect.width || 0) / 2 : 0;
-      const clientY = rect && Number.isFinite(rect.top) ? rect.top + Math.max(0, rect.height || 0) / 2 : 0;
-      const dispatchPointer = (type, buttons) => {
-        const EventConstructor = typeof win.PointerEvent === 'function' ? win.PointerEvent : win.MouseEvent;
-        if (typeof EventConstructor !== 'function') return;
-        const init = {
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-          view: win,
-          button: 0,
-          buttons,
-          clientX,
-          clientY,
-          pointerId: 1,
-          pointerType: 'mouse',
-          isPrimary: true,
-        };
-        node.dispatchEvent(new EventConstructor(type, init));
-      };
-      try {
-        dispatchPointer('pointerdown', 1);
-        dispatchPointer('pointerup', 0);
-        return true;
-      } catch (_error) {
-        return false;
-      }
-    }
-
-    function activateModelControl(node) {
-      if (!node || typeof node.dispatchEvent !== 'function') return false;
-      const before = modelControlActivationSnapshot(node);
-      const pointerDispatched = dispatchModelControlPointer(node);
-      if (!modelControlActivationChanged(node, before)) return programmaticClick(node);
-      return pointerDispatched;
-    }
-
-    function modelControlOpenedAfter(picker, before) {
-      const after = modelControlActivationSnapshot(picker);
-      if (after.expanded === 'true' || after.state === 'open') return picker;
-      const openedRoot = after.roots.find((entry) => {
-        if (!entry.connected || entry.hidden || entry.ariaHidden === 'true' || entry.state === 'closed') return false;
-        const previous = before.roots.find((candidate) => candidate.root === entry.root);
-        return !previous || previous.hidden !== entry.hidden || previous.ariaHidden !== entry.ariaHidden ||
-          previous.state !== entry.state || previous.visible !== entry.visible;
-      });
-      return openedRoot && openedRoot.root || null;
-    }
-
-    async function openModelControl(node, snapshot = null, deadline = Date.now() + 1_500) {
-      if (!node || typeof node.dispatchEvent !== 'function') return false;
-      if (node.getAttribute('aria-expanded') === 'true' || node.getAttribute('data-state') === 'open') return true;
-      const canContinue = () => !state.adaptiveCancelled && (!snapshot || validateSendSnapshot(snapshot).ok);
-      const waitForOpen = (before, maximumWait) => {
-        const remaining = Math.max(0, deadline - Date.now());
-        const immediate = modelControlOpenedAfter(node, before);
-        if (immediate || remaining < 50) return Promise.resolve(immediate);
-        return waitForCondition(() => modelControlOpenedAfter(node, before), {
-          root: doc.documentElement,
-          win,
-          timeout: Math.min(maximumWait, remaining),
-          attributes: true,
-        });
-      };
-
-      let before = modelControlActivationSnapshot(node);
-      const pointerDispatched = dispatchModelControlPointer(node);
-      const immediatePointerOpen = modelControlOpenedAfter(node, before);
-      if (pointerDispatched && immediatePointerOpen) return true;
-      if (!canContinue()) return false;
-
-      before = modelControlActivationSnapshot(node);
-      try { node.focus({ preventScroll: true }); } catch (_error) { try { node.focus(); } catch (_focusError) { /* ignore */ } }
-      try {
-        node.dispatchEvent(new win.KeyboardEvent('keydown', {
-          key: 'ArrowDown',
-          code: 'ArrowDown',
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-        }));
-      } catch (_error) {
-        return false;
-      }
-      if (await waitForOpen(before, 120)) return true;
-      if (!canContinue()) return false;
-
-      // Legacy controls may still be ordinary buttons. ChatGPT's current
-      // BasicTrigger ignores click, so this never substitutes for the
-      // pointer/ArrowDown path above; it only preserves older layouts.
-      before = modelControlActivationSnapshot(node);
-      return Boolean(programmaticClick(node) && await waitForOpen(before, 350));
-    }
-
-    function controlledModelMenu(picker) {
-      const ids = normalizeText(picker && picker.getAttribute('aria-controls')).split(/\s+/u).filter(Boolean);
-      const controlled = ids.map((id) => doc.getElementById(id)).find((node) => node && node.isConnected && isProbablyVisible(node) &&
-        !node.matches('[data-state="closed"], [aria-hidden="true"], [hidden]')) || null;
-      if (controlled) return controlled;
-      const pickerId = normalizeText(picker && picker.id);
-      if (!pickerId) return null;
-      return [...doc.querySelectorAll(`${MODEL_MENU_ROOT_SELECTOR}, [aria-labelledby]`)].find((node) =>
-        normalizeText(node.getAttribute('aria-labelledby')).split(/\s+/u).includes(pickerId) &&
-        node.isConnected && isProbablyVisible(node) && !node.matches('[data-state="closed"], [aria-hidden="true"], [hidden]')) || null;
-    }
-
-    function visibleModelMenuRoots(picker) {
-      const roots = [];
-      const controlled = controlledModelMenu(picker);
-      if (controlled) roots.push(controlled);
-      for (const candidate of doc.querySelectorAll(MODEL_MENU_ROOT_SELECTOR)) {
-        if (isProbablyVisible(candidate) && !candidate.matches('[data-state="closed"], [aria-hidden="true"], [hidden]') &&
-          !candidate.closest('[data-state="closed"]') && !candidate.closest(`#${UI_ROOT_ID}`)) roots.push(candidate);
-      }
-      for (const item of doc.querySelectorAll(MODEL_OPTION_CONTAINER_SELECTOR)) {
-        if (!isProbablyVisible(item) || item.closest('[data-state="closed"], [aria-hidden="true"], [hidden]') || item.closest(`#${UI_ROOT_ID}`)) continue;
-        roots.push(item.closest(MODEL_MENU_ROOT_SELECTOR) || item.parentElement);
-      }
-      return uniqueElements(roots);
-    }
-
-    function closeModelMenu(picker) {
-      const current = picker && picker.isConnected ? picker : findModelPicker(doc);
-      if (current && (current.getAttribute('aria-expanded') === 'true' || current.getAttribute('data-state') === 'open')) {
-        activateModelControl(current);
-      }
-    }
-
-    async function routeAndReplay(snapshot, decision, manual = false, silent = false, routingStage = 0, pickerAttempt = 0, discoveryDeadline = 0) {
-      const target = manual ? decision.target : cappedTarget(decision.target);
-      const targetRank = modelLevelRank(target);
-      const strictMinimumRank = routingIsStrict(decision)
-        ? modelLevelRank(decision.minimumLevel || target)
-        : -1;
-      const activeDiscoveryDeadline = discoveryDeadline || Date.now() + routingDiscoveryTimeout;
-      const routingComposer = () => snapshot.surface
-        ? resolveSurfaceComposer(snapshot.surface, null, true)
-        : findComposer(doc);
-      const routingPickerCandidates = () => {
-        const composer = routingComposer();
-        const preferred = targetRank >= ROUTE_LEVEL_RANK.pro
-          ? [findModelPicker(doc, composer), findReasoningPicker(doc, composer)]
-          : [findReasoningPicker(doc, composer), findModelPicker(doc, composer)];
-        return uniqueElements(preferred);
-      };
-      const pickerCandidates = routingPickerCandidates();
-      let picker = pickerCandidates[pickerAttempt] || null;
-      const currentRoutingPicker = (expectedLevel = '') => {
-        const refreshed = routingPickerCandidates();
-        if (expectedLevel) {
-          const reflected = uniqueElements([picker && picker.isConnected ? picker : null, ...refreshed]).find((candidate) => {
-            const level = extractModelLevel(accessibleText(candidate));
-            return level === expectedLevel || expectedLevel === 'instant' && level === 'auto';
-          });
-          if (reflected) return reflected;
-        }
-        if (picker && picker.isConnected) return picker;
-        return refreshed[pickerAttempt] || refreshed[0] || null;
-      };
-      const current = extractModelLevel(accessibleText(picker));
-      const hasAlternatePicker = pickerCandidates.length > pickerAttempt + 1;
-      const automaticFallbackAllowed = !manual && !decision.explicit;
-      const replayWithCurrentModel = async (reason) => {
-        if (!automaticFallbackAllowed || state.adaptiveCancelled) return false;
-        const validation = validateSendSnapshot(snapshot);
-        if (!validation.ok) return false;
-        closeModelMenu(picker);
-        const reflected = extractModelLevel(accessibleText(currentRoutingPicker()));
-        return replayNativeSend(
-          snapshot,
-          decision,
-          reflected || current || 'unknown',
-          manual,
-          `${reason}; used current model`,
-        );
-      };
-
-      if (snapshot.specialMode) {
-        if (!silent) toast(`Adaptive Auto kept the current model because ${snapshot.specialMode} controls model compatibility.`);
-        return replayNativeSend(snapshot, decision, current || 'unknown', manual, `kept current for ${snapshot.specialMode}`);
-      }
-      if (picker && target !== 'max' && (
-        current === target || target === 'instant' && current === 'auto' || modelLevelRank(current) === targetRank && targetRank === 0
-      )) {
-        return replayNativeSend(snapshot, decision, current || target, manual);
-      }
-      if (!picker) {
-        if (routingIsStrict(decision)) {
-          if (await replayWithCurrentModel('accuracy level unavailable because model control was unavailable')) return true;
-          if (!silent) toast(`Adaptive Auto could not find ChatGPT’s model control for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
-          return false;
-        }
-        if (target === 'instant') {
-          if (await replayWithCurrentModel('model control unavailable')) return true;
-          if (!silent) toast(`Adaptive Auto could not find ChatGPT’s model control for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
-          return false;
-        }
-        if (!silent) toast('Adaptive Auto could not access this account’s model control, so this message used the current model.', 6_000);
-        return replayNativeSend(snapshot, decision, current || 'unknown', manual, 'model control unavailable; used current');
-      }
-
-      const preexistingMenuRoots = new Set(visibleModelMenuRoots(picker));
-      const mutatedMenuRoots = new Set();
-      const collectMutatedRoot = (node) => {
-        let currentNode = node && (node.nodeType === 1 ? node : node.parentElement);
-        for (let depth = 0; currentNode && depth < 6; depth += 1, currentNode = currentNode.parentElement) {
-          if (currentNode.matches('html, body, main') || currentNode.closest(`#${UI_ROOT_ID}`)) break;
-          if (currentNode === picker || currentNode.contains(picker)) continue;
-          mutatedMenuRoots.add(currentNode);
-        }
-      };
-      let menuMutationObserver = null;
-      if (win.MutationObserver) {
-        menuMutationObserver = new win.MutationObserver((mutations) => {
-          for (const mutation of mutations) {
-            if (mutation.type === 'attributes') collectMutatedRoot(mutation.target);
-            else for (const node of mutation.addedNodes) collectMutatedRoot(node);
-          }
-        });
-        menuMutationObserver.observe(doc.body || doc.documentElement, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ['aria-hidden', 'data-state', 'hidden', 'class', 'style', 'role'],
-        });
-      }
-      if (!await openModelControl(picker, snapshot, activeDiscoveryDeadline)) {
-        if (menuMutationObserver) menuMutationObserver.disconnect();
-        if (state.adaptiveCancelled) {
-          if (!silent) toast('Adaptive send cancelled. Your draft is unchanged.');
-          return false;
-        }
-        const activationValidation = validateSendSnapshot(snapshot);
-        if (!activationValidation.ok) {
-          if (!silent) toast(`${activationValidation.reason} It was not sent.`, 7_000);
-          return false;
-        }
-        if (hasAlternatePicker) {
-          return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
-        }
-        if (routingIsStrict(decision)) {
-          if (await replayWithCurrentModel('accuracy level unavailable because model control could not be opened')) return true;
-          if (!silent) toast(`ChatGPT’s model control could not be opened for the requested ${modelLevelLabel(target)} level. Your draft was not sent.`, 8_000);
-          return false;
-        }
-        if (target === 'instant') {
-          if (await replayWithCurrentModel('model control could not be opened')) return true;
-          if (!silent) toast('Adaptive Auto chose Instant but could not activate it. Your draft was not sent.', 8_000);
-          return false;
-        }
-        return replayNativeSend(snapshot, decision, current || 'unknown', manual, 'model control could not be opened; used current');
-      }
-      const discoverVisibleOptions = () => {
-        // Prefer the stable root used by ChatGPT's current unified
-        // Intelligence picker before considering other concurrently visible
-        // menus (Tools, attachments, sidebar actions, and similar portals).
-        const currentOptions = currentIntelligenceOptions(doc, picker);
-        if (currentOptions.length) return currentOptions;
-        const slider = activePowerSlider(doc, picker);
-        if (slider) return [slider];
-        const controlled = controlledModelMenu(picker);
-        const composer = findComposer(doc);
-        const roots = uniqueElements([
-          ...visibleModelMenuRoots(picker).filter((root) => root === controlled || !preexistingMenuRoots.has(root)),
-          ...mutatedMenuRoots,
-        ]).filter((root) => root && root.isConnected && isProbablyVisible(root) &&
-          !root.closest('[data-state="closed"], [aria-hidden="true"], [hidden]') &&
-          root !== picker && !root.contains(picker) && (!composer || !root.contains(composer)));
-        const candidates = [];
-        for (const root of roots) {
-          const found = findModelOptions(root, picker) || [];
-          if (!found.length) continue;
-          const levels = new Set(found.map(optionLevel).filter(Boolean));
-          const context = lowerText(`${root.getAttribute && root.getAttribute('aria-label')} ${root.getAttribute && root.getAttribute('data-testid')}`);
-          let score = root === controlled ? 100 : 0;
-          if (/\b(?:model|reasoning|thinking|intelligence|effort)\b/iu.test(context)) score += 40;
-          if (root.matches('[data-slot*="menu"], [data-slot*="popover"], [data-radix-menu-content], [data-radix-popper-content-wrapper]') ||
-            root.querySelector('[data-slot*="menu"], [data-slot*="popover"], [data-radix-menu-content]')) score += 30;
-          score += levels.size * 5;
-          if (current && levels.has(current)) score += 25;
-          if (found.some((option) => option.matches('[aria-checked="true"], [aria-selected="true"], [data-state="checked"]') && optionLevel(option) === current)) score += 25;
-          candidates.push({ found, score });
-        }
-        candidates.sort((left, right) => right.score - left.score);
-        return candidates[0] && candidates[0].found || null;
-      };
-      const remainingDiscoveryTime = Math.max(0, activeDiscoveryDeadline - Date.now());
-      const options = remainingDiscoveryTime >= 50
-        ? await waitForCondition(discoverVisibleOptions, {
-          root: doc.documentElement,
-          win,
-          timeout: remainingDiscoveryTime,
-          attributes: true,
-        })
-        : discoverVisibleOptions();
-      if (menuMutationObserver) menuMutationObserver.disconnect();
-
-      if (state.adaptiveCancelled) {
-        closeModelMenu(picker);
-        if (!silent) toast('Adaptive send cancelled. Your draft is unchanged.');
-        return false;
-      }
-      const validation = validateSendSnapshot(snapshot);
-      if (!validation.ok) {
-        closeModelMenu(picker);
-        if (!silent) toast(`${validation.reason} It was not sent.`, 7_000);
-        return false;
-      }
-
-      const slider = activePowerSlider(doc, picker);
-      if (slider && target !== 'max') {
-        const targetMatches = (level) => level === target || target === 'instant' && level === 'auto';
-        const targetSliderRank = modelLevelRank(target);
-        let sliderControl = slider;
-        for (let step = 0; sliderControl && step < 8; step += 1) {
-          const pickerLevel = extractModelLevel(accessibleText(currentRoutingPicker()));
-          const sliderLevel = powerSliderLevel(sliderControl) || pickerLevel || current;
-          if (targetMatches(sliderLevel)) break;
-          const sliderRank = modelLevelRank(sliderLevel);
-          if (sliderRank < 0 || targetSliderRank < 0) break;
-          const key = sliderRank > targetSliderRank ? 'ArrowLeft' : 'ArrowRight';
-          const beforeLevel = sliderLevel;
-          try { sliderControl.focus({ preventScroll: true }); } catch (_error) { try { sliderControl.focus(); } catch (_focusError) { /* ignore */ } }
-          try {
-            sliderControl.dispatchEvent(new win.KeyboardEvent('keydown', {
-              key,
-              code: key,
-              bubbles: true,
-              cancelable: true,
-              composed: true,
-            }));
-          } catch (_error) {
-            break;
-          }
-          sliderControl = await waitForCondition(() => {
-            const next = activePowerSlider(doc, currentRoutingPicker() || picker);
-            if (!next) return null;
-            const nextPickerLevel = extractModelLevel(accessibleText(currentRoutingPicker()));
-            const nextSliderLevel = powerSliderLevel(next);
-            return (nextSliderLevel && nextSliderLevel !== beforeLevel) ||
-              (nextPickerLevel && nextPickerLevel !== beforeLevel) ? next : null;
-          }, {
-            root: doc.documentElement,
-            win,
-            timeout: 500,
-            attributes: true,
-            characterData: true,
-          });
-        }
-        const finalSlider = activePowerSlider(doc, currentRoutingPicker() || picker);
-        const finalPicker = currentRoutingPicker(target);
-        const finalSliderLevel = powerSliderLevel(finalSlider) || extractModelLevel(accessibleText(finalPicker));
-        if (targetMatches(finalSliderLevel)) {
-          closeModelMenu(finalPicker || picker);
-          const sliderValidation = validateSendSnapshot(snapshot);
-          if (!sliderValidation.ok) {
-            if (!silent) toast(`${sliderValidation.reason} It was not sent.`, 7_000);
-            return false;
-          }
-          const reason = `${decision.reasons && decision.reasons.slice(0, 2).join(' + ') || 'prompt complexity'}; Power slider`;
-          return replayNativeSend(snapshot, decision, target === 'instant' && finalSliderLevel === 'auto' ? 'auto' : target, manual, reason);
-        }
-      }
-      const exactTargetOptions = target === 'max' ? [] : (options || []).filter((option) => {
-        const level = optionLevel(option);
-        return level === target || target === 'instant' && level === 'auto';
-      });
-      const exactTargetVisible = target === 'max' || exactTargetOptions.length > 0;
-      if (exactTargetOptions.length > 1) {
-        if (await replayWithCurrentModel('model menu was ambiguous')) return true;
-        closeModelMenu(picker);
-        if (!silent) toast(`ChatGPT showed more than one ${modelLevelLabel(target)} control. Your draft was not sent.`, 8_000);
-        return false;
-      }
-      if ((!options || !options.length || !exactTargetVisible) && hasAlternatePicker) {
-        closeModelMenu(picker);
-        return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
-      }
-      if (target === 'instant' && !exactTargetVisible) {
-        if (await replayWithCurrentModel('Instant was unavailable')) return true;
-        closeModelMenu(picker);
-        if (!silent) toast('Adaptive Auto chose Instant but could not activate it. Your draft was not sent.', 8_000);
-        return false;
-      }
-      const thinkingOption = routingStage === 0 && targetRank >= ROUTE_LEVEL_RANK.medium && targetRank <= ROUTE_LEVEL_RANK.ultra &&
-        (options || []).find((option) => optionLevel(option) === 'medium' && /\bthinking\b/iu.test(accessibleText(option)));
-      const hasDirectEffortOption = (options || []).some((option) => {
-        const rank = modelLevelRank(optionLevel(option));
-        return rank >= ROUTE_LEVEL_RANK.high && rank <= ROUTE_LEVEL_RANK.ultra;
-      });
-      const stagedThinkingChoice = thinkingOption && !hasDirectEffortOption
-        ? chooseModelOption([thinkingOption], 'medium', 'highest')
-        : null;
-      const choice = stagedThinkingChoice || chooseModelOption(options || [], target, manual ? 'highest' : state.settings.autoMaxLevel);
-      if (!choice || !choice.element) {
-        if (await replayWithCurrentModel('no compatible Auto level was available')) return true;
-        if (routingIsStrict(decision)) {
-          closeModelMenu(picker);
-          if (!silent) toast(`The requested ${modelLevelLabel(target)} level is not available in this account’s current model menu. Your draft was not sent.`, 8_000);
-          return false;
-        }
-        closeModelMenu(picker);
-        if (!silent) toast('Adaptive Auto could not find a compatible level. Your draft was not sent.', 8_000);
-        return false;
-      }
-      if (!stagedThinkingChoice && decision.explicit && decision.target !== 'max' && choice.level !== target) {
-        closeModelMenu(picker);
-        if (!silent) toast(`${modelLevelLabel(target)} is not available as an exact option in the current picker. Your explicit-route draft was not sent.`, 8_000);
-        return false;
-      }
-      if (!stagedThinkingChoice && decision.strict && modelLevelRank(choice.level) < strictMinimumRank) {
-        if (!automaticFallbackAllowed) {
-          closeModelMenu(picker);
-          if (!silent) toast(`${modelLevelLabel(target)} or a stronger level is not available in the current picker. Your accuracy-checked draft was not sent.`, 8_000);
-          return false;
-        }
-      }
-
-      let selectionConfirmed = choice.level === current;
-      if (choice.level !== current) {
-        programmaticClick(choice.element);
-        await new Promise((resolve) => win.setTimeout(resolve, 100));
-        selectionConfirmed = Boolean(await waitForCondition(() => {
-          if (stagedThinkingChoice) {
-            const effortPicker = findReasoningPicker(doc, routingComposer());
-            if (effortPicker) return effortPicker;
-            const basePicker = findModelPicker(doc, routingComposer());
-            if (basePicker && /\bthinking\b/iu.test(accessibleText(basePicker))) return basePicker;
-          }
-          const updated = currentRoutingPicker(choice.level);
-          const selected = extractModelLevel(accessibleText(updated));
-          if (selected === choice.level || choice.level === 'instant' && selected === 'auto') return updated || doc.documentElement;
-          return null;
-        }, {
-          root: doc.documentElement,
-          win,
-          timeout: MODEL_SELECTION_CONFIRM_TIMEOUT,
-          attributes: true,
-        }));
-
-        // If the trigger did not reflect the first click, reopen the current
-        // Intelligence menu and check Radix's real checked row. This handles a
-        // rerendered trigger and gives a still-unchecked exact row one retry.
-        if (!selectionConfirmed && !stagedThinkingChoice && validateSendSnapshot(snapshot).ok) {
-          const verificationPicker = currentRoutingPicker();
-          if (verificationPicker) {
-            const alreadyOpen = verificationPicker.getAttribute('aria-expanded') === 'true' ||
-              verificationPicker.getAttribute('data-state') === 'open';
-            if (alreadyOpen || await openModelControl(verificationPicker, snapshot, Date.now() + 1_200)) {
-              const verificationOptions = await waitForCondition(() => {
-                const found = currentIntelligenceOptions(doc, verificationPicker);
-                return found.length ? found : null;
-              }, {
-                root: doc.documentElement,
-                win,
-                timeout: 400,
-                attributes: true,
-              });
-              const matchesChoice = (option) => {
-                const level = optionLevel(option);
-                return level === choice.level || choice.level === 'instant' && level === 'auto';
-              };
-              const checkedChoice = (verificationOptions || []).find((option) =>
-                matchesChoice(option) && option.matches('[aria-checked="true"], [data-state="checked"]'));
-              if (checkedChoice) {
-                selectionConfirmed = true;
-                closeModelMenu(verificationPicker);
-              } else {
-                const retryChoice = (verificationOptions || []).find(matchesChoice);
-                if (retryChoice) {
-                  programmaticClick(retryChoice);
-                  await new Promise((resolve) => win.setTimeout(resolve, 100));
-                  selectionConfirmed = Boolean(await waitForCondition(() => {
-                    const updated = currentRoutingPicker(choice.level);
-                    const selected = extractModelLevel(accessibleText(updated));
-                    return selected === choice.level || choice.level === 'instant' && selected === 'auto'
-                      ? updated || doc.documentElement
-                      : null;
-                  }, {
-                    root: doc.documentElement,
-                    win,
-                    timeout: MODEL_SELECTION_CONFIRM_TIMEOUT,
-                    attributes: true,
-                  }));
-                  closeModelMenu(verificationPicker);
-                } else {
-                  closeModelMenu(verificationPicker);
-                }
-              }
-            }
-          }
-        }
-      } else {
-        closeModelMenu(picker);
-      }
-
-      const after = validateSendSnapshot(snapshot);
-      if (!after.ok) {
-        if (!silent) toast(`${after.reason} It was not sent.`, 7_000);
-        return false;
-      }
-      const reflected = extractModelLevel(accessibleText(currentRoutingPicker(choice.level)));
-      const confirmed = selectionConfirmed || reflected === choice.level || choice.level === 'instant' && reflected === 'auto';
-      if (!confirmed) {
-        if (target === 'instant') {
-          if (hasAlternatePicker) {
-            closeModelMenu(picker);
-            return routeAndReplay(snapshot, decision, manual, silent, routingStage, pickerAttempt + 1, activeDiscoveryDeadline);
-          }
-          if (await replayWithCurrentModel('Instant selection was not confirmed')) return true;
-          closeModelMenu(picker);
-          if (!silent) toast(`ChatGPT did not confirm ${modelLevelLabel(target)}. Your draft was not sent.`, 8_000);
-          return false;
-        }
-        closeModelMenu(picker);
-        const confirmedCurrent = reflected || current;
-        const currentIsSafe = target !== 'max' && modelLevelRank(confirmedCurrent) >= targetRank;
-        if (currentIsSafe && await replayWithCurrentModel(`${modelLevelLabel(choice.level)} selection was not confirmed`)) return true;
-        if (!silent) {
-          const weakerLabel = modelLevelRank(confirmedCurrent) >= 0
-            ? modelLevelLabel(confirmedCurrent)
-            : 'the current model';
-          toast(`ChatGPT did not confirm ${modelLevelLabel(choice.level)}. Adaptive Auto kept your draft unsent rather than use the weaker ${weakerLabel} level. Press Send again to retry.`, 9_000);
-        }
-        return false;
-      }
-      if (stagedThinkingChoice) {
-        await waitForCondition(() => findReasoningPicker(doc, routingComposer()), {
-          root: composerScope(routingComposer()) || doc.documentElement,
-          win,
-          timeout: 500,
-          attributes: true,
-        });
-        if (state.adaptiveCancelled) {
-          if (!silent) toast('Adaptive send cancelled. Your draft is unchanged.');
-          return false;
-        }
-        const stagedValidation = validateSendSnapshot(snapshot);
-        if (!stagedValidation.ok) {
-          if (!silent) toast(`${stagedValidation.reason} It was not sent.`, 7_000);
-          return false;
-        }
-        return routeAndReplay(snapshot, decision, manual, silent, routingStage + 1);
-      }
-      const reason = `${decision.reasons && decision.reasons.slice(0, 2).join(' + ') || 'prompt complexity'}${choice.fallback ? `; ${modelLevelLabel(target)} unavailable` : ''}`;
-      return replayNativeSend(snapshot, decision, choice.level, manual, reason);
-    }
-
-    async function smartRouteAndSend(options = {}) {
-      if (state.replayingSend) return false;
-      if (state.adaptiveSendPromise) return state.adaptiveSendPromise;
-      const suppliedSnapshot = options.snapshot && options.snapshot.path === conversationPath()
-        ? options.snapshot
-        : null;
-      const composer = options.composer && options.composer.isConnected
-        ? options.composer
-        : suppliedSnapshot && suppliedSnapshot.surface
-          ? resolveSurfaceComposer(suppliedSnapshot.surface, null, true)
-          : findComposer(doc);
-      const snapshot = suppliedSnapshot
-        ? suppliedSnapshot
-        : captureSendSnapshot(composer);
-      if (!snapshot) return false;
-      snapshot.draftValidator = typeof options.draftValidator === 'function' ? options.draftValidator : null;
-      const suppliedBeforeReplay = typeof options.beforeReplay === 'function' ? options.beforeReplay : null;
-      const guardedDraft = options.routingText == null
-        ? buildAccuracyGuardedPrompt(snapshot.draft, QUESTION_MAX_LENGTH, snapshot)
-        : snapshot.draft;
-      let accuracyGuardApplied = false;
-      if (guardedDraft !== snapshot.draft) {
-        snapshot.beforeReplay = async (context) => {
-          const liveComposer = context.composer && context.composer.isConnected
-            ? context.composer
-            : snapshot.surface
-              ? resolveSurfaceComposer(snapshot.surface, snapshot.draft)
-              : findComposer(doc);
-          if (!liveComposer || !composerTextEquals(liveComposer, snapshot.draft) ||
-            !setComposerText(liveComposer, guardedDraft, win) || !composerTextEquals(liveComposer, guardedDraft)) {
-            if (!snapshot.silent) toast('The accuracy check could not be added safely. Your message was not sent.', 8_000);
-            return false;
-          }
-          accuracyGuardApplied = true;
-          const activeComposer = snapshot.surface
-            ? resolveSurfaceComposer(snapshot.surface, guardedDraft)
-            : findComposer(doc);
-          if (!activeComposer || !activeComposer.isConnected || !composerTextEquals(activeComposer, guardedDraft)) {
-            if (!snapshot.silent) toast('The message box changed while the accuracy check was added. Your message was not sent.', 8_000);
-            return false;
-          }
-          let refreshComposer = activeComposer;
-          if (suppliedBeforeReplay) {
-            const ready = await suppliedBeforeReplay({
-              ...context,
-              composer: activeComposer,
-              sendButton: snapshot.surface
-                ? sendControlForSurface(snapshot.surface, activeComposer)
-                : findSendButton(doc, activeComposer),
-              form: activeComposer.closest('form'),
-            });
-            if (!ready) return false;
-            if (typeof ready === 'object' && ready.composer && ready.composer.isConnected) {
-              refreshComposer = ready.composer;
-            }
-          }
-          return { refreshSnapshot: true, composer: refreshComposer };
-        };
-      } else {
-        snapshot.beforeReplay = suppliedBeforeReplay;
-      }
-      snapshot.silent = options.silent === true;
-      state.adaptiveCancelled = false;
-
-      const task = Promise.resolve().then(async () => {
-        const transferredContext = options.routingText != null && !snapshot.hasPriorConversation
-          ? transferredConversationRoutingState(snapshot.draft, options.routingText)
-          : null;
-        const inferredConversationLevel = strongerRouteLevel(
-          snapshot.conversationLevel,
-          transferredContext && transferredContext.conversationLevel,
-        );
-        const explicitDecision = classifyPrompt(options.routingText == null ? snapshot.draft : options.routingText, {
-          previousLevel: inferredConversationLevel || (snapshot.surface && snapshot.surface.kind === 'edit'
-            ? ''
-            : previousRouteLevel()),
-          attachmentCount: snapshot.attachmentCount,
-          attachmentProfile: snapshot.attachmentProfile,
-          hasPriorConversation: transferredContext ? true : snapshot.hasPriorConversation,
-          conversationLevel: inferredConversationLevel,
-          archivedConversationLevel: strongerRouteLevel(
-            snapshot.archivedConversationLevel,
-            transferredContext && transferredContext.archivedConversationLevel,
-          ),
-          assistantContextLevel: strongerRouteLevel(snapshot.assistantContextLevel, transferredContext && transferredContext.assistantContextLevel),
-          awaitingConfirmation: snapshot.awaitingConfirmation || Boolean(transferredContext && transferredContext.awaitingConfirmation),
-          awaitingClarification: snapshot.awaitingClarification || Boolean(transferredContext && transferredContext.awaitingClarification),
-          latestAssistantText: transferredContext && transferredContext.latestAssistantText || snapshot.latestAssistantText,
-          archivedMeaningfulTurnCount: Math.max(
-            snapshot.archivedMeaningfulTurnCount || 0,
-            transferredContext && transferredContext.archivedMeaningfulTurnCount || 0,
-          ),
-          archivedSampledTextLength: Math.max(
-            snapshot.archivedSampledTextLength || 0,
-            transferredContext && transferredContext.archivedSampledTextLength || 0,
-          ),
-          historicalAttachmentProfile: transferredContext
-            ? mergeAttachmentProfiles(snapshot.historicalAttachmentProfile, transferredContext.historicalAttachmentProfile)
-            : snapshot.historicalAttachmentProfile,
-          archivedAttachmentProfile: transferredContext
-            ? mergeAttachmentProfiles(snapshot.archivedAttachmentProfile, transferredContext.archivedAttachmentProfile)
-            : snapshot.archivedAttachmentProfile,
-        });
-        const decision = explicitDecision;
-        if (!state.settings.adaptiveRouting && !explicitDecision.explicit) {
-          return replayNativeSend(snapshot, decision, extractModelLevel(accessibleText(findModelPicker(doc))) || 'unknown', false, 'Adaptive Auto disabled');
-        }
-        const routingComposer = composer && composer.isConnected
-          ? composer
-          : snapshot.surface
-            ? resolveSurfaceComposer(snapshot.surface, null, true)
-            : findComposer(doc);
-        const routingCapability = accountRoutingCapability(doc, routingComposer);
-        if (routingCapability === 'guest') {
-          return replayNativeSend(
-            snapshot,
-            decision,
-            'guest-default',
-            false,
-            'signed-out session; intelligence selection unavailable; sent with ChatGPT default',
-          );
-        }
-        return routeAndReplay(snapshot, decision, false, options.silent === true);
-      });
-      state.adaptiveSendPromise = task;
-      state.activeAdaptiveSnapshot = snapshot;
-      syncSettingsUI();
-      const rollbackAccuracyGuard = () => {
-        if (!accuracyGuardApplied) return;
-        const guardedComposer = snapshot.surface
-          ? resolveSurfaceComposer(snapshot.surface, guardedDraft, true)
-          : findComposer(doc);
-        if (guardedComposer && composerTextEquals(guardedComposer, guardedDraft)) {
-          setComposerText(guardedComposer, snapshot.draft, win);
-        }
-      };
-      try {
-        const sent = await task;
-        if (!sent) rollbackAccuracyGuard();
-        return sent;
-      } catch (error) {
-        rollbackAccuracyGuard();
-        throw error;
       } finally {
-        if (state.adaptiveSendPromise === task) state.adaptiveSendPromise = null;
-        if (state.activeAdaptiveSnapshot === snapshot) state.activeAdaptiveSnapshot = null;
-        syncSettingsUI();
+        state.replayingSend = false;
       }
     }
 
@@ -6193,14 +2771,8 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       if (sideHandoffIsActive()) return false;
       const sendButton = findSendButton(doc, composer);
       if (!sendButton || sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') return false;
-      armSubmitReplayPermit(composer, 'fresh-handoff');
-      state.replayingSend = true;
-      try {
-        sendButton.click();
-        return true;
-      } finally {
-        state.replayingSend = false;
-      }
+      sendButton.click();
+      return true;
     }
 
     function isHandoffRequestTurn(turn) {
@@ -6648,6 +3220,10 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       return fallbackDestinationStatus(job, job.branchConversation).ok;
     }
 
+    function conversationPath() {
+      try { return new URL(String(win.location.href)).pathname; } catch (_error) { return ''; }
+    }
+
     async function bindFallbackConversation(job, expectedConversation = '') {
       const status = fallbackDestinationStatus(job, expectedConversation);
       if (!status.ok) return false;
@@ -7001,12 +3577,10 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         return true;
       }
       let sendIntentPersisted = false;
-      const sent = await smartRouteAndSend({
+      const sent = await sendComposerAutomatically({
         composer,
-        silent: true,
-        routingText: job.question,
         draftValidator: (candidate) => fallbackComposerHasPrompt(candidate, prompt),
-        beforeReplay: async () => {
+        beforeSend: async () => {
           const currentComposer = findComposer(doc);
           const currentSendButton = currentComposer && findSendButton(doc, currentComposer);
           if (!isActiveFallbackDestination(job) || !currentComposer || !fallbackComposerHasPrompt(currentComposer, prompt) ||
@@ -7021,10 +3595,10 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             fallbackComposerHasPrompt(persistedComposer, prompt) &&
             !attachmentState(persistedComposer).count && persistedSendButton &&
             !persistedSendButton.disabled && persistedSendButton.getAttribute('aria-disabled') !== 'true') {
-            return { refreshSnapshot: true, composer: persistedComposer };
+            return { composer: persistedComposer };
           }
           const restaged = await stageFallbackPrompt(job, prompt);
-          return restaged.ok ? { refreshSnapshot: true, composer: restaged.composer } : false;
+          return restaged.ok ? { composer: restaged.composer } : false;
         },
       });
       if (sent) return finishObservedFallbackSend(job, baselineUserCount);
@@ -7035,7 +3609,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         job,
         sendIntentPersisted
           ? 'The verified message changed after the Send step was saved. To prevent a duplicate, Workflow Toolkit stopped.'
-          : 'The automatic model step was interrupted before Send. The question was not sent.',
+          : 'The automatic Send step was interrupted. The question was not sent.',
         null,
         { canRetry: !sendIntentPersisted },
       );
@@ -7223,21 +3797,20 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         return true;
       }
       let sendIntentPersisted = false;
-      const routingToolSignature = activeToolState(composer).signature;
-      for (let routingAttempt = 0; routingAttempt < 2; routingAttempt += 1) {
-        let trustedRoutingInteraction = false;
-        const markTrustedRoutingInteraction = (event) => {
-          if (event && event.isTrusted) trustedRoutingInteraction = true;
+      const composerStateSignature = activeComposerState(composer);
+      for (let sendAttempt = 0; sendAttempt < 2; sendAttempt += 1) {
+        let trustedSendInteraction = false;
+        const markTrustedSendInteraction = (event) => {
+          if (event && event.isTrusted) trustedSendInteraction = true;
         };
-        doc.addEventListener('pointerdown', markTrustedRoutingInteraction, true);
-        doc.addEventListener('keydown', markTrustedRoutingInteraction, true);
+        doc.addEventListener('pointerdown', markTrustedSendInteraction, true);
+        doc.addEventListener('keydown', markTrustedSendInteraction, true);
         let sent;
         try {
-          sent = await smartRouteAndSend({
+          sent = await sendComposerAutomatically({
             composer,
-            silent: true,
-            routingText: job.question,
-            beforeReplay: async () => {
+            expectedDraft: outgoingQuestion,
+            beforeSend: async () => {
               const currentComposer = findComposer(doc);
               const currentSendButton = currentComposer && findSendButton(doc, currentComposer);
               if (!isExpectedBranchConversation(job, expectedConversation) ||
@@ -7253,39 +3826,41 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
                 currentUserCount() === baselineUserCount && !hasActiveGeneration(doc) &&
                 persistedComposer && composerTextEquals(persistedComposer, outgoingQuestion) &&
                 !attachmentState(persistedComposer).count && persistedSendButton &&
-                !persistedSendButton.disabled && persistedSendButton.getAttribute('aria-disabled') !== 'true') return true;
+                !persistedSendButton.disabled && persistedSendButton.getAttribute('aria-disabled') !== 'true') {
+                return { composer: persistedComposer };
+              }
               const restaged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount, outgoingQuestion);
-              return restaged.ok ? { refreshSnapshot: true, composer: restaged.composer } : false;
+              return restaged.ok ? { composer: restaged.composer } : false;
             },
           });
         } finally {
-          doc.removeEventListener('pointerdown', markTrustedRoutingInteraction, true);
-          doc.removeEventListener('keydown', markTrustedRoutingInteraction, true);
+          doc.removeEventListener('pointerdown', markTrustedSendInteraction, true);
+          doc.removeEventListener('keydown', markTrustedSendInteraction, true);
         }
         if (sent) return finishObservedSideSend(job, expectedConversation, baselineUserCount);
         if (sendIntentPersisted && currentUserCount() > baselineUserCount) {
           return finishObservedSideSend(job, expectedConversation, baselineUserCount);
         }
-        if (sendIntentPersisted || routingAttempt || state.adaptiveCancelled || trustedRoutingInteraction ||
+        if (sendIntentPersisted || sendAttempt || trustedSendInteraction ||
           !isExpectedBranchConversation(job, expectedConversation) ||
           currentUserCount() > baselineUserCount || hasActiveGeneration(doc)) break;
 
         const remountedComposer = findComposer(doc);
         if (remountedComposer && (getComposerText(remountedComposer).trim() ||
-          activeToolState(remountedComposer).signature !== routingToolSignature)) break;
+          activeComposerState(remountedComposer) !== composerStateSignature)) break;
         staged = await stageNativeBranchQuestion(job, expectedConversation, baselineUserCount, outgoingQuestion);
         if (staged.sent) {
           await markSideSendAttempted(job);
           return finishObservedSideSend(job, expectedConversation, baselineUserCount);
         }
-        if (!staged.ok || activeToolState(staged.composer).signature !== routingToolSignature) break;
+        if (!staged.ok || activeComposerState(staged.composer) !== composerStateSignature) break;
         composer = staged.composer;
       }
       showRecovery(
         job,
         sendIntentPersisted
           ? 'The verified question changed after the Send step was saved. To avoid a duplicate, Workflow Toolkit stopped.'
-          : 'The automatic model step was interrupted before Send. The question was not sent.',
+          : 'The automatic Send step was interrupted. The question was not sent.',
         state.recoveryTurn,
         { canRetry: !sendIntentPersisted },
       );
@@ -7699,10 +4274,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       const next = { ...state.settings };
       next[key] = target.type === 'checkbox' ? target.checked : target.value;
       state.settings = sanitizeSettings(next);
-      if (key === 'adaptiveRouting' && !state.settings.adaptiveRouting) {
-        if (state.adaptiveSendPromise) state.adaptiveCancelled = true;
-        state.submitReplayPermit = null;
-      }
       await saveSettings();
       syncSettingsUI();
       if (key === 'hideStartWriting') {
@@ -7716,260 +4287,38 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           hideSelectionPill();
         }
       }
-      if (key === 'adaptiveRouting') {
-        toast(state.settings.adaptiveRouting
-          ? 'Adaptive Auto enabled. Each message is classified locally when you press Send.'
-          : 'Adaptive Auto disabled. ChatGPT will keep using your current model selection.');
-      }
     }
 
-    function adaptiveApplies(composer) {
-      if (!composer) return false;
-      return state.settings.adaptiveRouting || Boolean(parseRouteOverride(getComposerText(composer)));
-    }
-
-    function composerContainsTarget(composer, target) {
-      const node = target && (target.nodeType === 1 ? target : target.parentElement);
-      return Boolean(composer && node && (node === composer || composer.contains(node)));
-    }
-
-    function sameSendIntent(left, right) {
-      return Boolean(left && right && left.path === right.path &&
-        left.surface && right.surface && left.surface.key === right.surface.key &&
-        (left.surface.sessionId || 0) === (right.surface.sessionId || 0) &&
-        left.conversationVersion === right.conversationVersion &&
-        left.draft === right.draft && left.attachmentSignature === right.attachmentSignature &&
-        left.toolSignature === right.toolSignature);
-    }
-
-    function launchAdaptiveTask(composer, snapshot) {
-      smartRouteAndSend({ composer, snapshot }).catch((error) => {
-        if (win.console && typeof win.console.error === 'function') win.console.error('[ChatGPT Workflow Toolkit] Adaptive send failed:', error);
-        toast('Adaptive Auto hit an unexpected error. Your draft was kept; press Alt+Send to bypass it.', 8_000);
-      }).finally(() => {
-        const pending = state.pendingAdaptiveSend;
-        if (!pending) return;
-        state.pendingAdaptiveSend = null;
-        const validation = validateSendSnapshot(pending.snapshot);
-        if (!validation.ok) return;
-        state.adaptiveCancelled = false;
-        launchAdaptiveTask(validation.composer, pending.snapshot);
-      });
-    }
-
-    function beginAdaptiveSend(event, composer, options = {}) {
-      if (state.replayingSend) return false;
-      const surface = options.surface || submissionSurface(composer, { submitter: options.submitter });
-      if (!surface) return false;
-      const bypass = options.altKey || event && event.altKey;
-      if (bypass) {
-        if (adaptiveApplies(composer)) armSubmitReplayPermit(composer, 'alt-bypass', null, surface);
-        return false;
-      }
-      if (!adaptiveApplies(composer)) return false;
-      state.submitReplayPermit = null;
-      const snapshot = captureSendSnapshot(composer, surface);
-      if (!snapshot || !snapshot.draft.trim() && snapshot.attachmentCount === 0) return false;
-      if (event) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      }
-      if (surface.kind === 'edit' && hasActiveGeneration(doc)) {
-        toast('Wait for ChatGPT to finish before resending an edited message.', 7_000);
-        return true;
-      }
-      if (state.adaptiveSendPromise) {
-        const queued = state.pendingAdaptiveSend && state.pendingAdaptiveSend.snapshot;
-        const retryAfterCancellation = state.adaptiveCancelled && !sameSendIntent(snapshot, queued);
-        if (retryAfterCancellation ||
-          !sameSendIntent(snapshot, state.activeAdaptiveSnapshot) && !sameSendIntent(snapshot, queued)) {
-          state.adaptiveCancelled = true;
-          state.pendingAdaptiveSend = { snapshot };
-        }
-        return true;
-      }
-      launchAdaptiveTask(composer, snapshot);
-      return true;
-    }
-
-    function onAdaptiveClick(event) {
-      if (state.replayingSend) return;
-      const control = event.target && event.target.closest && event.target.closest(
-        `${SUBMISSION_CONTROL_SELECTOR}, [role="menuitem"]`,
-      );
+    function onAutomationClick(event) {
+      if (!state.sideAutomationActive || state.replayingSend) return;
+      const control = event.target && event.target.closest && event.target.closest(SUBMISSION_CONTROL_SELECTOR);
       if (!control || control.closest(`#${UI_ROOT_ID}`)) return;
-      const label = lowerText(`${accessibleText(control)} ${control.value || ''}`);
-      const testId = lowerText(control.getAttribute('data-testid'));
-      const actionTurn = closestUserTurn(control);
-      const moreActionLabel = [
-        control.getAttribute('aria-label'),
-        control.getAttribute('title'),
-        control.textContent,
-        accessibleText(control),
-      ].some((value) => /^(?:more|more actions|more options|message actions|response actions)(?:\s*(?:\.\.\.|…|⋯))*$/iu.test(normalizeText(value)));
-      if (actionTurn && (moreActionLabel ||
-        /(?:more|menu)[-_ ]?(?:actions?|button)|message[-_ ]?actions?/iu.test(testId))) {
-        rememberEditMenuSource(actionTurn, control);
-        return;
-      }
-      const editAction = (/\bedit(?: message)?\b/iu.test(label) || /edit[-_ ]?(?:message|prompt)/iu.test(testId)) &&
-        !/\b(?:send|submit|resend)\b/iu.test(label);
-      const editActionTurn = actionTurn || editAction && editMenuSourceTurn(control);
-      if (editActionTurn && editAction &&
-        !/\b(?:send|submit|resend)\b/iu.test(label)) {
-        state.pendingEditMenuSource = null;
-        startEditSession(editActionTurn, control);
-        return;
-      }
-      if (/\b(?:cancel|discard)(?:\s+edit)?\b/iu.test(label) &&
-        !/\b(?:send|submit|resend)\b/iu.test(label) && cancelBelongsToEditSurface(control, actionTurn)) {
-        clearEditSession();
-        if (state.activeAdaptiveSnapshot && state.activeAdaptiveSnapshot.surface &&
-          state.activeAdaptiveSnapshot.surface.kind === 'edit') state.adaptiveCancelled = true;
-        state.pendingAdaptiveSend = null;
-        return;
-      }
-      const surface = interactionSurface(control, { submitter: control });
-      if (!surface) return;
-      const composer = resolveSurfaceComposer(surface, null, true);
-      if (!composer) return;
-      const validSend = surface.kind === 'edit'
-        ? isEditSubmissionControl(control, composer, surfaceTurn(surface)) ||
-          sessionPortalControl(control, composer, 'send')
-        : control.matches(SEND_BUTTON_SELECTORS.join(', ')) && control === findSendButton(doc, composer);
-      if (!validSend) return;
-      if (state.sideAutomationActive) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        return;
-      }
-      beginAdaptiveSend(event, composer, { surface, submitter: control });
+      const composer = findComposer(doc);
+      if (!composer || control !== findSendButton(doc, composer)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
     }
 
-    function onAdaptiveKeyDown(event) {
-      if (event.key === 'Escape' && state.adaptiveSendPromise) {
-        state.adaptiveCancelled = true;
-        state.pendingAdaptiveSend = null;
-        const activeSurface = state.activeAdaptiveSnapshot && state.activeAdaptiveSnapshot.surface;
-        const editSession = state.pendingEditSession;
-        const preserveBoundEdit = Boolean(activeSurface && activeSurface.kind === 'edit' &&
-          activeSurface.sessionId && editSession && editSession.id === activeSurface.sessionId &&
-          editSession.composerRef && editSession.composerRef.isConnected);
-        if (!preserveBoundEdit) clearEditSession();
-        return;
-      }
-      if (event.key === 'Escape') clearEditSession();
-      if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
-      const surface = interactionSurface(event.target);
-      if (!surface) return;
-      const composer = resolveSurfaceComposer(surface, null, true);
-      if (!composer || !composerContainsTarget(composer, event.target) || state.composingComposer === composer) return;
-      if (state.sideAutomationActive && !state.replayingSend) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        return;
-      }
-      if (event.altKey) {
-        beginAdaptiveSend(null, composer, { altKey: true, surface });
-        return;
-      }
-      const sendButton = sendControlForSurface(surface, composer);
-      if (!sendButton || sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') return;
-      const activeDescendantId = normalizeText(composer.getAttribute('aria-activedescendant'));
-      const activeDescendant = activeDescendantId ? doc.getElementById(activeDescendantId) : null;
-      const ownedPopupIds = normalizeText(
-        `${composer.getAttribute('aria-controls') || ''} ${composer.getAttribute('aria-owns') || ''}`,
-      ).split(/\s+/u).filter(Boolean);
-      const suggestionRoots = uniqueElements([
-        surface.kind === 'edit' ? editPortalScope(composer) || composerScope(composer) : composerScope(composer),
-        ...ownedPopupIds.map((id) => doc.getElementById(id)),
-      ]);
-      const selectedSuggestion = activeDescendant && isProbablyVisible(activeDescendant)
-        ? activeDescendant
-        : uniqueElements(suggestionRoots.flatMap((root) => [...root.querySelectorAll(
-          '[role="option"][aria-selected="true"], [role="option"][data-highlighted], [role="menuitem"][data-highlighted]',
-        )]))
-        .find((node) => isProbablyVisible(node) && !node.closest(`#${UI_ROOT_ID}`));
-      if (selectedSuggestion && !event.metaKey && !event.ctrlKey) return;
-      beginAdaptiveSend(event, composer, { surface, submitter: sendButton });
+    function onAutomationKeyDown(event) {
+      if (!state.sideAutomationActive || state.replayingSend || event.key !== 'Enter' ||
+        event.shiftKey || event.isComposing) return;
+      const composer = findComposer(doc);
+      if (!composer || event.target !== composer && !composer.contains(event.target)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
     }
 
-    function onAdaptiveSubmit(event) {
+    function onAutomationSubmit(event) {
       const form = event.target && event.target.nodeType === 1 ? event.target : null;
       if (!form || !form.matches('form')) return;
-      const submitter = event.submitter && event.submitter.nodeType === 1 ? event.submitter : null;
-      if (state.submitReplayPermit && state.submitReplayPermit.form === form) {
-        const exactComposer = findComposerInScope(form, submitter || form);
-        const exactResult = consumeSubmitReplayPermit(event, exactComposer, null);
-        if (exactResult === 'allow') return;
-        if (exactResult === 'duplicate') {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          return;
-        }
-      }
-      if (state.replayingSend) {
-        let replaySurface = interactionSurface(submitter || form, { form, submitter });
-        let replayComposer = replaySurface
-          ? resolveSurfaceComposer(replaySurface, null, true)
-          : findComposerInScope(form, submitter || form);
-        if (!replaySurface) {
-          const mounted = mountedEditReplayCandidate(form, submitter);
-          if (mounted) {
-            replaySurface = mounted.surface;
-            replayComposer = mounted.composer;
-          }
-        }
-        const replayResult = consumeSubmitReplayPermit(event, replayComposer, replaySurface);
-        if (replayResult === 'allow') return;
+      const composer = findComposerInScope(form, event.submitter || form);
+      if (!composer) return;
+      const replay = consumeAutomationReplayPermit(event, composer);
+      if (replay === 'allow') return;
+      if (replay === 'duplicate' || state.sideAutomationActive) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        return;
       }
-      if (submitter) {
-        const submitterLabel = lowerText(`${accessibleText(submitter)} ${submitter.value || ''}`);
-        const submitterTestId = lowerText(submitter.getAttribute('data-testid'));
-        if ((/\b(?:cancel|discard|close)(?:\s+edit)?\b/iu.test(submitterLabel) ||
-          /(?:cancel|discard|close)[-_ ]?(?:edit|message|prompt)?/iu.test(submitterTestId)) &&
-          !/\b(?:send|submit|resend)\b/iu.test(submitterLabel)) return;
-      }
-      const surface = interactionSurface(event.submitter || form, { form, submitter: event.submitter || null });
-      if (!surface) return;
-      const composer = resolveSurfaceComposer(surface, null, true);
-      if (!composer || form !== composer.closest('form')) return;
-      if (surface.kind === 'edit' && submitter &&
-        !isEditSubmissionControl(submitter, composer, surfaceTurn(surface))) return;
-      // ChatGPT may dispatch the actual form submit shortly after our
-      // programmatic Send click returns. Let only that short-lived, exact
-      // composer replay through while the broader side-job guard stays active.
-      if (state.sideAutomationActive) {
-        const replayResult = state.submitReplayPermit && state.submitReplayPermit.kind === 'adaptive-replay'
-          ? consumeSubmitReplayPermit(event, composer, surface)
-          : false;
-        if (replayResult === 'allow') return;
-        state.submitReplayPermit = null;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        return;
-      }
-      const replayResult = consumeSubmitReplayPermit(event, composer, surface);
-      if (replayResult === 'allow') return;
-      if (replayResult === 'duplicate') {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        return;
-      }
-      beginAdaptiveSend(event, composer, { surface, submitter: event.submitter || null });
-    }
-
-    function onCompositionStart(event) {
-      const surface = interactionSurface(event.target);
-      const composer = surface && resolveSurfaceComposer(surface, null, true);
-      if (composerContainsTarget(composer, event.target)) state.composingComposer = composer;
-    }
-
-    function onCompositionEnd(event) {
-      if (state.composingComposer && composerContainsTarget(state.composingComposer, event.target)) state.composingComposer = null;
     }
 
     async function onClick(event) {
@@ -7996,8 +4345,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         openSettings();
       } else if (action === 'close-settings') {
         closeSettings();
-      } else if (action === 'select-instant') {
-        await ensureInstant({ userInitiated: true });
       } else if (action === 'cancel-question') {
         closeQuestion();
       } else if (action === 'submit-question') {
@@ -8078,263 +4425,25 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       win.requestAnimationFrame(updateSelectionPill);
     }
 
-    function mutationElement(node) {
-      if (!node) return null;
-      return node.nodeType === 1 ? node : node.parentElement;
-    }
-
-    function isToolkitMutationNode(node) {
-      const target = mutationElement(node);
-      return Boolean(target && (
-        target.matches(`#${UI_ROOT_ID}, .${TURN_BUTTON_CLASS}, .cgs-turn-fallback-row`) ||
-        target.closest(`#${UI_ROOT_ID}, .${TURN_BUTTON_CLASS}, .cgs-turn-fallback-row`)
-      ));
-    }
-
-    function nodeIsInsideConversation(node) {
-      const target = mutationElement(node);
-      if (!target || isToolkitMutationNode(target)) return false;
-      return Boolean(
-        target.matches(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`) ||
-        target.closest(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`),
-      );
-    }
-
-    function nodeTouchesConversation(node) {
-      const target = mutationElement(node);
-      return Boolean(target && !isToolkitMutationNode(target) && (
-        nodeIsInsideConversation(target) || target.querySelector(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`)
-      ));
-    }
-
-    function visibilityMutationChangesConversation(node, attributeName = '', oldValue = '') {
-      const target = mutationElement(node);
-      if (!target || isToolkitMutationNode(target)) return false;
-      const recordedComputedVisibilityChanged = () => {
-        if (!state.routingComputedVisibility.has(target) || typeof win.getComputedStyle !== 'function') return false;
-        const previous = state.routingComputedVisibility.get(target);
-        let current = false;
-        try {
-          const style = win.getComputedStyle(target);
-          current = style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' ||
-            style.contentVisibility === 'hidden';
-        } catch (_error) {
-          return false;
-        }
-        state.routingComputedVisibility.set(target, current);
-        return previous !== current;
-      };
-      if (target.matches(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`)) {
-        if (attributeName === 'class') {
-          return classTokensHideContent(oldValue) !== classTokensHideContent(target.getAttribute('class')) ||
-            classMayControlVisibility(oldValue) !== classMayControlVisibility(target.getAttribute('class')) ||
-            recordedComputedVisibilityChanged();
-        }
-        if (attributeName === 'style') {
-          return inlineStyleHidesContent(oldValue) !== inlineStyleHidesContent(target.getAttribute('style')) ||
-            recordedComputedVisibilityChanged();
-        }
-        return true;
-      }
-      if (target.closest(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`)) {
-        // Class/style churn inside code blocks and controls is common while a
-        // response is hovered or highlighted; it is not a branch swap.
-        if (attributeName === 'class') {
-          return classTokensHideContent(oldValue) !== classTokensHideContent(target.getAttribute('class')) ||
-            classMayControlVisibility(oldValue) !== classMayControlVisibility(target.getAttribute('class')) ||
-            recordedComputedVisibilityChanged();
-        }
-        if (attributeName === 'style') {
-          return inlineStyleHidesContent(oldValue) !== inlineStyleHidesContent(target.getAttribute('style')) ||
-            recordedComputedVisibilityChanged();
-        }
-        return true;
-      }
-      const containedTurns = getTurns(target);
-      if (!containedTurns.length) return false;
-      const allTurns = getTurns(doc);
-      // Modal menus may temporarily mark the entire app aria-hidden. That is
-      // not a branch/context change; a hidden subset of turns is.
-      return containedTurns.length < allTurns.length;
-    }
-
-    function nodeTouchesGenerationControl(node) {
-      const target = mutationElement(node);
-      if (!target) return false;
-      const selector = 'button[data-testid="stop-button"], button[data-testid*="stop-generating"], button[aria-label^="Stop generating" i], button[aria-label^="Stop streaming" i]';
-      return target.matches(selector) || Boolean(target.querySelector(selector));
-    }
-
-    function conversationTurnForNode(node, allowArticleFallback = false) {
-      const target = mutationElement(node);
-      if (!target) return null;
-      const primary = target.matches(TURN_SELECTOR) ? target : target.closest(TURN_SELECTOR);
-      if (primary) return primary;
-      const roleNode = target.matches(ROLE_SELECTOR) ? target : target.closest(ROLE_SELECTOR);
-      if (roleNode) return roleNode.closest('article') || roleNode;
-      return allowArticleFallback ? target.closest('article') || target : null;
-    }
-
-    function nodeLooksLikeAttachment(node) {
-      const target = mutationElement(node);
-      if (!target) return false;
-      const selector = '[data-file-id], [data-attachment-id], [data-testid*="attachment"], [data-testid*="file-pill"], [aria-label*="file" i], [aria-label*="attachment" i]';
-      return target.matches(selector) || Boolean(target.closest(selector));
-    }
-
-    function nodeIsInsideLiveEditor(node) {
-      const target = mutationElement(node);
-      if (!target) return false;
-      const editor = target.matches(LOCAL_COMPOSER_SELECTOR)
-        ? target
-        : target.closest(LOCAL_COMPOSER_SELECTOR);
-      if (!editor || !editor.isConnected || editor.closest(`#${UI_ROOT_ID}`) || !closestUserTurn(editor)) return false;
-      if (editor.tagName === 'TEXTAREA') return !editor.disabled && !editor.readOnly;
-      const editable = lowerText(editor.getAttribute('contenteditable'));
-      return editor.isContentEditable || editable === 'true' || editable === 'plaintext-only';
-    }
-
-    function evictHistoricalAttachmentCache(mutation) {
-      const roleChanged = mutation.type === 'attributes' &&
-        ['data-message-author-role', 'data-turn'].includes(mutation.attributeName);
-      const nodes = [mutation.target, ...mutation.addedNodes, ...mutation.removedNodes];
-      for (const node of nodes) {
-        const turn = conversationTurnForNode(node, roleChanged && node === mutation.target);
-        if (turn) state.historicalAttachmentCache.delete(turn);
-      }
-    }
-
-    function mutationChangesConversation(mutation) {
-      if (!mutation || isToolkitMutationNode(mutation.target)) return false;
-      if ((mutation.type === 'characterData' || mutation.type === 'childList') &&
-        nodeIsInsideLiveEditor(mutation.target)) return false;
-      if (mutation.type === 'characterData') return nodeIsInsideConversation(mutation.target);
-      if (mutation.type === 'attributes') {
-        const name = mutation.attributeName || '';
-        if (name === 'data-message-author-role' || name === 'data-turn') return true;
-        if (name === 'hidden' || name === 'inert' || name === 'aria-hidden' || name === 'data-state' || name === 'style' || name === 'class') {
-          return visibilityMutationChangesConversation(mutation.target, name, mutation.oldValue);
-        }
-        if (['data-is-streaming', 'data-streaming', 'data-file-id', 'data-attachment-id', 'data-file-name',
-          'data-filename', 'data-name', 'data-mime-type', 'data-file-type', 'data-file-size', 'data-size'].includes(name)) {
-          return nodeIsInsideConversation(mutation.target);
-        }
-        if (name === 'data-testid') {
-          return nodeIsInsideConversation(mutation.target) || /^conversation-turn-/u.test(String(mutation.oldValue || ''));
-        }
-        if (name === 'aria-label' || name === 'title') {
-          return nodeIsInsideConversation(mutation.target) && nodeLooksLikeAttachment(mutation.target);
-        }
-        return false;
-      }
-      const changed = [...mutation.addedNodes, ...mutation.removedNodes]
-        .filter((node) => !isToolkitMutationNode(node));
-      if (!changed.length) return false;
-      return nodeIsInsideConversation(mutation.target) || changed.some((node) =>
-        nodeTouchesConversation(node) || nodeTouchesGenerationControl(node));
-    }
-
-    function conversationMutationImpact(mutations) {
-      const affectedTurns = new Set();
-      let structural = false;
-      const recordTurn = (turn) => {
-        if (!turn) return false;
-        affectedTurns.add(turn);
-        return true;
-      };
-      for (const mutation of mutations) {
-        const roleChanged = mutation.type === 'attributes' &&
-          ['data-message-author-role', 'data-turn'].includes(mutation.attributeName);
-        const visibilityChanged = mutation.type === 'attributes' &&
-          ['hidden', 'inert', 'aria-hidden', 'data-state', 'style', 'class'].includes(mutation.attributeName);
-        const targetTurn = conversationTurnForNode(mutation.target, roleChanged);
-        const target = mutationElement(mutation.target);
-        const membershipVisibilityChange = visibilityChanged && Boolean(target) && (
-          target.matches(`${TURN_SELECTOR}, ${ROLE_SELECTOR}`) || !targetTurn
-        );
-        if (membershipVisibilityChange) structural = true;
-        const targetRecorded = membershipVisibilityChange ? false : recordTurn(targetTurn);
-        if (mutation.type !== 'childList') continue;
-        let changedTurnRecorded = false;
-        for (const node of mutation.addedNodes) {
-          for (const turn of potentialTurnsFromRoot(node)) {
-            if (recordTurn(turn)) {
-              changedTurnRecorded = true;
-              structural = true;
-            }
-          }
-        }
-        for (const node of mutation.removedNodes) {
-          const removedTurns = potentialTurnsFromRoot(node);
-          if (removedTurns.length) {
-            structural = true;
-            for (const turn of removedTurns) recordTurn(turn);
-          }
-        }
-        if (!targetRecorded && !changedTurnRecorded &&
-          [...mutation.addedNodes, ...mutation.removedNodes].some(nodeTouchesConversation)) structural = true;
-      }
-      return { structural, turns: [...affectedTurns] };
-    }
-
     function observe() {
       state.observer = new win.MutationObserver((mutations) => {
-        const pendingSession = state.pendingEditSession;
-        if (pendingSession && (!pendingSession.composerRef || !pendingSession.composerRef.isConnected) &&
-          mutations.some((mutation) => mutation.type === 'childList' && mutation.addedNodes.length > 0)) {
-          const editSession = activeEditSession();
-          bindEditSession(editSession);
-        }
-        let conversationChanged = false;
-        const changedMutations = [];
         for (const mutation of mutations) {
-          const changesConversation = mutationChangesConversation(mutation);
-          if (changesConversation) {
-            conversationChanged = true;
-            changedMutations.push(mutation);
-          }
           if (mutation.type === 'attributes') {
-            const name = mutation.attributeName || '';
-            const selectorRelevant = [
-              'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label',
-              'data-message-author-role', 'data-turn', 'data-testid', 'data-is-streaming', 'data-streaming',
-            ].includes(name);
-            const visibilityRelevant = changesConversation &&
-              ['hidden', 'inert', 'aria-hidden', 'data-state', 'style', 'class'].includes(name);
-            if (selectorRelevant || visibilityRelevant) scheduleScan(mutation.target);
+            scheduleScan(mutation.target);
           } else {
             for (const node of mutation.addedNodes) scheduleScan(node);
             if (mutation.removedNodes.length) scheduleScan(mutation.target);
           }
-        }
-        if (conversationChanged) {
-          for (const mutation of mutations) evictHistoricalAttachmentCache(mutation);
-          state.conversationMutationVersion += 1;
-          const impact = conversationMutationImpact(changedMutations);
-          state.conversationMutationHistory.push({
-            version: state.conversationMutationVersion,
-            structural: impact.structural,
-            turns: impact.turns,
-          });
-          if (state.conversationMutationHistory.length > 100) {
-            state.conversationMutationHistory.splice(0, state.conversationMutationHistory.length - 100);
-          }
-          state.conversationRoutingCache = null;
-          state.editConversationRoutingCache.clear();
         }
       });
       state.observer.observe(doc.body, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeOldValue: true,
-        characterData: true,
         attributeFilter: [
-          'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label', 'title',
+          'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label',
           'hidden', 'inert', 'aria-hidden', 'data-state', 'style', 'class',
           'data-message-author-role', 'data-turn', 'data-testid', 'data-is-streaming', 'data-streaming',
-          'data-file-id', 'data-attachment-id', 'data-file-name', 'data-filename', 'data-name',
-          'data-mime-type', 'data-file-type', 'data-file-size', 'data-size',
         ],
       });
     }
@@ -8352,11 +4461,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       state.settings = sanitizeSettings(await storageGet(SETTINGS_KEY, DEFAULT_SETTINGS));
       state.root = createUI(doc);
       syncSettingsUI();
-      doc.addEventListener('click', onAdaptiveClick, true);
-      doc.addEventListener('keydown', onAdaptiveKeyDown, true);
-      doc.addEventListener('submit', onAdaptiveSubmit, true);
-      doc.addEventListener('compositionstart', onCompositionStart, true);
-      doc.addEventListener('compositionend', onCompositionEnd, true);
+      doc.addEventListener('click', onAutomationClick, true);
+      doc.addEventListener('keydown', onAutomationKeyDown, true);
+      doc.addEventListener('submit', onAutomationSubmit, true);
       doc.addEventListener('input', scheduleDockPosition, true);
       doc.addEventListener('click', onClick, true);
       doc.addEventListener('keydown', onKeyDown, true);
@@ -8381,12 +4488,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     return {
       start,
       state,
-      ensureInstant,
-      smartRouteAndSend,
-      captureSendSnapshot,
-      attachmentProfileFromText,
       launchBranch,
       runIncomingJob,
+      sendComposerAutomatically,
       processRoot,
       toast,
     };
@@ -8482,19 +4586,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     findSendButton,
     waitForConversationChange,
     waitForStableComposer,
-    extractModelLevel,
-    extractPickerLevel,
-    modelLevelRank,
-    modelLevelLabel,
-    accountRoutingCapability,
-    parseRouteOverride,
-    buildAttachmentProfile,
-    classifyPrompt,
-    chooseModelOption,
-    findModelPicker,
-    findReasoningPicker,
-    findModelOptions,
-    findInstantOption,
     findMoreButton,
     isBranchLabel,
     findBranchAction,

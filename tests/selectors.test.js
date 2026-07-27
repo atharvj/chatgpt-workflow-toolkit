@@ -97,10 +97,10 @@ test('conversation change ignores query-only navigation and requires a different
   const dom = createDom('<main></main>');
   const changed = toolkit.waitForConversationChange(dom.window, 'test', 1_200);
   dom.window.setTimeout(() => {
-    dom.window.history.pushState({}, '', '/c/test?model=instant');
+    dom.window.history.pushState({}, '', '/c/test?view=compact');
   }, 75);
   dom.window.setTimeout(() => {
-    dom.window.history.pushState({}, '', '/c/separate-chat?model=instant');
+    dom.window.history.pushState({}, '', '/c/separate-chat?view=compact');
   }, 300);
 
   assert.equal(await changed, 'separate-chat');
@@ -171,103 +171,6 @@ test('findSendButton supports no-form and externally form-associated edit Send c
     </article><form><textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></form></main>
   `).window.document;
   assert.equal(toolkit.findSendButton(external, external.querySelector('#edit-composer')), external.querySelector('#edit-send'));
-});
-
-test('model levels are extracted from exact and descriptive labels', () => {
-  assert.equal(toolkit.extractModelLevel('Instant'), 'instant');
-  assert.equal(toolkit.extractModelLevel('GPT-5 · Pro Extended thinking'), 'pro-extended');
-  assert.equal(toolkit.extractModelLevel('Use extra high reasoning'), 'extra-high');
-  assert.equal(toolkit.extractModelLevel('Pro'), 'pro');
-  assert.equal(toolkit.extractModelLevel('Automatic switching'), '');
-});
-
-test('findModelPicker uses preferred controls in the composer scope', () => {
-  const { document } = createDom(`
-    <main><form>
-      <textarea id="prompt-textarea"></textarea>
-      <button data-testid="model-switcher" id="picker">GPT-5 High</button>
-      <div id="cgs-root"><button data-testid="model-picker" id="toolkit-picker">Auto</button></div>
-    </form></main>
-  `).window;
-
-  assert.equal(toolkit.findModelPicker(document), document.querySelector('#picker'));
-});
-
-test('findModelPicker falls back to a visible button with a model level', () => {
-  const { document } = createDom(`
-    <main><form>
-      <textarea id="prompt-textarea"></textarea>
-      <button id="unrelated">Tools</button>
-      <button id="picker">Medium reasoning</button>
-    </form></main>
-  `).window;
-
-  assert.equal(toolkit.findModelPicker(document), document.querySelector('#picker'));
-});
-
-test('findModelPicker ignores unrelated controls whose label merely mentions model', () => {
-  const dom = createDom(`<main>
-    <button aria-label="Model response feedback" aria-haspopup="menu" aria-expanded="false">Feedback</button>
-    <form><textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></form>
-  </main>`);
-  assert.equal(toolkit.findModelPicker(dom.window.document), null);
-});
-
-test('findReasoningPicker prefers a separate effort control', () => {
-  const { document } = createDom(`
-    <main><form>
-      <textarea id="prompt-textarea"></textarea>
-      <button data-testid="model-switcher" id="model">Thinking</button>
-      <button aria-label="Reasoning effort: High" id="effort">High</button>
-    </form></main>
-  `).window;
-
-  assert.equal(toolkit.findReasoningPicker(document), document.querySelector('#effort'));
-});
-
-test('model and reasoning helpers keep distinct current composer pills', () => {
-  const { document } = createDom(`
-    <main><div data-composer-surface="true"><form>
-      <button class="__composer-pill" id="radix-model" data-testid="model-switcher-dropdown-button" aria-haspopup="menu">GPT-5.5</button>
-      <textarea id="prompt-textarea"></textarea>
-      <button class="__composer-pill" id="radix-intelligence" aria-haspopup="menu" aria-label="Intelligence level: High">High</button>
-      <button data-testid="send-button">Send</button>
-    </form></div></main>
-  `).window;
-
-  const modelPicker = toolkit.findModelPicker(document);
-  const reasoningPicker = toolkit.findReasoningPicker(document);
-  assert.equal(modelPicker, document.querySelector('#radix-model'));
-  assert.equal(reasoningPicker, document.querySelector('#radix-intelligence'));
-  assert.notEqual(reasoningPicker, modelPicker);
-});
-
-test('findReasoningPicker ignores a generic Tools composer pill', () => {
-  const { document } = createDom(`
-    <main><div data-composer-surface="true"><form>
-      <button class="__composer-pill" id="radix-model" data-testid="model-switcher-dropdown-button" aria-haspopup="menu">High</button>
-      <textarea id="prompt-textarea"></textarea>
-      <button class="__composer-pill" id="radix-tools" aria-haspopup="menu">Tools</button>
-      <button data-testid="send-button">Send</button>
-    </form></div></main>
-  `).window;
-
-  assert.equal(toolkit.findModelPicker(document), document.querySelector('#radix-model'));
-  assert.equal(toolkit.findReasoningPicker(document), null);
-});
-
-test('findInstantOption selects a visible menu option outside Workflow Toolkit UI', () => {
-  const { document } = createDom(`
-    <button id="picker">High</button>
-    <div role="option" id="hidden" hidden>Instant</div>
-    <div id="cgs-root"><div role="option" id="toolkit-option">Instant</div></div>
-    <div role="menuitem" id="instant" aria-label="Instant — fast answers"></div>
-  `).window;
-
-  assert.equal(
-    toolkit.findInstantOption(document, document.querySelector('#picker')),
-    document.querySelector('#instant'),
-  );
 });
 
 test('findMoreButton supports preferred selectors and ellipsis fallback', () => {

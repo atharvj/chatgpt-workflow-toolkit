@@ -601,7 +601,7 @@ test('missing native response actions automatically transfer context to a blank 
       stored.set(key, value);
       if (destinationDom && value && value.sendAttempted && !sendPersistenceReplacementCount) {
         sendPersistenceReplacementCount += 1;
-        destinationDom.window.document.querySelector('form').innerHTML = '<button type="button" data-testid="model-switcher-dropdown-button" aria-label="Instant">Instant</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
+        destinationDom.window.document.querySelector('form').innerHTML = '<textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
       }
     },
     async deleteValue(key) { stored.delete(key); },
@@ -652,7 +652,7 @@ test('missing native response actions automatically transfer context to a blank 
     assert.match(savedFallback.fallbackTranscript, /ASSISTANT:\nOpen results\.csv/u);
 
     destinationDom = new JSDOM(`<!doctype html><html><body><main>
-      <form><button type="button" data-testid="model-switcher-dropdown-button" aria-label="Instant">Instant</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+      <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
     </main></body></html>`, {
       url: fallbackUrl,
       pretendToBeVisual: true,
@@ -670,7 +670,7 @@ test('missing native response actions automatically transfer context to a blank 
       composerReplacementCount += 1;
       destinationDom.window.setTimeout(() => {
         destinationDom.window.history.pushState({}, '', `/c/fallback-side-chat#cwt-job=${jobId}`);
-        destinationDocument.querySelector('form').innerHTML = '<button type="button" data-testid="model-switcher-dropdown-button" aria-label="Instant">Instant</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
+        destinationDocument.querySelector('form').innerHTML = '<textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button>';
       }, 20);
     });
     destinationMain.addEventListener('click', (event) => {
@@ -702,7 +702,6 @@ test('missing native response actions automatically transfer context to a blank 
     assert.equal(composerReplacementCount, 1, 'a route transition and composer hydration are absorbed before Send');
     assert.equal(sendPersistenceReplacementCount, 1, 'a write-ahead persistence remount is restaged before Send');
     assert.equal(sendSawBoundWriteAhead, true, 'the owned destination and Send intent are persisted before the click');
-    assert.equal(destinationApp.state.settings.adaptiveRouting, true, 'the default Adaptive Auto path performs the send');
     assert.match(sentPrompt, /--- PREVIOUS CONVERSATION ---/u);
     assert.match(sentPrompt, /Open results\.csv, then compare both groups\./u);
     assert.match(sentPrompt, /--- SIDE QUESTION ---\nWhy do I need to compare both groups\?$/u);
@@ -731,7 +730,7 @@ test('an already-staged fallback draft reformatted by ChatGPT auto-sends exactly
     .replace('conversation as context', 'conversation\u00a0as context')
     .replace('resolve a disagreement', 'resolve\u200B a disagreement');
   const stored = new Map([
-    ['chatgptSidecar.settings.v1', { ...toolkit.DEFAULT_SETTINGS, adaptiveRouting: false }],
+    ['chatgptSidecar.settings.v1', { ...toolkit.DEFAULT_SETTINGS }],
     [storageKey, toolkit.sanitizeJob({
       createdAt: Date.now(),
       sourceUrl: 'https://chatgpt.com/c/source-chat',
@@ -1027,8 +1026,8 @@ test('fallback caps large-prompt restaging when ChatGPT repeatedly replaces the 
   }
 });
 
-test('fallback routing failure sends once with the current model instead of stranding the question', async () => {
-  const jobId = 'fallback_routing_retry_1234';
+test('fallback sends a staged question exactly once', async () => {
+  const jobId = 'fallback_send_once_1234';
   const stored = new Map();
   const storageKey = `chatgptSidecar.job.v1.${jobId}`;
   stored.set(storageKey, toolkit.sanitizeJob({
@@ -1068,20 +1067,19 @@ test('fallback routing failure sends once with the current model instead of stra
     role.textContent = prompt;
     userTurn.append(role);
     dom.window.document.querySelector('main').insertBefore(userTurn, dom.window.document.querySelector('form'));
-    dom.window.history.pushState({}, '', `/c/fallback-current-model#cwt-job=${jobId}`);
+    dom.window.history.pushState({}, '', `/c/fallback-sent#cwt-job=${jobId}`);
   });
   const app = toolkit.createApp(dom.window.document, dom.window, {
     initialJobId: jobId,
     pageInstanceId: 'fallback_destination_page_1234',
-    routingDiscoveryTimeout: 100,
   });
 
   try {
     await app.start();
-    assert.equal(sendCount, 1, 'missing model controls fall back to the current model exactly once');
+    assert.equal(sendCount, 1);
     assert.equal(stored.has(storageKey), false, 'the acknowledged one-shot job is cleaned up');
     assert.equal(dom.window.document.querySelector('#cgs-recovery-backdrop').hidden, true);
-    assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'fallback-current-model');
+    assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'fallback-sent');
     assert.equal(dom.window.document.querySelector('#cgs-toast').textContent, 'Side question sent in the separate chat.');
   } finally {
     if (app.state.observer) app.state.observer.disconnect();
@@ -1091,7 +1089,7 @@ test('fallback routing failure sends once with the current model instead of stra
   }
 });
 
-test('fallback sends a claimed-answer challenge with the current model and an accuracy guard', async () => {
+test('fallback sends a claimed-answer challenge with an accuracy guard', async () => {
   const jobId = 'fallback_accuracy_guard_1234';
   const storageKey = `chatgptSidecar.job.v1.${jobId}`;
   const question = "I don't get why the answer is 12V and 4V.";
@@ -1135,7 +1133,6 @@ test('fallback sends a claimed-answer challenge with the current model and an ac
   const app = toolkit.createApp(dom.window.document, dom.window, {
     initialJobId: jobId,
     pageInstanceId: 'fallback_accuracy_destination_1234',
-    routingDiscoveryTimeout: 100,
   });
 
   try {
@@ -1153,108 +1150,6 @@ test('fallback sends a claimed-answer challenge with the current model and an ac
   }
 });
 
-test('fallback never turns an explicit-route failure into an unintended current-model Send', async () => {
-  const jobId = 'fallback_explicit_route_guard_1234';
-  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
-  const stored = new Map([[storageKey, toolkit.sanitizeJob({
-    createdAt: Date.now(),
-    sourceUrl: 'https://chatgpt.com/c/source-chat',
-    kind: 'ask',
-    question: '!route:pro solve this only with Pro',
-    autoSend: false,
-    fallbackMode: true,
-    fallbackTranscript: 'USER:\nOriginal context',
-    branchReloadFrom: 'fallback_source_page_1234',
-  })]]);
-  const previousGM = globalThis.GM;
-  globalThis.GM = {
-    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
-    async setValue(key, value) { stored.set(key, value); },
-    async deleteValue(key) { stored.delete(key); },
-  };
-  const dom = new JSDOM(`<!doctype html><html><body><main>
-    <form><button type="button" data-testid="model-switcher-dropdown-button" aria-label="Instant">Instant</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
-  </main></body></html>`, {
-    url: `https://chatgpt.com/#cwt-job=${jobId}`,
-    pretendToBeVisual: true,
-  });
-  const locks = createIfAvailableLockManager();
-  Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
-  let sendCount = 0;
-  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sendCount += 1; });
-  const app = toolkit.createApp(dom.window.document, dom.window, {
-    initialJobId: jobId,
-    pageInstanceId: 'fallback_destination_page_1234',
-    routingDiscoveryTimeout: 100,
-  });
-
-  try {
-    await app.start();
-    const saved = stored.get(storageKey);
-    assert.equal(sendCount, 0);
-    assert.equal(saved.autoSend, true, 'Ask jobs remain automatic even when stale state says otherwise');
-    assert.equal(saved.sendAttempted, false, 'an explicit routing failure never persists Send intent');
-    assert.equal(dom.window.document.querySelector('[data-cgs-action="retry-branch"]').hidden, false);
-    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /interrupted before Send/iu);
-  } finally {
-    if (app.state.observer) app.state.observer.disconnect();
-    if (previousGM === undefined) delete globalThis.GM;
-    else globalThis.GM = previousGM;
-    dom.window.close();
-  }
-});
-
-test('cancelling side-chat model routing never falls through to a current-model Send', async () => {
-  const jobId = 'fallback_cancel_route_guard_1234';
-  const storageKey = `chatgptSidecar.job.v1.${jobId}`;
-  const stored = new Map([[storageKey, toolkit.sanitizeJob({
-    createdAt: Date.now(),
-    sourceUrl: 'https://chatgpt.com/c/source-chat',
-    kind: 'ask',
-    question: 'what is 2+2',
-    fallbackMode: true,
-    fallbackTranscript: 'USER:\nOriginal context',
-    branchReloadFrom: 'fallback_source_page_1234',
-  })]]);
-  const previousGM = globalThis.GM;
-  globalThis.GM = {
-    async getValue(key, fallback) { return stored.has(key) ? stored.get(key) : fallback; },
-    async setValue(key, value) { stored.set(key, value); },
-    async deleteValue(key) { stored.delete(key); },
-  };
-  const dom = new JSDOM(`<!doctype html><html><body><main>
-    <form><button id="model" type="button" data-testid="model-switcher-dropdown-button" aria-label="High">High</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
-  </main></body></html>`, {
-    url: `https://chatgpt.com/#cwt-job=${jobId}`,
-    pretendToBeVisual: true,
-  });
-  const locks = createIfAvailableLockManager();
-  Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
-  let sendCount = 0;
-  dom.window.document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sendCount += 1; });
-  dom.window.document.querySelector('#model').addEventListener('pointerdown', () => {
-    dom.window.setTimeout(() => {
-      dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    }, 10);
-  }, { once: true });
-  const app = toolkit.createApp(dom.window.document, dom.window, {
-    initialJobId: jobId,
-    pageInstanceId: 'fallback_destination_page_1234',
-    routingDiscoveryTimeout: 300,
-  });
-
-  try {
-    await app.start();
-    assert.equal(sendCount, 0);
-    assert.equal(stored.get(storageKey).sendAttempted, false);
-    assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /interrupted before Send/iu);
-  } finally {
-    if (app.state.observer) app.state.observer.disconnect();
-    if (previousGM === undefined) delete globalThis.GM;
-    else globalThis.GM = previousGM;
-    dom.window.close();
-  }
-});
 
 test('fallback reload recognizes its transfer marker without clicking Send again', async () => {
   const jobId = 'fallback_reload_marker_1234';
@@ -1331,7 +1226,7 @@ test('blank fallback destination retries a briefly busy navigation lock', async 
     async deleteValue(key) { stored.delete(key); },
   };
   const dom = new JSDOM(`<!doctype html><html><body><main>
-    <form><button type="button" data-testid="model-switcher-dropdown-button" aria-label="Instant">Instant</button><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
+    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
   </main></body></html>`, {
     url: `https://chatgpt.com/#cwt-job=${jobId}`,
     pretendToBeVisual: true,
@@ -1595,7 +1490,7 @@ test('automatic Branch forces a persisted destination reload before any composer
   }
 });
 
-test('freshly reloaded branch auto-sends once even when its model control is unavailable', async () => {
+test('freshly reloaded branch auto-sends once after its composer remounts', async () => {
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-1"><div data-message-author-role="assistant">Latest answer</div></article>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
@@ -1674,7 +1569,7 @@ test('freshly reloaded branch auto-sends once even when its model control is una
   }
 });
 
-test('freshly reloaded branch sends a claimed-answer challenge with its accuracy guard without High', async () => {
+test('freshly reloaded branch sends a claimed-answer challenge with its accuracy guard', async () => {
   const jobId = 'native_accuracy_guard_job_1234';
   const question = 'How did you get 12V and 4V?';
   const dom = new JSDOM(`<!doctype html><html><body><main>
@@ -1708,7 +1603,6 @@ test('freshly reloaded branch sends a claimed-answer challenge with its accuracy
   });
   const app = toolkit.createApp(document, dom.window, {
     pageInstanceId: 'native_accuracy_destination_1234',
-    routingDiscoveryTimeout: 100,
   });
   await app.start();
   app.state.incomingJobId = jobId;
@@ -1759,7 +1653,7 @@ test('two reloaded pages cannot consume the same incoming job concurrently when 
 
   const firstTurn = firstDom.window.document.querySelector('[data-testid="conversation-turn-1"]');
   const stored = new Map();
-  stored.set('chatgptSidecar.settings.v1', { ...toolkit.DEFAULT_SETTINGS, adaptiveRouting: false });
+  stored.set('chatgptSidecar.settings.v1', { ...toolkit.DEFAULT_SETTINGS });
   stored.set(`chatgptSidecar.job.v1.${jobId}`, toolkit.sanitizeJob({
     createdAt: Date.now(),
     sourceUrl: 'https://chatgpt.com/c/source-chat',
@@ -1930,7 +1824,7 @@ test('immediate Close and Escape cannot detach a retry awaiting its job lock', a
   Object.defineProperty(dom.window.navigator, 'locks', { configurable: true, value: locks });
   const stored = new Map();
   const storageKey = `chatgptSidecar.job.v1.${jobId}`;
-  stored.set('chatgptSidecar.settings.v1', { ...toolkit.DEFAULT_SETTINGS, adaptiveRouting: false });
+  stored.set('chatgptSidecar.settings.v1', { ...toolkit.DEFAULT_SETTINGS });
   stored.set(storageKey, toolkit.sanitizeJob({
     createdAt: Date.now(),
     sourceUrl: 'https://chatgpt.com/c/source-chat',
@@ -2024,7 +1918,6 @@ test('side automation blocks manual click, Enter, and submit while allowing its 
 
   const app = toolkit.createApp(document, dom.window);
   await app.start();
-  app.state.settings.adaptiveRouting = false;
   app.state.sideAutomationActive = true;
 
   try {
@@ -2045,7 +1938,7 @@ test('side automation blocks manual click, Enter, and submit while allowing its 
       'manual send paths never reach ChatGPT while the side question is being staged',
     );
 
-    assert.equal(await app.smartRouteAndSend({ composer, silent: true }), true);
+    assert.equal(await app.sendComposerAutomatically({ composer, expectedDraft: composer.value }), true);
     assert.deepEqual(
       { nativeClicks, nativeEnters, nativeSubmits },
       { nativeClicks: 1, nativeEnters: 0, nativeSubmits: 0 },
@@ -2084,11 +1977,10 @@ test('side automation allows one delayed framework submit from its replay permit
 
   const app = toolkit.createApp(document, dom.window);
   await app.start();
-  app.state.settings.adaptiveRouting = false;
   app.state.sideAutomationActive = true;
 
   try {
-    assert.equal(await app.smartRouteAndSend({ composer, silent: true }), true);
+    assert.equal(await app.sendComposerAutomatically({ composer, expectedDraft: composer.value }), true);
     assert.equal(await waitFor(() => nativeSubmits === 1, dom.window), true);
     assert.deepEqual({ nativeClicks, nativeSubmits }, { nativeClicks: 1, nativeSubmits: 1 });
 
@@ -2168,7 +2060,6 @@ test('a native Send during staging is observed and never followed by a duplicate
 
   const app = toolkit.createApp(document, dom.window, { pageInstanceId: 'reloaded_page_1234' });
   await app.start();
-  app.state.settings.adaptiveRouting = false;
   const job = toolkit.sanitizeJob({
     createdAt: Date.now(),
     sourceUrl: 'https://chatgpt.com/c/source-chat',
@@ -2212,7 +2103,6 @@ test('unacknowledged Send is never reported complete or clicked twice', async ()
     pageInstanceId: 'reloaded_page_1234',
   });
   await app.start();
-  app.state.settings.adaptiveRouting = false;
   const job = toolkit.sanitizeJob({
     createdAt: Date.now(),
     sourceUrl: 'https://chatgpt.com/c/source-chat',
@@ -2248,7 +2138,7 @@ test('query-only navigation never inserts or sends a side question in the source
     <div id="turn-menu" role="menu" hidden><button role="menuitem" id="branch">Branch in new chat</button></div>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
   </main></body></html>`, {
-    url: 'https://chatgpt.com/c/source-chat?model=high',
+    url: 'https://chatgpt.com/c/source-chat?view=wide',
     pretendToBeVisual: true,
   });
   const { document } = dom.window;
@@ -2259,7 +2149,7 @@ test('query-only navigation never inserts or sends a side question in the source
     document.querySelector('#turn-menu').hidden = false;
   });
   document.querySelector('#branch').addEventListener('click', () => {
-    dom.window.history.pushState({}, '', '/c/source-chat?model=instant');
+    dom.window.history.pushState({}, '', '/c/source-chat?view=compact');
     document.querySelector('#turn-menu').hidden = true;
   });
   let sendCount = 0;
@@ -2271,7 +2161,7 @@ test('query-only navigation never inserts or sends a side question in the source
   await app.start();
   const job = toolkit.sanitizeJob({
     createdAt: Date.now(),
-    sourceUrl: 'https://chatgpt.com/c/source-chat?model=high',
+    sourceUrl: 'https://chatgpt.com/c/source-chat?view=wide',
     kind: 'ask',
     locator: toolkit.getTurnLocator(turn, document),
     targetFingerprint: toolkit.assistantTurnFingerprint(turn),
@@ -2517,7 +2407,7 @@ test('settings opens as a persistent modal and closes only with explicit control
   assert.equal(dialog.getAttribute('aria-modal'), 'true');
   await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
   const closeButton = document.querySelector('[data-cgs-action="close-settings"]');
-  const lastFocusable = dialog.querySelector('a[href]');
+  const lastFocusable = [...dialog.querySelectorAll('button, textarea, select, input')].at(-1);
   assert.equal(document.activeElement, closeButton);
   closeButton.dispatchEvent(new dom.window.KeyboardEvent('keydown', {
     key: 'Tab', shiftKey: true, bubbles: true, cancelable: true,

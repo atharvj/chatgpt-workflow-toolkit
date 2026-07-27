@@ -12,15 +12,10 @@ test('normalizeText and settings sanitization use stable defaults', () => {
   assert.deepEqual(toolkit.sanitizeSettings({
     openMode: 'tab',
     autoSend: false,
-    autoRouting: false,
     hideStartWriting: false,
     showTurnButtons: false,
   }), {
     openMode: 'tab',
-    autoSend: false,
-    autoRouting: false,
-    adaptiveRouting: true,
-    autoMaxLevel: 'highest',
     hideStartWriting: false,
     showTurnButtons: false,
   });
@@ -44,11 +39,6 @@ test('accuracy guard verifies a claimed answer once without truncating the user 
   assert.match(guarded, /independently verify the stated answer or result/iu);
   assert.match(guarded, /if it is wrong.+corrected result/iu);
   assert.equal(toolkit.buildAccuracyGuardedPrompt(guarded), guarded, 'retries do not duplicate the guard');
-  assert.match(
-    toolkit.buildAccuracyGuardedPrompt("!route:high I don't get why the answer is 12V."),
-    /independently verify the stated answer or result/iu,
-    'a same-line route override does not hide the question from the guard',
-  );
   assert.equal(toolkit.buildAccuracyGuardedPrompt('Why is the sky blue?'), 'Why is the sky blue?');
   assert.equal(toolkit.buildAccuracyGuardedPrompt(question, question.length + 5), question, 'the original is never truncated to fit the guard');
 
@@ -216,13 +206,13 @@ test('locator sanitization rejects unsafe IDs and clamps indexes', () => {
 
 test('chat URLs are canonicalized and restricted to exact supported hosts', () => {
   assert.equal(
-    toolkit.canonicalPageUrl('https://chatgpt.com/c/abc?model=auto#temporary'),
-    'https://chatgpt.com/c/abc?model=auto',
+    toolkit.canonicalPageUrl('https://chatgpt.com/c/abc?view=compact#temporary'),
+    'https://chatgpt.com/c/abc?view=compact',
   );
-  assert.equal(toolkit.routeKey('https://chatgpt.com/c/abc?model=auto#temporary'), '/c/abc?model=auto');
-  assert.equal(toolkit.conversationIdentity('https://chatgpt.com/c/abc?model=auto#temporary'), 'abc');
-  assert.equal(toolkit.conversationIdentity('https://chatgpt.com/g/g-test/c/project-chat?model=high'), 'project-chat');
-  assert.equal(toolkit.conversationIdentity('https://chatgpt.com/?model=auto'), '');
+  assert.equal(toolkit.routeKey('https://chatgpt.com/c/abc?view=compact#temporary'), '/c/abc?view=compact');
+  assert.equal(toolkit.conversationIdentity('https://chatgpt.com/c/abc?view=compact#temporary'), 'abc');
+  assert.equal(toolkit.conversationIdentity('https://chatgpt.com/g/g-test/c/project-chat?view=wide'), 'project-chat');
+  assert.equal(toolkit.conversationIdentity('https://chatgpt.com/?view=compact'), '');
   assert.equal(toolkit.isAllowedChatGPTUrl('https://chatgpt.com/c/abc'), true);
   assert.equal(toolkit.isAllowedChatGPTUrl('https://chat.openai.com/c/abc'), true);
   assert.equal(toolkit.isAllowedChatGPTUrl('http://chatgpt.com/c/abc'), false);
@@ -246,7 +236,7 @@ test('job IDs round-trip through the URL fragment', () => {
 
 test('fresh-chat job IDs round-trip through a root-only URL', () => {
   const id = `fresh_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
-  const url = toolkit.urlWithFreshLaunch('https://chatgpt.com/c/private?model=high#old', id);
+  const url = toolkit.urlWithFreshLaunch('https://chatgpt.com/c/private?view=wide#old', id);
 
   assert.equal(url, `https://chatgpt.com/#cwt-fresh=${id}`);
   assert.equal(toolkit.parseFreshJobId(url), id);
@@ -309,7 +299,7 @@ test('sanitizeJob returns a bounded, normalized one-shot job', () => {
   const now = 1_800_000_000_000;
   const result = toolkit.sanitizeJob({
     createdAt: now - 1_000,
-    sourceUrl: 'https://chatgpt.com/c/lab?model=auto#discard-me',
+    sourceUrl: 'https://chatgpt.com/c/lab?view=compact#discard-me',
     kind: 'ask',
     locator: { testId: 'conversation-turn-42', turnIndex: 5.8, assistantIndex: 2 },
     question: 123,
@@ -319,8 +309,8 @@ test('sanitizeJob returns a bounded, normalized one-shot job', () => {
   assert.deepEqual(result, {
     version: 1,
     createdAt: now - 1_000,
-    sourceUrl: 'https://chatgpt.com/c/lab?model=auto',
-    sourceRoute: '/c/lab?model=auto',
+    sourceUrl: 'https://chatgpt.com/c/lab?view=compact',
+    sourceRoute: '/c/lab?view=compact',
     sourceConversation: 'lab',
     kind: 'ask',
     locator: { testId: 'conversation-turn-42', turnIndex: 5, assistantIndex: 2 },

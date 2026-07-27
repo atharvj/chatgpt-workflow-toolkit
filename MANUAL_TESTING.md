@@ -49,28 +49,6 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Put an unrelated draft or staged attachment in the old composer and confirm continuation refuses to overwrite or send it.
 - Confirm the side-question popup/tab setting does not affect fresh continuation: continuation always switches the current tab.
 
-## Adaptive Auto
-
-- Confirm the dock badge says **Adaptive Auto** and the setting is enabled by default.
-- With **Highest available** selected, send `Define osmosis in one sentence.` from High and confirm Workflow Toolkit selects Instant before sending exactly once.
-- Send `Compare TCP and UDP for multiplayer networking.` and confirm it selects Medium when Medium is available.
-- Paste a real traceback and ask for the root cause; confirm it selects High.
-- Ask for a production multi-tenant authentication design with a threat model, concurrency risks, migration, rollback, tests, and security tradeoffs; confirm it selects Extra High or Ultra if exposed.
-- Ask for an end-to-end repo-scale implementation with security review, exhaustive tests, benchmarks, and a formal correctness argument; confirm it can select a Pro-class option when the account exposes one.
-- Change **Maximum Auto level** to High and confirm even the hardest prompt does not select above High. Repeat with Extra High.
-- Manually choose High, then send `what is 2+2`; confirm Adaptive Auto still changes it to Instant. Hold Alt while sending when you intentionally want to preserve the current manual choice for one message.
-- After a difficult request, have ChatGPT ask a clarification such as `Did you mean gauge theory?`; confirm both `Yes, that one.` and a short answer such as `Gauge theory.` inherit the difficult request’s level instead of dropping to Instant.
-- From Instant, send `I don't get why the answer is 12V and 4V.` Confirm Adaptive Auto selects High or a stronger available level and the sent message tells ChatGPT to verify that result before explaining it.
-- From Instant, send a prompt that chooses Medium and confirm the message is not sent until the picker visibly reflects Medium. If the visible Medium row is temporarily made unable to update the picker, confirm the draft remains unsent instead of falling back to Instant.
-- Repeat on an account whose picker does not offer High or anything stronger and confirm it uses the strongest available level, keeps the independent-verification instruction, and sends once.
-- Start a prompt with `!route:high`, send it, and confirm High is selected. Verify the same words later in ordinary prose do not count as an override.
-- Hold Alt while clicking Send and confirm the current model is used without opening the picker.
-- Press Shift+Enter and use an IME composition flow; confirm neither triggers a send. Confirm plain Enter and Ctrl/Cmd+Enter still route and send once.
-- Enable Agent, Deep Research, Canvas, image/video generation, or voice/record mode when available; confirm Workflow Toolkit keeps that mode's current compatible model.
-- Start a model switch, then immediately edit the draft or change an attachment; confirm Workflow Toolkit cancels sending and leaves the edited draft for review.
-- On an account without a paid picker, confirm ordinary and high-stakes prompts report the picker as unavailable and still send once with the current model. Confirm an explicit `!route:high` draft remains unsent when High cannot be confirmed.
-- If ChatGPT native automatic switching is enabled, confirm it may still promote Workflow Toolkit's Instant choice to Medium; disable native switching when testing exact selections.
-
 ## Start writing cleaner
 
 - Navigate to a ChatGPT surface that displays the exact **Start writing** placeholder/control.
@@ -91,4 +69,3 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Open a conversation with many turns and stream a long response.
 - Confirm Workflow Toolkit adds one response action per assistant turn, does not add duplicate buttons after rerenders, and does not noticeably affect input or scrolling.
 - Leave the tab open for several minutes and confirm there is no recurring CPU usage from Workflow Toolkit when the DOM is idle.
-- Type continuously in a long chat and confirm Adaptive Auto does no classification or picker work until Send is pressed.
