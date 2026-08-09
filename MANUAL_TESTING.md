@@ -7,9 +7,8 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 ## Baseline
 
 - Enable the userscript and reload `https://chatgpt.com/`.
-- Confirm the **Continue in fresh chat** dock appears after the first completed response and ordinary scrolling, typing, streaming, copy, edit, retry, and voice controls still work.
-- Grow the message box to several lines and resize the window; confirm the dock stays above the message box instead of covering it.
-- Confirm the continuation action stays hidden on the blank home composer and while a response is streaming.
+- Confirm the settings gear appears and ordinary scrolling, typing, streaming, copy, edit, retry, and voice controls still work.
+- Grow the message box to several lines and resize the window; confirm the settings gear stays above the message box instead of covering it.
 - Open DevTools and confirm Workflow Toolkit produces no errors and no network requests.
 
 ## Settings
@@ -38,16 +37,6 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Open it and confirm the selected text is quoted, including multiline selections.
 - Repeat near the left, right, and bottom edges of the viewport and confirm the pill remains visible.
 - Select ordinary text outside an assistant response and confirm no pill appears.
-
-## Continue in fresh chat
-
-- Click **Continue in fresh chat** and confirm the dialog contains only “Are you sure you want to continue in fresh chat?”, **Cancel**, and **Yes**.
-- Choose **Yes** and confirm Workflow Toolkit sends one handoff request, waits for ChatGPT's completed answer, then switches the current tab to a blank new chat.
-- Confirm the handoff is filled and sent automatically in the new chat, with none of the old rendered turns present.
-- In a chat that used named files/images, confirm the new chat asks once for those exact items if available, says it is okay if they are unavailable, and can still continue from the handoff.
-- In a chat with no external materials, confirm the new chat does not ask for any.
-- Put an unrelated draft or staged attachment in the old composer and confirm continuation refuses to overwrite or send it.
-- Confirm the side-question popup/tab setting does not affect fresh continuation: continuation always switches the current tab.
 
 ## Start writing cleaner
 

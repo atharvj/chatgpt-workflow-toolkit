@@ -80,9 +80,11 @@ test('app smoke: installs a single whole-chat, auto-send side-question flow', as
   assert.ok(turnButton, 'assistant response receives one Ask in new chat control');
   assert.equal(turnButton.textContent, '↗ Ask in new chat');
   assert.equal(document.querySelector('#cgs-dock').hidden, false);
-  assert.equal(document.querySelector('[data-cgs-action="open-handoff"] .cgs-dock-label').textContent, 'Continue in fresh chat');
+  assert.equal(document.querySelector('[data-cgs-action="toggle-settings"]').textContent, '⚙');
   assert.equal(document.querySelector('#cgs-selection-pill').textContent, 'Ask in new chat');
-  assert.doesNotMatch(document.querySelector('#cgs-root').textContent, /Continue lightweight|Ask aside/u);
+  assert.equal(document.querySelector('#cgs-handoff-backdrop'), null);
+  assert.equal(document.querySelector('[data-cgs-action="open-handoff"]'), null);
+  assert.doesNotMatch(document.querySelector('#cgs-root').textContent, /Continue in fresh chat|Continue lightweight|Ask aside/u);
 
   turnButton.click();
   const questionBackdrop = document.querySelector('#cgs-dialog-backdrop');
@@ -113,28 +115,6 @@ test('app smoke: installs a single whole-chat, auto-send side-question flow', as
   assert.match(styleText, /@media \(max-width: 1100px\)[\s\S]*?#cgs-dialog-backdrop\s*\{[^}]*height:\s*min\(48dvh, 420px\)[^}]*overflow:\s*hidden/su);
   assert.match(styleText, /@media \(max-width: 1100px\)[\s\S]*?#cgs-dialog-backdrop \.cgs-dialog\s*\{[^}]*height:\s*100%[^}]*max-height:\s*none/su);
   document.querySelector('[data-cgs-action="cancel-question"]').click();
-
-  document.querySelector('[data-cgs-action="open-handoff"]').click();
-  const handoffBackdrop = document.querySelector('#cgs-handoff-backdrop');
-  const handoffDialog = handoffBackdrop.querySelector('.cgs-dialog');
-  assert.equal(handoffBackdrop.hidden, false);
-  assert.equal(document.querySelector('#cgs-handoff-title').textContent, 'Are you sure you want to continue in fresh chat?');
-  assert.equal(
-    handoffDialog.textContent.replace(/\s+/gu, ' ').trim(),
-    'Are you sure you want to continue in fresh chat? Cancel Yes',
-    'the confirmation contains no workflow instructions beyond the question and its choices',
-  );
-  assert.deepEqual(
-    [...handoffDialog.querySelectorAll('button')].map((button) => button.textContent.trim()),
-    ['Cancel', 'Yes'],
-  );
-  assert.equal(handoffDialog.querySelector('[data-cgs-action="close-handoff"]').textContent.trim(), 'Cancel');
-  assert.equal(handoffDialog.querySelector('[data-cgs-action="confirm-fresh-chat"]').textContent.trim(), 'Yes');
-  assert.equal(handoffDialog.querySelector('[data-cgs-action="prepare-handoff"]'), null);
-  assert.equal(handoffDialog.querySelector('[data-cgs-action="open-fresh-chat"]'), null);
-  assert.equal(handoffDialog.querySelector('[data-cgs-action="full-branch-latest"]'), null);
-  document.querySelector('[data-cgs-action="close-handoff"]').click();
-  assert.equal(document.querySelector('#cgs-handoff-backdrop').hidden, true);
 
   app.state.observer.disconnect();
   dom.window.close();
@@ -724,7 +704,7 @@ test('an already-staged fallback draft reformatted by ChatGPT auto-sends exactly
   const storageKey = `chatgptSidecar.job.v1.${jobId}`;
   const transcript = 'USER:\nWhat is mediation?\n\nASSISTANT:\nMediation helps people resolve a disagreement.';
   const question = 'what is mediation in simple terms';
-  const expectedPrompt = toolkit.buildSideFallbackPrompt(transcript, question, 'ask', jobId);
+  const expectedPrompt = toolkit.buildSideFallbackPrompt(transcript, question, jobId);
   const hydratedPrompt = expectedPrompt
     .replace(/\n{2,}/gu, (paragraphBreak) => `${paragraphBreak}\n`)
     .replace('conversation as context', 'conversation\u00a0as context')
@@ -1014,7 +994,7 @@ test('fallback caps large-prompt restaging when ChatGPT repeatedly replaces the 
 
   try {
     await app.start();
-    assert.equal(inputCount, 4, 'the large handoff is never injected more than four times');
+    assert.equal(inputCount, 4, 'the large transfer is never injected more than four times');
     assert.equal(sendCount, 0);
     assert.equal(stored.get(storageKey).sendAttempted, false);
     assert.match(dom.window.document.querySelector('#cgs-recovery-reason').textContent, /did not stay ready/iu);
@@ -1490,7 +1470,7 @@ test('automatic Branch forces a persisted destination reload before any composer
   }
 });
 
-test('freshly reloaded branch auto-sends once after its composer remounts', async () => {
+test('reloaded separate chat auto-sends once after its composer remounts', async () => {
   const dom = new JSDOM(`<!doctype html><html><body><main>
     <article data-testid="conversation-turn-1"><div data-message-author-role="assistant">Latest answer</div></article>
     <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
@@ -1569,7 +1549,7 @@ test('freshly reloaded branch auto-sends once after its composer remounts', asyn
   }
 });
 
-test('freshly reloaded branch sends a claimed-answer challenge with its accuracy guard', async () => {
+test('reloaded separate chat sends a claimed-answer challenge with its accuracy guard', async () => {
   const jobId = 'native_accuracy_guard_job_1234';
   const question = 'How did you get 12V and 4V?';
   const dom = new JSDOM(`<!doctype html><html><body><main>
@@ -1995,43 +1975,6 @@ test('side automation allows one delayed framework submit from its replay permit
   }
 });
 
-test('fresh continuation refuses an active side job without changing or sending its composer', async () => {
-  const dom = new JSDOM(`<!doctype html><html><body><main>
-    <article data-testid="conversation-turn-0"><div data-message-author-role="user">Original question</div></article>
-    <article data-testid="conversation-turn-1"><div data-message-author-role="assistant">Latest answer</div></article>
-    <form><textarea id="prompt-textarea"></textarea><button type="button" data-testid="send-button">Send</button></form>
-  </main></body></html>`, {
-    url: 'https://chatgpt.com/c/separate-side-chat',
-    pretendToBeVisual: true,
-  });
-  const { document } = dom.window;
-  const composer = document.querySelector('#prompt-textarea');
-  let sends = 0;
-  document.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sends += 1; });
-  const app = toolkit.createApp(document, dom.window);
-  await app.start();
-  app.state.incomingJobId = 'active_side_job_1234';
-
-  try {
-    const handoffBackdrop = document.querySelector('#cgs-handoff-backdrop');
-    document.querySelector('[data-cgs-action="open-handoff"]').click();
-    assert.equal(handoffBackdrop.hidden, true, 'the fresh-continuation dialog does not open during a side job');
-    assert.equal(composer.value, '');
-    assert.equal(sends, 0);
-
-    handoffBackdrop.hidden = false;
-    document.querySelector('[data-cgs-action="confirm-fresh-chat"]').click();
-    assert.equal(await waitFor(() => handoffBackdrop.hidden, dom.window), true);
-    assert.equal(composer.value, '', 'even a stale open dialog cannot insert the handoff prompt');
-    assert.equal(sends, 0);
-    assert.equal(app.state.freshContinuationPromise, null);
-    assert.match(document.querySelector('#cgs-toast').textContent, /finish the separate-chat question/iu);
-  } finally {
-    app.state.incomingJobId = '';
-    app.state.observer.disconnect();
-    dom.window.close();
-  }
-});
 
 test('a native Send during staging is observed and never followed by a duplicate send', async () => {
   const dom = new JSDOM(`<!doctype html><html><body><main>

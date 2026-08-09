@@ -28,6 +28,7 @@ test('metadata identifies a valid Greasy Fork userscript', () => {
 
   assert.deepEqual(metadata.get('name'), ['ChatGPT Workflow Toolkit']);
   assert.deepEqual(metadata.get('version'), [api.VERSION]);
+  assert.deepEqual(metadata.get('description'), ['Ask questions in separate contextual chats and hide Start writing.']);
   assert.deepEqual(metadata.get('namespace'), ['https://github.com/atharvj/chatgpt-workflow-toolkit']);
   assert.deepEqual(metadata.get('license'), ['MIT']);
   assert.deepEqual(metadata.get('run-at'), ['document-idle']);

@@ -1,11 +1,10 @@
 # ChatGPT Workflow Toolkit
 
-A lightweight userscript that adds separate contextual chats, fresh-chat handoffs, and small interface improvements to ChatGPT.
+A lightweight userscript that adds separate contextual chats and small interface improvements to ChatGPT.
 
 ## Features
 
 - Ask a side question in a separate chat with the whole conversation so far.
-- Continue a laggy conversation in a fresh chat with an automatic handoff.
 - Remove “Start writing.”
 
 ## Install

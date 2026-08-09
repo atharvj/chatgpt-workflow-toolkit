@@ -70,7 +70,7 @@ test('completed turn helpers exclude the actively streaming response', () => {
   assert.equal(toolkit.isTurnStreaming(document.querySelector('[data-testid="conversation-turn-2"]'), document), true);
 });
 
-test('extractAssistantHandoff keeps useful response content and omits action labels', () => {
+test('extractAssistantContent keeps useful response content and omits action labels', () => {
   const { document } = createDom(`
     <article data-testid="conversation-turn-1">
       <div data-message-author-role="assistant">
@@ -92,7 +92,7 @@ test('extractAssistantHandoff keeps useful response content and omits action lab
       <div data-testid="message-actions"><button>Good response</button></div>
     </article>
   `).window;
-  const text = toolkit.extractAssistantHandoff(document.querySelector('article'));
+  const text = toolkit.extractAssistantContent(document.querySelector('article'));
   const fingerprint = toolkit.assistantTurnFingerprint(document.querySelector('article'));
   const contextFingerprint = toolkit.conversationContextFingerprint(document, document.querySelector('article'));
 
@@ -109,15 +109,15 @@ test('extractAssistantHandoff keeps useful response content and omits action lab
   assert.notEqual(toolkit.conversationContextFingerprint(document, document.querySelector('article')), contextFingerprint);
 });
 
-test('extractAssistantHandoff rejects non-assistant turns', () => {
+test('extractAssistantContent rejects non-assistant turns', () => {
   const { document } = createDom(`
     <article data-testid="conversation-turn-0">
       <div data-message-author-role="user"><p class="markdown">Do not extract me</p></div>
     </article>
   `).window;
 
-  assert.equal(toolkit.extractAssistantHandoff(document.querySelector('article')), '');
-  assert.equal(toolkit.extractAssistantHandoff(null), '');
+  assert.equal(toolkit.extractAssistantContent(document.querySelector('article')), '');
+  assert.equal(toolkit.extractAssistantContent(null), '');
 });
 
 test('emergency side-chat transcript preserves role order, omits action UI, and puts the question last', () => {

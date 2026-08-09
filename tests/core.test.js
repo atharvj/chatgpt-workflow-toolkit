@@ -51,7 +51,7 @@ test('accuracy guard verifies a claimed answer once without truncating the user 
     question,
   });
   assert.equal(job.question, question, 'saved and recovery state keeps the user-authored question');
-  const fallback = toolkit.buildSideFallbackPrompt('USER:\nQuestion\n\nASSISTANT:\nThe answer is 12V.', question, 'ask', 'accuracy_guard_job');
+  const fallback = toolkit.buildSideFallbackPrompt('USER:\nQuestion\n\nASSISTANT:\nThe answer is 12V.', question, 'accuracy_guard_job');
   assert.match(fallback, /independently verify the stated answer or result/iu);
   assert.equal((fallback.match(/independently verify the stated answer or result/giu) || []).length, 1);
 });
@@ -61,7 +61,6 @@ test('fallback draft ownership tolerates editor formatting but rejects any forei
   const expected = toolkit.buildSideFallbackPrompt(
     'USER:\nExplain mediation\n\nASSISTANT:\nMediation is guided problem-solving.',
     'what is mediation in simple terms',
-    'ask',
     jobId,
   );
   const reformattedByEditor = expected
@@ -102,7 +101,7 @@ test('fallback draft ownership tolerates editor formatting but rejects any forei
   assert.equal(toolkit.fallbackDraftTextMatches(reformattedByEditor.slice(0, -20), expected, jobId), false);
   assert.equal(toolkit.fallbackDraftTextMatches(`[Workflow Toolkit transfer ${jobId}]`, expected, jobId), false);
 
-  const unmarked = toolkit.buildSideFallbackPrompt('USER:\nContext', 'Question', 'ask');
+  const unmarked = toolkit.buildSideFallbackPrompt('USER:\nContext', 'Question');
   assert.equal(
     toolkit.fallbackDraftTextMatches(unmarked, unmarked, ''),
     false,
@@ -234,67 +233,6 @@ test('job IDs round-trip through the URL fragment', () => {
   assert.equal(toolkit.parseJobId('https://chatgpt.com/c/abc#cwt-job=bad%20id'), '');
 });
 
-test('fresh-chat job IDs round-trip through a root-only URL', () => {
-  const id = `fresh_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
-  const url = toolkit.urlWithFreshLaunch('https://chatgpt.com/c/private?view=wide#old', id);
-
-  assert.equal(url, `https://chatgpt.com/#cwt-fresh=${id}`);
-  assert.equal(toolkit.parseFreshJobId(url), id);
-  assert.equal(toolkit.isFreshLaunch(url), true);
-  assert.equal(toolkit.urlWithFreshLaunch('https://chat.openai.com/c/legacy', id), `https://chat.openai.com/#cwt-fresh=${id}`);
-  assert.equal(toolkit.urlWithFreshLaunch('https://chatgpt.com/c/private', 'bad id!'), '');
-  assert.equal(toolkit.urlWithFreshLaunch('not a URL', id), '');
-  assert.equal(toolkit.parseFreshJobId('https://chatgpt.com/#cwt-fresh=bad%20id'), '');
-  assert.equal(toolkit.parseFreshJobId('not a URL'), '');
-  assert.equal(toolkit.isFreshLaunch('https://chatgpt.com/#cwt-fresh=0'), false);
-  assert.notEqual(toolkit.freshHandoffStorageKey(id), toolkit.freshHandoffStorageKey('fresh_job_other'));
-  assert.match(toolkit.freshHandoffStorageKey(id), new RegExp(`${id}$`, 'u'));
-  assert.equal(toolkit.freshHandoffStorageKey('bad id!'), '');
-});
-
-test('sanitizeFreshHandoff validates identity, age, content, and bounds', () => {
-  const now = 1_800_000_000_000;
-  const id = 'fresh_job_1234';
-  const valid = {
-    version: 99,
-    id,
-    createdAt: now - 1_000,
-    handoff: '  Goal\r\n\r\n- Next step  ',
-  };
-
-  assert.deepEqual(toolkit.sanitizeFreshHandoff(valid, now, id), {
-    version: 1,
-    id,
-    createdAt: now - 1_000,
-    handoff: 'Goal\n\n- Next step',
-  });
-  assert.equal(toolkit.sanitizeFreshHandoff({ ...valid, handoff: ' \n ' }, now, id), null);
-  assert.equal(toolkit.sanitizeFreshHandoff({ ...valid, id: 'fresh_job_other' }, now, id), null);
-  assert.equal(
-    toolkit.sanitizeFreshHandoff({ ...valid, createdAt: now - toolkit.FRESH_HANDOFF_MAX_AGE_MS - 1 }, now, id),
-    null,
-  );
-
-  const bounded = toolkit.sanitizeFreshHandoff({
-    ...valid,
-    handoff: 'x'.repeat(toolkit.FRESH_HANDOFF_MAX_LENGTH + 100),
-  }, now, id);
-  assert.equal(bounded.handoff.length, toolkit.FRESH_HANDOFF_MAX_LENGTH);
-  assert.match(bounded.handoff, /^x+$/u);
-});
-
-test('buildFreshContinuationPrompt wraps a usable handoff with optional-material safeguards', () => {
-  const handoff = 'Goal: finish the lab.\r\n\r\nOptional materials: lab.png is helpful but optional.';
-  const prompt = toolkit.buildFreshContinuationPrompt(handoff);
-
-  assert.match(prompt, /^Continue the previous conversation from the handoff below\./u);
-  assert.match(prompt, /follow its recommended next step/u);
-  assert.match(prompt, /follow any “Optional materials” instruction in your first response/u);
-  assert.match(prompt, /Do not require materials that the handoff says are optional\./u);
-  assert.match(prompt, /--- HANDOFF ---\nGoal: finish the lab\.\n\nOptional materials: lab\.png is helpful but optional\.$/u);
-  assert.equal(toolkit.buildFreshContinuationPrompt(' \r\n '), '');
-});
-
 test('sanitizeJob returns a bounded, normalized one-shot job', () => {
   const now = 1_800_000_000_000;
   const result = toolkit.sanitizeJob({
@@ -327,27 +265,6 @@ test('sanitizeJob returns a bounded, normalized one-shot job', () => {
     baselineUserCount: -1,
     sendAttempted: false,
   });
-});
-
-test('sanitizeJob accepts continue jobs and caps oversized questions', () => {
-  const now = 1_800_000_000_000;
-  const result = toolkit.sanitizeJob({
-    createdAt: now,
-    sourceUrl: 'https://chat.openai.com/c/legacy',
-    kind: 'continue',
-    question: 'x'.repeat(30_100),
-    autoSend: 'true',
-    branchClickAttempted: true,
-    branchConversation: 'separate-chat',
-    sendAttempted: true,
-  }, now);
-
-  assert.equal(result.kind, 'continue');
-  assert.equal(result.question.length, 30_000);
-  assert.equal(result.autoSend, false, 'autoSend must be the boolean true');
-  assert.equal(result.branchClickAttempted, true);
-  assert.equal(result.branchConversation, 'separate-chat');
-  assert.equal(result.sendAttempted, true);
 });
 
 test('fallback jobs keep bounded transcript context and cannot retain a native Branch click intent', () => {
@@ -388,6 +305,7 @@ test('sanitizeJob rejects malformed, expired, future, and off-site jobs', () => 
 
   assert.equal(toolkit.sanitizeJob(null, now), null);
   assert.equal(toolkit.sanitizeJob({ ...valid, kind: 'other' }, now), null);
+  assert.equal(toolkit.sanitizeJob({ ...valid, kind: 'continue' }, now), null);
   assert.equal(toolkit.sanitizeJob({ ...valid, createdAt: now - toolkit.JOB_MAX_AGE_MS - 1 }, now), null);
   assert.equal(toolkit.sanitizeJob({ ...valid, createdAt: now + 60_001 }, now), null);
   assert.equal(toolkit.sanitizeJob({ ...valid, sourceUrl: 'https://example.com/c/abc' }, now), null);

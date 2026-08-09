@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.5.0
-// @description  Ask questions in separate contextual chats, continue laggy conversations with a handoff, and hide Start writing.
+// @version      1.6.0
+// @description  Ask questions in separate contextual chats and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
 // @homepageURL  https://github.com/atharvj/chatgpt-workflow-toolkit
@@ -44,20 +44,16 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.5.0';
+  const VERSION = '1.6.0';
   const LEGACY_INSTALL_VERSION = '1.1.0';
-  // Preserve the original storage keys so upgrades retain settings and one-time handoffs.
+  // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
   const JOB_INDEX_KEY = 'chatgptSidecar.jobIndex.v1';
   const JOB_PREFIX = 'chatgptSidecar.job.v1.';
   const JOB_LOCK_PREFIX = 'chatgptWorkflowToolkit.sideJob.v1.';
   const JOB_HASH_KEY = 'cwt-job';
-  const FRESH_HASH_KEY = 'cwt-fresh';
-  const FRESH_HANDOFF_PREFIX = 'chatgptWorkflowToolkit.freshHandoff.v1.';
-  const FRESH_HANDOFF_INDEX_KEY = 'chatgptWorkflowToolkit.freshHandoffIndex.v1';
   const JOB_MAX_AGE_MS = 5 * 60 * 1000;
-  const FRESH_HANDOFF_MAX_AGE_MS = 10 * 60 * 1000;
-  const FRESH_HANDOFF_MAX_LENGTH = 28_000;
+  const ASSISTANT_CONTENT_MAX_LENGTH = 28_000;
   const QUESTION_MAX_LENGTH = 30_000;
   const SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH = 120_000;
   const SIDE_FALLBACK_PROMPT_MAX_LENGTH = SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH + QUESTION_MAX_LENGTH + 2_000;
@@ -75,26 +71,6 @@
   const UI_ROOT_ID = 'cgs-root';
   const TURN_BUTTON_CLASS = 'cgs-turn-action';
   const HIDDEN_START_WRITING_CLASS = 'cgs-hidden-start-writing';
-  const HANDOFF_PROMPT = `Create a compact, self-contained handoff for continuing this conversation in a brand-new chat. Do not continue the task yet.
-
-Include only the context needed to resume:
-- the goal and current task
-- constraints and user preferences
-- key facts, resources, and assumptions
-- decisions made and work already completed
-- unresolved issues, errors, or open questions
-- the exact recommended next step
-
-Preserve essential commands, code, formulas, or data exactly where needed. Clearly mark uncertainty. Keep the handoff under 1,000 words.
-
-Also account for materials that will not automatically carry into a new chat:
-- Identify any files, images, datasets, pasted documents, attachments, or other external artifacts this chat used. Use each exact filename or name when known; do not invent names.
-- Include all important facts already learned from those materials in the handoff itself, so the handoff is still sufficient if the user cannot provide them again.
-- Add an “Optional materials” section for the next assistant. If any such items exist, instruct the next assistant to ask for them once in its first reply, by name, and to request that the user provide or upload them in full if available. Make clear that it is okay if the user cannot provide them and the conversation can continue from the handoff. Say that providing them would give significantly more context.
-- If no such materials exist, say that no additional materials are needed and do not ask the user for any.
-
-The request should sound natural, for example: “Okay, let’s continue here. If you have them, could you provide [exact names] in full? If not, that’s okay—I can continue from this handoff. Providing them would give me significantly more context.”`;
-
   const TURN_SELECTOR = '[data-testid^="conversation-turn-"]';
   const ROLE_SELECTOR = '[data-message-author-role]';
   const COMPOSER_SELECTORS = [
@@ -240,15 +216,6 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     .cgs-link-button { margin-top: 8px; padding: 6px 8px; border-radius: 7px; color: #087f5b; background: rgba(16, 163, 127, .12); font-size: 11px; font-weight: 700; }
     .cgs-help-link { color: #0f8f70; text-decoration: underline; text-underline-offset: 2px; }
     .cgs-version { margin-top: 10px; color: var(--text-secondary, #6b7280); font-size: 10px; text-align: right; }
-    #cgs-handoff-backdrop {
-      position: fixed;
-      inset: 0;
-      z-index: 2147483002;
-      display: grid;
-      place-items: center;
-      padding: 18px;
-      background: rgba(0, 0, 0, .36);
-    }
     #cgs-dialog-backdrop {
       position: fixed;
       top: 64px;
@@ -944,7 +911,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     return text;
   }
 
-  function extractAssistantHandoff(turn, options = {}) {
+  function extractAssistantContent(turn, options = {}) {
     if (!turn) return '';
     const roleNode = turn.matches && turn.matches('[data-message-author-role="assistant"]')
       ? turn
@@ -957,11 +924,11 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     if (options.headTailSampleLength) {
       return boundedHeadTailSample(text, options.headTailSampleLength).trim();
     }
-    return text.slice(0, FRESH_HANDOFF_MAX_LENGTH).trim();
+    return text.slice(0, ASSISTANT_CONTENT_MAX_LENGTH).trim();
   }
 
   function assistantTurnFingerprint(turn) {
-    const text = normalizeText(extractAssistantHandoff(turn) || readableNodeText(turn));
+    const text = normalizeText(extractAssistantContent(turn) || readableNodeText(turn));
     if (!text) return '';
     if (text.length <= TARGET_FINGERPRINT_MAX_LENGTH - 20) return `${text.length}:${text}`;
     const edgeLength = Math.floor((TARGET_FINGERPRINT_MAX_LENGTH - 30) / 2);
@@ -986,7 +953,7 @@ The request should sound natural, for example: “Okay, let’s continue here. I
     };
     for (const turn of turns.slice(0, lastIndex + 1)) {
       const role = roleOfTurn(turn);
-      const content = role === 'assistant' ? extractAssistantHandoff(turn) : readableNodeText(turn);
+      const content = role === 'assistant' ? extractAssistantContent(turn) : readableNodeText(turn);
       update(`${role}\u241e${normalizeText(content)}\u241f`);
     }
     return `${lastIndex + 1}:${length}:${hashA.toString(16).padStart(8, '0')}:${hashB.toString(16).padStart(8, '0')}`;
@@ -1021,17 +988,13 @@ The request should sound natural, for example: “Okay, let’s continue here. I
       .slice(0, limit);
   }
 
-  function buildSideFallbackPrompt(transcriptValue, questionValue, kind = 'ask', transferId = '') {
+  function buildSideFallbackPrompt(transcriptValue, questionValue, transferId = '') {
     const transcript = String(transcriptValue == null ? '' : transcriptValue).replace(/\r\n?/gu, '\n').trim();
     const question = String(questionValue == null ? '' : questionValue).replace(/\r\n?/gu, '\n').trim();
     const marker = fallbackTransferMarker(transferId);
     if (!transcript) return '';
-    const rawRequest = question || (kind === 'continue'
-      ? 'Continue the conversation from where it stopped.'
-      : 'Answer the side question using the available conversation context.');
-    const request = kind === 'ask'
-      ? buildAccuracyGuardedPrompt(rawRequest)
-      : rawRequest;
+    const rawRequest = question || 'Answer the side question using the available conversation context.';
+    const request = buildAccuracyGuardedPrompt(rawRequest);
     return `Answer the request at the end using the previous ChatGPT conversation as context. This is a separate chat, so do not merely summarize the transcript and do not ask the user to repeat information already included here.
 
 Files, images, and other attachments are not transferred by this fallback. Use all information available in the transcript. If missing material is truly essential, ask the user to upload it, while making clear that it is okay if they cannot.
@@ -1041,7 +1004,7 @@ ${marker ? `\n${marker}\n` : ''}
 ${transcript}
 --- END PREVIOUS CONVERSATION ---
 
---- ${kind === 'continue' && !question ? 'REQUEST' : 'SIDE QUESTION'} ---
+--- SIDE QUESTION ---
 ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
   }
 
@@ -1160,10 +1123,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     return /^[a-z0-9_-]{8,80}$/iu.test(String(value || ''));
   }
 
-  function freshHandoffStorageKey(jobId) {
-    return isValidJobId(jobId) ? `${FRESH_HANDOFF_PREFIX}${jobId}` : '';
-  }
-
   function urlWithJob(value, jobId) {
     if (!isValidJobId(jobId)) return '';
     try {
@@ -1198,58 +1157,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     }
   }
 
-  function urlWithFreshLaunch(value, jobId) {
-    if (!isValidJobId(jobId)) return '';
-    try {
-      const source = new URL(String(value));
-      const url = new URL('/', source.origin);
-      url.hash = `${FRESH_HASH_KEY}=${encodeURIComponent(jobId)}`;
-      return url.toString();
-    } catch (_error) {
-      return '';
-    }
-  }
-
-  function parseFreshJobId(value) {
-    try {
-      const url = new URL(String(value));
-      const params = new URLSearchParams(url.hash.replace(/^#/u, ''));
-      const id = params.get(FRESH_HASH_KEY) || '';
-      return isValidJobId(id) ? id : '';
-    } catch (_error) {
-      return '';
-    }
-  }
-
-  function isFreshLaunch(value) {
-    return Boolean(parseFreshJobId(value));
-  }
-
-  function sanitizeFreshHandoff(raw, now = Date.now(), expectedId = '') {
-    if (!raw || typeof raw !== 'object') return null;
-    const id = String(raw.id || '');
-    const createdAt = Number(raw.createdAt);
-    const handoff = String(raw.handoff == null ? '' : raw.handoff)
-      .replace(/\r\n?/gu, '\n')
-      .slice(0, FRESH_HANDOFF_MAX_LENGTH)
-      .trim();
-    if (!isValidJobId(id) || expectedId && id !== expectedId || !handoff) return null;
-    if (!Number.isFinite(createdAt) || createdAt > now + 60_000 || now - createdAt > FRESH_HANDOFF_MAX_AGE_MS) return null;
-    return { version: 1, id, createdAt, handoff };
-  }
-
-  function buildFreshContinuationPrompt(value) {
-    const handoff = String(value == null ? '' : value).replace(/\r\n?/gu, '\n').trim();
-    if (!handoff) return '';
-    return `Continue the previous conversation from the handoff below. Treat it as context, follow its recommended next step, and follow any “Optional materials” instruction in your first response. Do not require materials that the handoff says are optional.\n\n--- HANDOFF ---\n${handoff}`;
-  }
-
   function sanitizeJob(raw, now = Date.now()) {
     if (!raw || typeof raw !== 'object') return null;
     const createdAt = Number(raw.createdAt);
     const sourceUrl = canonicalPageUrl(raw.sourceUrl);
-    const kind = raw.kind === 'continue' ? 'continue' : raw.kind === 'ask' ? 'ask' : '';
-    if (!kind || !Number.isFinite(createdAt) || createdAt > now + 60_000 || now - createdAt > JOB_MAX_AGE_MS) return null;
+    if (raw.kind !== 'ask' || !Number.isFinite(createdAt) || createdAt > now + 60_000 || now - createdAt > JOB_MAX_AGE_MS) return null;
     if (!isAllowedChatGPTUrl(sourceUrl)) return null;
     const question = String(raw.question == null ? '' : raw.question).slice(0, QUESTION_MAX_LENGTH);
     const targetFingerprint = String(raw.targetFingerprint == null ? '' : raw.targetFingerprint)
@@ -1272,14 +1184,14 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       sourceUrl,
       sourceRoute: routeKey(sourceUrl),
       sourceConversation,
-      kind,
+      kind: 'ask',
       locator: sanitizeLocator(raw.locator),
       targetFingerprint,
       contextFingerprint,
       question,
       // Ask in new chat is an automatic workflow: a stale or malformed saved
       // preference must never turn it back into a review-and-send step.
-      autoSend: kind === 'ask' ? true : raw.autoSend === true,
+      autoSend: true,
       branchClickAttempted: !fallbackMode && raw.branchClickAttempted === true,
       branchConversation: branchConversation && branchConversation !== sourceConversation ? branchConversation : '',
       branchReloadFrom,
@@ -2155,20 +2067,17 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     root.id = UI_ROOT_ID;
     root.innerHTML = `
       <div id="cgs-dock" aria-label="ChatGPT Workflow Toolkit controls" hidden>
-        <button class="cgs-button" type="button" data-cgs-action="open-handoff" aria-label="Continue in fresh chat" title="Continue in a fresh chat with a compact handoff">
-          <span aria-hidden="true">↗</span><span class="cgs-dock-label">Continue in fresh chat</span>
-        </button>
         <button class="cgs-icon-button" type="button" data-cgs-action="toggle-settings" aria-label="Open Workflow Toolkit settings" title="Workflow Toolkit settings">⚙</button>
       </div>
 
       <div id="cgs-settings-backdrop" hidden>
         <section id="cgs-settings" role="dialog" aria-modal="true" aria-labelledby="cgs-settings-title">
           <div class="cgs-panel-head">
-            <div><h2 id="cgs-settings-title">ChatGPT Workflow Toolkit</h2><p>Separate contextual chats, handoffs, and interface cleanup</p></div>
+            <div><h2 id="cgs-settings-title">ChatGPT Workflow Toolkit</h2><p>Separate contextual chats and interface cleanup</p></div>
             <button class="cgs-icon-button" type="button" data-cgs-action="close-settings" aria-label="Close settings">×</button>
           </div>
           <label class="cgs-setting">
-            <span><strong>Open side questions in</strong><small>A side window keeps the original instructions visible. Small screens use a tab. Fresh-chat continuation always switches this tab.</small></span>
+            <span><strong>Open side questions in</strong><small>A side window keeps the original instructions visible. Small screens use a tab.</small></span>
             <select data-cgs-setting="openMode" aria-label="Open side questions in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
           </label>
           <label class="cgs-setting">
@@ -2180,16 +2089,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
             <input type="checkbox" data-cgs-setting="hideStartWriting" aria-label="Remove Start writing">
           </label>
           <div class="cgs-version">v${VERSION}</div>
-        </section>
-      </div>
-
-      <div id="cgs-handoff-backdrop" hidden>
-        <section class="cgs-dialog" role="dialog" aria-modal="true" aria-labelledby="cgs-handoff-title">
-          <h2 id="cgs-handoff-title">Are you sure you want to continue in fresh chat?</h2>
-          <div class="cgs-dialog-actions">
-            <button class="cgs-secondary" type="button" data-cgs-action="close-handoff">Cancel</button>
-            <button class="cgs-primary" type="button" data-cgs-action="confirm-fresh-chat">Yes</button>
-          </div>
         </section>
       </div>
 
@@ -2267,9 +2166,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     const injectedMenuRegister = typeof options.registerMenuCommand === 'function'
       ? options.registerMenuCommand
       : null;
-    const freshStorageGet = typeof options.storageGet === 'function' ? options.storageGet : storageGet;
-    const freshStorageSet = typeof options.storageSet === 'function' ? options.storageSet : storageSet;
-    const freshStorageDelete = typeof options.storageDelete === 'function' ? options.storageDelete : storageDelete;
     const navigateCurrent = typeof options.navigateTo === 'function'
       ? options.navigateTo
       : (url) => {
@@ -2282,8 +2178,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         win.location.reload();
         return true;
       };
-    const freshResponseTimeout = clampInteger(options.freshResponseTimeout, 5 * 60 * 1000, 500, 10 * 60 * 1000);
-    const freshStabilityMs = clampInteger(options.freshStabilityMs, 650, 20, 5_000);
     const branchNavigationTimeout = clampInteger(options.branchNavigationTimeout, 15_000, 250, 60_000);
     const branchComposerTimeout = clampInteger(options.branchComposerTimeout, 20_000, 250, 60_000);
     const branchActionTimeout = clampInteger(options.branchActionTimeout, 6_000, 100, 20_000);
@@ -2316,60 +2210,11 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       dockPositionFrame: null,
       dockResizeObserver: null,
       dockObservedSurface: null,
-      freshContinuationPromise: null,
-      freshTransferPromise: null,
       initialJobId: isValidJobId(options.initialJobId) ? options.initialJobId : '',
-      initialFreshJobId: isValidJobId(options.initialFreshJobId) ? options.initialFreshJobId : '',
     };
 
     function element(selector) {
       return state.root && state.root.querySelector(selector);
-    }
-
-    function freshIndexEntries(raw) {
-      if (!Array.isArray(raw)) return [];
-      const seen = new Set();
-      return raw.flatMap((entry) => {
-        const id = String(entry && entry.id || '');
-        const createdAt = Number(entry && entry.createdAt);
-        if (!isValidJobId(id) || !Number.isFinite(createdAt) || seen.has(id)) return [];
-        seen.add(id);
-        return [{ id, createdAt }];
-      }).slice(-30);
-    }
-
-    async function trackFreshJob(job) {
-      const raw = await Promise.resolve(freshStorageGet(FRESH_HANDOFF_INDEX_KEY, null));
-      const entries = freshIndexEntries(raw).filter((entry) => entry.id !== job.id);
-      entries.push({ id: job.id, createdAt: job.createdAt });
-      return Promise.resolve(freshStorageSet(FRESH_HANDOFF_INDEX_KEY, entries.slice(-30)));
-    }
-
-    async function deleteFreshJob(id) {
-      const storageKey = freshHandoffStorageKey(id);
-      if (storageKey) await Promise.resolve(freshStorageDelete(storageKey));
-      const raw = await Promise.resolve(freshStorageGet(FRESH_HANDOFF_INDEX_KEY, null));
-      if (!Array.isArray(raw)) return;
-      const keep = freshIndexEntries(raw).filter((entry) => entry.id !== id);
-      if (keep.length) await Promise.resolve(freshStorageSet(FRESH_HANDOFF_INDEX_KEY, keep));
-      else await Promise.resolve(freshStorageDelete(FRESH_HANDOFF_INDEX_KEY));
-    }
-
-    async function cleanupFreshJobs(now = Date.now()) {
-      const raw = await Promise.resolve(freshStorageGet(FRESH_HANDOFF_INDEX_KEY, null));
-      if (!Array.isArray(raw)) return;
-      const keep = [];
-      for (const entry of freshIndexEntries(raw)) {
-        const job = sanitizeFreshHandoff(
-          await Promise.resolve(freshStorageGet(freshHandoffStorageKey(entry.id), null)),
-          now,
-          entry.id,
-        );
-        if (job) keep.push(entry);
-        else await Promise.resolve(freshStorageDelete(freshHandoffStorageKey(entry.id)));
-      }
-      if (keep.length) await Promise.resolve(freshStorageSet(FRESH_HANDOFF_INDEX_KEY, keep));
-      else await Promise.resolve(freshStorageDelete(FRESH_HANDOFF_INDEX_KEY));
     }
 
     async function saveSettings() {
@@ -2449,10 +2294,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       }
       const hasComposer = Boolean(findComposer(doc));
       const hasCompletedResponse = getCompletedAssistantTurns(doc).length > 0;
-      const generating = hasActiveGeneration(doc);
       dock.hidden = !hasComposer && !hasCompletedResponse;
-      const continueButton = dock.querySelector('[data-cgs-action="open-handoff"]');
-      if (continueButton) continueButton.hidden = !hasCompletedResponse || generating || Boolean(state.freshContinuationPromise);
       if (dock.hidden) {
         clearDockPosition(dock);
         observeDockSurface(null);
@@ -2731,312 +2573,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       state.selectedQuote = '';
     }
 
-    function sideHandoffIsActive() {
-      return Boolean(state.sideAutomationActive || state.incomingRunPromise || state.incomingJobId);
-    }
-
-    function openHandoff() {
-      if (sideHandoffIsActive()) {
-        toast('Finish the separate-chat question before starting a fresh-chat continuation.');
-        return;
-      }
-      if (isReadOnlyChatPage(win.location.href)) {
-        toast('Shared ChatGPT pages are read-only. Open a signed-in conversation before continuing.');
-        return;
-      }
-      if (hasActiveGeneration(doc)) {
-        toast('Wait for ChatGPT to finish before preparing a fresh-chat continuation.');
-        return;
-      }
-      if (!getCompletedAssistantTurns(doc).length) {
-        toast('Continue in fresh chat becomes available after ChatGPT completes a response.');
-        return;
-      }
-      if (state.freshContinuationPromise) {
-        toast('The fresh-chat handoff is already being prepared.');
-        return;
-      }
-      state.focusReturn = doc.activeElement;
-      element('#cgs-handoff-backdrop').hidden = false;
-      win.setTimeout(() => element('[data-cgs-action="confirm-fresh-chat"]').focus(), 0);
-    }
-
-    function closeHandoff(restoreFocus = true) {
-      element('#cgs-handoff-backdrop').hidden = true;
-      if (restoreFocus && state.focusReturn && state.focusReturn.isConnected) state.focusReturn.focus();
-      state.focusReturn = null;
-    }
-
-    function sendComposerDirectly(composer) {
-      if (sideHandoffIsActive()) return false;
-      const sendButton = findSendButton(doc, composer);
-      if (!sendButton || sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true') return false;
-      sendButton.click();
-      return true;
-    }
-
-    function isHandoffRequestTurn(turn) {
-      const signature = 'Create a compact, self-contained handoff for continuing this conversation in a brand-new chat.';
-      return roleOfTurn(turn) === 'user' && normalizeText(accessibleText(turn)).startsWith(signature);
-    }
-
-    function waitForFreshAssistant(sourceRoute, baselineUserCount, baselineRequestCount) {
-      return new Promise((resolve) => {
-        const startedAt = Date.now();
-        let observer = null;
-        let checkTimer = null;
-        let timeoutTimer = null;
-        let candidate = null;
-        let candidateText = '';
-        let stableSince = 0;
-        let settled = false;
-        const finish = (value) => {
-          if (settled) return;
-          settled = true;
-          if (observer) observer.disconnect();
-          if (checkTimer) win.clearTimeout(checkTimer);
-          if (timeoutTimer) win.clearTimeout(timeoutTimer);
-          resolve(value);
-        };
-        const scheduleCheck = (delay = 180) => {
-          if (settled || checkTimer) return;
-          checkTimer = win.setTimeout(() => {
-            checkTimer = null;
-            check();
-          }, delay);
-        };
-        const check = () => {
-          if (routeKey(win.location.href) !== sourceRoute) {
-            finish({ error: 'The conversation changed before the handoff finished.' });
-            return;
-          }
-          const turns = getTurns(doc);
-          const users = turns.filter((turn) => roleOfTurn(turn) === 'user');
-          const userCount = users.length;
-          if (userCount > baselineUserCount + 1) {
-            finish({ error: 'Another message was sent before the handoff finished.' });
-            return;
-          }
-          const requests = users.filter(isHandoffRequestTurn);
-          if (userCount > baselineUserCount && requests.length <= baselineRequestCount) {
-            finish({ error: 'ChatGPT did not post the expected handoff request.' });
-            return;
-          }
-          const request = requests.length > baselineRequestCount ? requests[requests.length - 1] : null;
-          const requestIndex = request ? turns.indexOf(request) : -1;
-          const laterTurns = requestIndex >= 0 ? turns.slice(requestIndex + 1) : [];
-          if (laterTurns.some((turn) => roleOfTurn(turn) === 'user')) {
-            finish({ error: 'Another message was sent before the handoff finished.' });
-            return;
-          }
-          const next = laterTurns.find((turn) => roleOfTurn(turn) === 'assistant') || null;
-          const text = next && !hasActiveGeneration(doc) ? extractAssistantHandoff(next) : '';
-          if (next && text) {
-            if (candidate === next && candidateText === text) {
-              if (Date.now() - stableSince >= freshStabilityMs) finish({ turn: next, text });
-              else scheduleCheck(Math.max(20, freshStabilityMs - (Date.now() - stableSince)));
-            } else {
-              candidate = next;
-              candidateText = text;
-              stableSince = Date.now();
-              scheduleCheck(freshStabilityMs);
-            }
-          } else {
-            candidate = null;
-            candidateText = '';
-            stableSince = 0;
-          }
-        };
-        if (win.MutationObserver) {
-          observer = new win.MutationObserver(() => scheduleCheck());
-          observer.observe(doc.querySelector('main') || doc.body || doc.documentElement, {
-            childList: true,
-            subtree: true,
-            characterData: true,
-            attributes: true,
-            attributeFilter: ['data-is-streaming', 'data-streaming', 'data-message-author-role', 'data-testid', 'aria-label'],
-          });
-        }
-        timeoutTimer = win.setTimeout(() => {
-          finish({ error: 'ChatGPT did not finish the handoff in time.' });
-        }, Math.max(1, freshResponseTimeout - (Date.now() - startedAt)));
-        check();
-      });
-    }
-
-    async function continueInFreshChat() {
-      if (state.freshContinuationPromise) return state.freshContinuationPromise;
-      if (sideHandoffIsActive()) {
-        closeHandoff(false);
-        toast('Finish the separate-chat question before starting a fresh-chat continuation.');
-        return false;
-      }
-      const task = (async () => {
-        closeHandoff(false);
-        if (isReadOnlyChatPage(win.location.href)) {
-          toast('Fresh-chat continuation requires a signed-in, editable conversation.');
-          return false;
-        }
-        if (hasActiveGeneration(doc)) {
-          toast('Wait for ChatGPT to finish its current response, then try again.');
-          return false;
-        }
-        const baselineTurns = getCompletedAssistantTurns(doc);
-        if (!baselineTurns.length) {
-          toast('A completed ChatGPT response is required before continuing in a fresh chat.');
-          return false;
-        }
-        const composer = findComposer(doc);
-        if (!composer) {
-          toast('Could not find ChatGPT’s message box. Open a normal chat and try again.');
-          return false;
-        }
-        if (getComposerText(composer).trim()) {
-          toast('Your message box already has a draft. Send, save, or clear it before continuing in a fresh chat.', 8_000);
-          composer.focus();
-          return false;
-        }
-        if (attachmentState(composer).count) {
-          toast('Remove or send the staged attachment before continuing in a fresh chat.', 8_000);
-          composer.focus();
-          return false;
-        }
-        const sourceRoute = routeKey(win.location.href);
-        const sourceTurns = getTurns(doc);
-        const baselineUserCount = sourceTurns.filter((turn) => roleOfTurn(turn) === 'user').length;
-        const baselineRequestCount = sourceTurns.filter(isHandoffRequestTurn).length;
-        if (!setComposerText(composer, HANDOFF_PROMPT, win) || !composerTextEquals(composer, HANDOFF_PROMPT)) {
-          toast('ChatGPT did not accept the handoff request. Nothing was sent.');
-          return false;
-        }
-        const readySend = await waitForCondition(() => {
-          const button = findSendButton(doc, composer);
-          return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
-        }, { root: composerScope(composer) || doc.documentElement, win, timeout: 5_000, attributes: true });
-        if (!readySend || !sendComposerDirectly(composer)) {
-          toast('The handoff request is ready, but ChatGPT’s Send button was unavailable. Press Send or try again.', 8_000);
-          composer.focus();
-          return false;
-        }
-        toast('Creating a compact handoff, then switching this tab…', 10_000);
-        const result = await waitForFreshAssistant(sourceRoute, baselineUserCount, baselineRequestCount);
-        if (!result || !result.text) {
-          toast(result && result.error || 'ChatGPT did not produce a usable handoff. This chat was left open.', 9_000);
-          return false;
-        }
-        const currentComposer = findComposer(doc);
-        if (!currentComposer || getComposerText(currentComposer).trim() || attachmentState(currentComposer).count) {
-          toast('A new draft or attachment appeared while the handoff was being created, so this chat was left open.', 9_000);
-          if (currentComposer) currentComposer.focus();
-          return false;
-        }
-        const id = createJobId();
-        const job = sanitizeFreshHandoff({ version: 1, id, createdAt: Date.now(), handoff: result.text }, Date.now(), id);
-        const targetUrl = urlWithFreshLaunch(win.location.href, id);
-        const storageKey = freshHandoffStorageKey(id);
-        if (!job || !targetUrl || !storageKey || !await Promise.resolve(freshStorageSet(storageKey, job))) {
-          toast('Workflow Toolkit could not save the one-time handoff. This chat was left open.', 9_000);
-          return false;
-        }
-        try { await trackFreshJob(job); } catch (_error) { /* The transfer can proceed without the expiry index. */ }
-        const navigationComposer = findComposer(doc);
-        if (routeKey(win.location.href) !== sourceRoute || !navigationComposer || getComposerText(navigationComposer).trim() ||
-          attachmentState(navigationComposer).count) {
-          await deleteFreshJob(id);
-          toast('The conversation, draft, or attachments changed before the new chat opened, so this chat was left open.', 9_000);
-          if (navigationComposer) navigationComposer.focus();
-          return false;
-        }
-        try {
-          const navigated = await Promise.resolve(navigateCurrent(targetUrl));
-          if (navigated === false) throw new Error('navigation rejected');
-        } catch (_error) {
-          await deleteFreshJob(id);
-          toast('The new chat could not be opened. This chat was left open.', 9_000);
-          return false;
-        }
-        return true;
-      })().catch((error) => {
-        if (win.console && typeof win.console.error === 'function') {
-          win.console.error('[ChatGPT Workflow Toolkit] Fresh-chat continuation failed:', error);
-        }
-        toast('The fresh-chat handoff stopped unexpectedly. This chat was left open.', 9_000);
-        return false;
-      });
-      state.freshContinuationPromise = task;
-      state.freshTransferPromise = task;
-      scheduleDockAvailability();
-      try {
-        return await task;
-      } finally {
-        if (state.freshContinuationPromise === task) state.freshContinuationPromise = null;
-        scheduleDockAvailability();
-      }
-    }
-
-    async function consumeFreshLaunch(capturedJobId = '') {
-      const id = isValidJobId(capturedJobId) ? capturedJobId : parseFreshJobId(win.location.href);
-      if (!id) return false;
-      const storageKey = freshHandoffStorageKey(id);
-      const raw = await Promise.resolve(freshStorageGet(storageKey, null));
-      const job = sanitizeFreshHandoff(raw, Date.now(), id);
-      if (!job) {
-        await deleteFreshJob(id);
-        try { win.history.replaceState(win.history.state, '', canonicalPageUrl(win.location.href)); } catch (_error) { /* Random ID only. */ }
-        toast('This fresh-chat handoff expired. Return to the original chat and try again.', 8_000);
-        return false;
-      }
-      const prompt = buildFreshContinuationPrompt(job.handoff);
-      const composer = await waitForCondition(() => findComposer(doc), {
-        root: doc.documentElement,
-        win,
-        timeout: 20_000,
-        attributes: true,
-      });
-      if (!composer) {
-        toast('The fresh chat opened, but its message box was not available.', 8_000);
-        return false;
-      }
-      const existing = getComposerText(composer).trim();
-      if (existing && existing !== prompt) {
-        toast('The fresh chat already has a draft, so Workflow Toolkit did not replace it.', 8_000);
-        composer.focus();
-        return false;
-      }
-      if (!setComposerText(composer, prompt, win) || !composerTextEquals(composer, prompt)) {
-        toast('ChatGPT did not keep the handoff in its message box.', 8_000);
-        return false;
-      }
-      const sendButton = await waitForCondition(() => {
-        const button = findSendButton(doc, composer);
-        return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
-      }, { root: composerScope(composer) || doc.documentElement, win, timeout: 10_000, attributes: true });
-      const baselineUserCount = getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user').length;
-      if (!sendButton || !sendComposerDirectly(composer)) {
-        toast('The handoff is ready. ChatGPT’s Send button was unavailable, so press Send once it is ready.', 9_000);
-        composer.focus();
-        return false;
-      }
-      const acknowledged = await waitForCondition(() => {
-        const current = findComposer(doc);
-        if (current && !getComposerText(current).trim()) return current;
-        const users = getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user');
-        const latest = users.length > baselineUserCount ? users[users.length - 1] : null;
-        return latest && normalizeText(accessibleText(latest)).startsWith('Continue the previous conversation from the handoff below.')
-          ? latest
-          : null;
-      }, { root: doc.documentElement, win, timeout: 8_000, attributes: true });
-      if (!acknowledged) {
-        toast('The handoff is still in the message box because ChatGPT did not confirm Send. Press Send once when ready.', 9_000);
-        composer.focus();
-        return false;
-      }
-      await deleteFreshJob(id);
-      try { win.history.replaceState(win.history.state, '', canonicalPageUrl(win.location.href)); } catch (_error) { /* Random ID only. */ }
-      toast('Continuing in this fresh chat.');
-      return true;
-    }
-
     function updateSelectionPill() {
       if (!state.settings.showTurnButtons) return hideSelectionPill();
       const selection = win.getSelection && win.getSelection();
@@ -3154,16 +2690,16 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         version: 1,
         createdAt: Date.now(),
         sourceUrl,
-        kind: options.kind === 'continue' ? 'continue' : 'ask',
+        kind: 'ask',
         locator,
         targetFingerprint: assistantTurnFingerprint(turn),
         contextFingerprint: conversationContextFingerprint(doc, turn),
         question: String(options.question || ''),
-        autoSend: options.kind === 'continue' ? options.autoSend === true : true,
+        autoSend: true,
       });
       if (!job || !await storageSet(`${JOB_PREFIX}${jobId}`, job)) {
         closeReservedWindow(reservation);
-        toast('Workflow Toolkit could not save the one-time branch handoff. Check userscript storage permissions.');
+        toast('Workflow Toolkit could not save the one-time side-chat transfer. Check userscript storage permissions.');
         return false;
       }
       await trackJob(jobId, job.createdAt);
@@ -3181,7 +2717,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       win.setTimeout(async () => {
         await deleteTrackedJob(jobId);
       }, JOB_MAX_AGE_MS + 5_000);
-      toast(options.kind === 'continue' ? 'Opening a separate chat…' : 'Opening and sending your question in a separate chat…');
+      toast('Opening and sending your question in a separate chat…');
       return true;
     }
 
@@ -3545,7 +3081,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         showRecovery(job, 'A blank new chat could not be verified, so nothing was inserted or sent.', null, { canRetry: false });
         return false;
       }
-      const prompt = buildSideFallbackPrompt(job.fallbackTranscript, job.question, job.kind, state.incomingJobId);
+      const prompt = buildSideFallbackPrompt(job.fallbackTranscript, job.question, state.incomingJobId);
       if (!prompt) {
         showRecovery(job, 'The saved conversation context was unavailable, so nothing was inserted or sent.', null, { canRetry: false });
         return false;
@@ -3758,9 +3294,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         await markSideSendAttempted(job);
         return finishObservedSideSend(job, expectedConversation, baselineUserCount);
       }
-      const outgoingQuestion = job.kind === 'ask'
-        ? buildAccuracyGuardedPrompt(job.question)
-        : job.question;
+      const outgoingQuestion = buildAccuracyGuardedPrompt(job.question);
       if (!job.questionInserted) {
         job.questionInserted = true;
         job.baselineUserCount = baselineUserCount;
@@ -3792,7 +3326,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       if (fromRecovery) closeRecovery();
 
       if (!job.autoSend) {
-        toast(job.kind === 'continue' ? 'Branch ready — your draft was carried over.' : 'Side question ready — review it and press Send.');
+        toast('Side question ready — review it and press Send.');
         composer.focus();
         return true;
       }
@@ -3899,12 +3433,12 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
     async function requestVerifiedBranchReload(job) {
       if (!state.incomingJobId) {
-        showRecovery(job, 'The separate chat opened, but its reload handoff was unavailable. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        showRecovery(job, 'The separate chat opened, but its reload transfer was unavailable. Nothing was sent.', state.recoveryTurn, { canRetry: false });
         return false;
       }
       job.branchReloadFrom = state.pageInstanceId;
       if (!await persistIncomingJob(job) || !isExpectedBranchConversation(job, state.branchConversation)) {
-        showRecovery(job, 'The separate chat changed or its reload handoff could not be saved. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        showRecovery(job, 'The separate chat changed or its reload transfer could not be saved. Nothing was sent.', state.recoveryTurn, { canRetry: false });
         return false;
       }
       const targetUrl = urlWithJob(canonicalPageUrl(win.location.href), state.incomingJobId);
@@ -4125,7 +3659,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
           win.history.replaceState(win.history.state, '', canonicalPageUrl(win.location.href));
         }
       } catch (_error) {
-        // The fragment contains only a random handoff ID.
+        // The fragment contains only a random transfer ID.
       }
     }
 
@@ -4139,7 +3673,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       const lockManager = win.navigator && win.navigator.locks;
       if (!isValidJobId(jobId) || !lockManager || typeof lockManager.request !== 'function') {
         if (messages.unsupported !== '') {
-          toast(messages.unsupported || 'This browser cannot safely lock the separate-chat handoff, so Workflow Toolkit did not send anything.', 8_000);
+          toast(messages.unsupported || 'This browser cannot safely lock the separate-chat transfer, so Workflow Toolkit did not send anything.', 8_000);
         }
         return { acquired: false, value: false, reason: 'unsupported' };
       }
@@ -4159,7 +3693,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         );
       } catch (_error) {
         if (messages.error !== '') {
-          toast(messages.error || 'Workflow Toolkit could not safely lock this separate-chat handoff. Nothing was sent.', 8_000);
+          toast(messages.error || 'Workflow Toolkit could not safely lock this separate-chat transfer. Nothing was sent.', 8_000);
         }
         return { acquired: false, value: false, reason: 'error' };
       }
@@ -4211,7 +3745,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       try {
         const jobId = state.incomingJobId;
         if (!isValidJobId(jobId)) {
-          toast('This separate-chat handoff can no longer be retried safely. Return to the original chat and ask again.');
+          toast('This separate-chat transfer can no longer be retried safely. Return to the original chat and ask again.');
           return false;
         }
         const outcome = await withIncomingJobLock(jobId, async () => {
@@ -4335,12 +3869,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         const quote = state.selectedQuote;
         hideSelectionPill();
         openQuestion(turn, quote);
-      } else if (action === 'open-handoff') {
-        openHandoff();
-      } else if (action === 'close-handoff') {
-        closeHandoff();
-      } else if (action === 'confirm-fresh-chat') {
-        await continueInFreshChat();
       } else if (action === 'toggle-settings') {
         openSettings();
       } else if (action === 'close-settings') {
@@ -4367,7 +3895,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         }
         const reservation = reserveBranchWindow();
         actionNode.disabled = true;
-        const launchTask = launchBranch(turn, { kind: 'ask', question, autoSend: true, reservation });
+        const launchTask = launchBranch(turn, { question, reservation });
         state.sideLaunchPromise = launchTask;
         try {
           const launched = await launchTask;
@@ -4385,11 +3913,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
 
     function onKeyDown(event) {
       if (event.key === 'Tab') {
-        const activeModal = !element('#cgs-handoff-backdrop').hidden
-          ? element('#cgs-handoff-backdrop')
-          : !element('#cgs-settings-backdrop').hidden
-            ? element('#cgs-settings-backdrop')
-            : null;
+        const activeModal = !element('#cgs-settings-backdrop').hidden
+          ? element('#cgs-settings-backdrop')
+          : null;
         if (activeModal) {
           const focusable = [...activeModal.querySelectorAll('button, textarea, select, input, a[href]')]
             .filter((node) => !node.disabled && isProbablyVisible(node));
@@ -4411,7 +3937,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
         else if (!element('#cgs-recovery-backdrop').hidden) {
           void closeIncomingJob();
         }
-        else if (!element('#cgs-handoff-backdrop').hidden) closeHandoff();
         else if (!element('#cgs-settings-backdrop').hidden) closeSettings();
       }
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !element('#cgs-dialog-backdrop').hidden) {
@@ -4479,8 +4004,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
       scheduleScan(doc.body);
 
       await cleanupExpiredJobs();
-      await cleanupFreshJobs();
-      await consumeFreshLaunch(state.initialFreshJobId);
       await consumeIncomingJob(state.initialJobId);
       return state;
     }
@@ -4517,10 +4040,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     // canonicalize its SPA URL while the userscript is starting.
     const initialUrl = String(win.location.href);
     const initialJobId = parseJobId(initialUrl);
-    const initialFreshJobId = parseFreshJobId(initialUrl);
     await waitForBody(doc, win);
     injectStyles(doc);
-    const app = createApp(doc, win, { initialJobId, initialFreshJobId });
+    const app = createApp(doc, win, { initialJobId });
     await app.start();
     return app;
   }
@@ -4529,8 +4051,6 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     VERSION,
     DEFAULT_SETTINGS,
     JOB_MAX_AGE_MS,
-    FRESH_HANDOFF_MAX_AGE_MS,
-    FRESH_HANDOFF_MAX_LENGTH,
     SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH,
     SELECTED_QUOTE_MAX_LENGTH,
     normalizeText,
@@ -4553,7 +4073,7 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     buildSelectedQuestion,
     requiresAnswerVerification,
     buildAccuracyGuardedPrompt,
-    extractAssistantHandoff,
+    extractAssistantContent,
     assistantTurnFingerprint,
     conversationContextFingerprint,
     serializeConversation,
@@ -4566,15 +4086,9 @@ ${request}`.slice(0, SIDE_FALLBACK_PROMPT_MAX_LENGTH);
     isReadOnlyChatPage,
     isAllowedChatGPTUrl,
     isValidJobId,
-    freshHandoffStorageKey,
     urlWithJob,
     urlWithNewChatJob,
     parseJobId,
-    urlWithFreshLaunch,
-    parseFreshJobId,
-    isFreshLaunch,
-    sanitizeFreshHandoff,
-    buildFreshContinuationPrompt,
     sanitizeJob,
     accessibleText,
     findComposer,
