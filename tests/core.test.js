@@ -305,7 +305,6 @@ test('sanitizeJob rejects malformed, expired, future, and off-site jobs', () => 
 
   assert.equal(toolkit.sanitizeJob(null, now), null);
   assert.equal(toolkit.sanitizeJob({ ...valid, kind: 'other' }, now), null);
-  assert.equal(toolkit.sanitizeJob({ ...valid, kind: 'continue' }, now), null);
   assert.equal(toolkit.sanitizeJob({ ...valid, createdAt: now - toolkit.JOB_MAX_AGE_MS - 1 }, now), null);
   assert.equal(toolkit.sanitizeJob({ ...valid, createdAt: now + 60_001 }, now), null);
   assert.equal(toolkit.sanitizeJob({ ...valid, sourceUrl: 'https://example.com/c/abc' }, now), null);

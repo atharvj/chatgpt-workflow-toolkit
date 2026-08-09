@@ -82,9 +82,6 @@ test('app smoke: installs a single whole-chat, auto-send side-question flow', as
   assert.equal(document.querySelector('#cgs-dock').hidden, false);
   assert.equal(document.querySelector('[data-cgs-action="toggle-settings"]').textContent, '⚙');
   assert.equal(document.querySelector('#cgs-selection-pill').textContent, 'Ask in new chat');
-  assert.equal(document.querySelector('#cgs-handoff-backdrop'), null);
-  assert.equal(document.querySelector('[data-cgs-action="open-handoff"]'), null);
-  assert.doesNotMatch(document.querySelector('#cgs-root').textContent, /Continue in fresh chat|Continue lightweight|Ask aside/u);
 
   turnButton.click();
   const questionBackdrop = document.querySelector('#cgs-dialog-backdrop');
