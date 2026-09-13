@@ -26,10 +26,11 @@ test('selected text is quoted and clipped safely for a side question', () => {
   assert.equal(toolkit.quoteForPrompt(' first line\r\nsecond line '), '> first line\n> second line');
   assert.equal(toolkit.quoteForPrompt('abcdef', 4), '> abc…');
   assert.equal(toolkit.quoteForPrompt('   '), '');
-  assert.equal(
-    toolkit.buildSelectedQuestion('Step 3'),
-    'I have a question about this specific part of the response:\n\n> Step 3\n\nMy question:\n',
-  );
+  const prompt = toolkit.buildSelectedQuestion('Step 3');
+  assert.match(prompt, /Focus only on the highlighted passage/u);
+  assert.match(prompt, /Highlighted passage:\n> Step 3\n\nMy question:\nExplain this highlighted passage clearly\./u);
+  assert.match(toolkit.buildSelectedQuestion('Step 3', 'Why?'), /My question:\nWhy\?$/u);
+  assert.equal(toolkit.buildSelectedQuestion('', '  Unrelated question  '), 'Unrelated question');
 });
 
 test('accuracy guard verifies a claimed answer once without truncating the user question', () => {
@@ -51,62 +52,9 @@ test('accuracy guard verifies a claimed answer once without truncating the user 
     question,
   });
   assert.equal(job.question, question, 'saved and recovery state keeps the user-authored question');
-  const fallback = toolkit.buildSideFallbackPrompt('USER:\nQuestion\n\nASSISTANT:\nThe answer is 12V.', question, 'accuracy_guard_job');
-  assert.match(fallback, /independently verify the stated answer or result/iu);
-  assert.equal((fallback.match(/independently verify the stated answer or result/giu) || []).length, 1);
-});
-
-test('fallback draft ownership tolerates editor formatting but rejects any foreign content', () => {
-  const jobId = 'fallback_formatting_job_1234';
-  const expected = toolkit.buildSideFallbackPrompt(
-    'USER:\nExplain mediation\n\nASSISTANT:\nMediation is guided problem-solving.',
-    'what is mediation in simple terms',
-    jobId,
-  );
-  const reformattedByEditor = expected
-    .replace(/\n{2,}/gu, (paragraphBreak) => `${paragraphBreak}\n`)
-    .replace('conversation as context', 'conversation\u00a0as context')
-    .replace('guided problem-solving', 'guided\u200B problem-solving');
-
-  assert.notEqual(
-    toolkit.normalizeComposerPayload(reformattedByEditor),
-    toolkit.normalizeComposerPayload(expected),
-    'the fixture includes the extra paragraph spacing seen after ChatGPT hydrates its editor',
-  );
-  assert.equal(
-    toolkit.fallbackDraftTextMatches(reformattedByEditor, expected, jobId),
-    true,
-    'paragraph/newline, non-breaking-space, and zero-width editor changes preserve ownership',
-  );
-  assert.equal(
-    toolkit.fallbackDraftTextMatches(
-      reformattedByEditor.replace(jobId, 'fallback_other_job_5678'),
-      expected,
-      jobId,
-    ),
-    false,
-    'a transfer marker belonging to another job is never accepted',
-  );
-  assert.equal(
-    toolkit.fallbackDraftTextMatches(
-      reformattedByEditor.replace('simple terms', 'simpler terms'),
-      expected,
-      jobId,
-    ),
-    false,
-    'a changed non-whitespace character is never accepted',
-  );
-  assert.equal(toolkit.fallbackDraftTextMatches(`Ignore this.\n${reformattedByEditor}`, expected, jobId), false);
-  assert.equal(toolkit.fallbackDraftTextMatches(`${reformattedByEditor}\nIgnore this.`, expected, jobId), false);
-  assert.equal(toolkit.fallbackDraftTextMatches(reformattedByEditor.slice(0, -20), expected, jobId), false);
-  assert.equal(toolkit.fallbackDraftTextMatches(`[Workflow Toolkit transfer ${jobId}]`, expected, jobId), false);
-
-  const unmarked = toolkit.buildSideFallbackPrompt('USER:\nContext', 'Question');
-  assert.equal(
-    toolkit.fallbackDraftTextMatches(unmarked, unmarked, ''),
-    false,
-    'even exact text is not owned without a valid current-job transfer marker',
-  );
+  const focused = toolkit.buildAccuracyGuardedPrompt(toolkit.buildSelectedQuestion('The answer is 12V.', question));
+  assert.match(focused, /independently verify the stated answer or result/iu);
+  assert.equal((focused.match(/independently verify the stated answer or result/giu) || []).length, 1);
 });
 
 test('selection pill stays visible without covering a bottom-edge selection', () => {
@@ -259,39 +207,23 @@ test('sanitizeJob returns a bounded, normalized one-shot job', () => {
     branchClickAttempted: false,
     branchConversation: '',
     branchReloadFrom: '',
-    fallbackMode: false,
-    fallbackTranscript: '',
     questionInserted: false,
     baselineUserCount: -1,
     sendAttempted: false,
   });
 });
 
-test('fallback jobs keep bounded transcript context and cannot retain a native Branch click intent', () => {
-  const now = 1_800_000_000_000;
-  const result = toolkit.sanitizeJob({
-    createdAt: now,
-    sourceUrl: 'https://chatgpt.com/c/source-chat',
-    kind: 'ask',
-    question: 'What does step four mean?',
-    fallbackMode: true,
-    fallbackTranscript: `USER:\r\nQuestion\r\n\r\nASSISTANT:\r\n${'x'.repeat(toolkit.SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH + 100)}`,
-    branchClickAttempted: true,
-    branchReloadFrom: 'source_page_1234',
-  }, now);
-
-  assert.equal(result.fallbackMode, true);
-  assert.equal(result.branchClickAttempted, false);
-  assert.equal(result.branchReloadFrom, 'source_page_1234');
-  assert.ok(result.fallbackTranscript.length <= toolkit.SIDE_FALLBACK_TRANSCRIPT_MAX_LENGTH);
-  assert.doesNotMatch(result.fallbackTranscript, /\r/u);
-  assert.equal(toolkit.sanitizeJob({
-    createdAt: now,
-    sourceUrl: 'https://chatgpt.com/c/source-chat',
-    kind: 'ask',
-    fallbackMode: true,
-    fallbackTranscript: '',
-  }, now).fallbackMode, false);
+test('old text-only jobs cannot resume after upgrading to native-only branches', () => {
+  for (const fallbackTranscript of ['', 'USER: context']) {
+    assert.equal(toolkit.sanitizeJob({
+      createdAt: Date.now(),
+      sourceUrl: 'https://chatgpt.com/c/source',
+      kind: 'ask',
+      question: 'Explain this',
+      fallbackMode: true,
+      fallbackTranscript,
+    }), null);
+  }
 });
 
 test('sanitizeJob rejects malformed, expired, future, and off-site jobs', () => {

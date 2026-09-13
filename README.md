@@ -4,8 +4,10 @@ A lightweight userscript that adds separate contextual chats and small interface
 
 ## Features
 
-- Ask a side question in a separate chat with the whole conversation so far.
+- Highlight a passage and **Ask in new chat**: automatically branch the whole chat, then send a question focused on that passage. Previous files and images stay in ChatGPT’s native history—not a text-only copy.
 - Remove “Start writing.”
+
+Requires ChatGPT’s Branch action. Attachment availability and conversation limits still depend on ChatGPT.
 
 ## Install
 

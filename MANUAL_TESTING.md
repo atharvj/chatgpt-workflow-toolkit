@@ -34,7 +34,10 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 
 - Select part of one instruction in an assistant response.
 - Confirm ChatGPT's native **Ask ChatGPT** control stays above the selection while the temporary **Ask in new chat** pill remains fully visible below it in light and dark mode.
-- Open it and confirm the selected text is quoted, including multiline selections.
+- Open it and confirm the selected text appears in a separate preview, including multiline selections.
+- Type a question and confirm the preview is unchanged. Submit and confirm the new message quotes only the selected passage, followed by your question (not a copied transcript).
+- Leave the question blank and confirm Submit automatically asks for an explanation of the highlight.
+- Upload a file and an image, add several exchanges, then highlight an older answer. Confirm the native branch includes the latest exchange and the attachment history, and ask a follow-up that requires the attachments. Check this live: DOM tests cannot verify ChatGPT’s server-side file access.
 - Repeat near the left, right, and bottom edges of the viewport and confirm the pill remains visible.
 - Select ordinary text outside an assistant response and confirm no pill appears.
 
@@ -48,9 +51,9 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 ## Failure recovery
 
 - Temporarily change `findMoreButton` and `findDirectBranchAction` locally so both return `null`.
-- Start a side question and confirm the side window automatically switches to a blank chat, transfers the visible conversation transcript, and sends the question once.
-- Confirm the original chat receives no draft or message and no “Could not find More actions” dialog appears.
-- Confirm a long chat keeps its opening goal and newest response if the emergency transcript must be shortened.
+- Start a side question and confirm the side window explains that native Branch is unavailable; it must not open a blank chat or send a text-only substitute.
+- Confirm the original chat receives no draft or message. Restore the selectors and retry; confirm only one native branch and one question are created.
+- Confirm oversized highlights/questions show a size warning rather than being silently cut off.
 - Block popups for `chatgpt.com`; confirm Workflow Toolkit reports the block and the original chat remains untouched.
 
 ## Performance
