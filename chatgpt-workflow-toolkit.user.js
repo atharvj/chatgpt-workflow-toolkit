@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.7.0
+// @version      1.7.1
 // @description  Ask about highlighted text in native ChatGPT branches and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.7.0';
+  const VERSION = '1.7.1';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -91,6 +91,8 @@
     'button[aria-label^="Send"]',
   ];
   const SUBMISSION_CONTROL_SELECTOR = 'button, input[type="submit"], [role="button"]';
+  const SHARE_HIGHLIGHTED_CONTROL_SELECTOR = 'button, [role="button"], [role="menuitem"]';
+  const HIDDEN_SHARE_HIGHLIGHTED_CLASS = 'cgs-hidden-share-highlighted';
   const DEFAULT_SETTINGS = Object.freeze({
     openMode: 'popup',
     hideStartWriting: true,
@@ -98,6 +100,7 @@
   });
 
   const STYLE_TEXT = `
+    .${HIDDEN_SHARE_HIGHLIGHTED_CLASS} { display: none !important; }
     #${UI_ROOT_ID}, #${UI_ROOT_ID} * { box-sizing: border-box; }
     #${UI_ROOT_ID} {
       color-scheme: light dark;
@@ -1003,6 +1006,24 @@
       if (control.closest && (control.closest(`#${UI_ROOT_ID}`) || control.closest(TURN_SELECTOR))) continue;
       if (lowerText(control.textContent) === 'start writing') {
         control.classList.add(HIDDEN_START_WRITING_CLASS);
+        changes += 1;
+      }
+    }
+    return changes;
+  }
+
+  function cleanShareHighlighted(root) {
+    if (!root) return 0;
+    const parentControl = root.closest && root.closest(SHARE_HIGHLIGHTED_CONTROL_SELECTOR);
+    const controls = uniqueElements([parentControl, ...collectMatches(root, SHARE_HIGHLIGHTED_CONTROL_SELECTOR)]);
+    let changes = 0;
+    for (const control of controls) {
+      // Never hide quoted examples, editable drafts, or our own controls.
+      const protectedContent = control.closest(`#${UI_ROOT_ID}, [data-message-author-role], .markdown, .prose, pre, code, textarea, input, [contenteditable]:not([contenteditable="false"])`);
+      const matches = !protectedContent && [control.textContent, control.getAttribute('aria-label'), control.getAttribute('title')]
+        .some((label) => lowerText(label) === 'share highlighted');
+      if (control.classList.contains(HIDDEN_SHARE_HIGHLIGHTED_CLASS) !== matches) {
+        control.classList.toggle(HIDDEN_SHARE_HIGHLIGHTED_CLASS, matches);
         changes += 1;
       }
     }
@@ -2198,6 +2219,7 @@
 
     function processRoot(root, decorationContext = null) {
       if (!root || (root.closest && root.closest(`#${UI_ROOT_ID}`))) return;
+      cleanShareHighlighted(root);
       if (state.settings.hideStartWriting) cleanStartWriting(root);
       if (state.settings.showTurnButtons && !isReadOnlyChatPage(win.location.href)) {
         for (const turn of potentialTurnsFromRoot(root)) decorateTurn(doc, turn, decorationContext);
@@ -3451,7 +3473,11 @@
     function observe() {
       state.observer = new win.MutationObserver((mutations) => {
         for (const mutation of mutations) {
-          if (mutation.type === 'attributes') {
+          if (mutation.type === 'characterData') {
+            // Streaming answer text needs no extra scans for this cleaner.
+            const control = mutation.target.parentElement && mutation.target.parentElement.closest(SHARE_HIGHLIGHTED_CONTROL_SELECTOR);
+            if (control) scheduleScan(control);
+          } else if (mutation.type === 'attributes') {
             scheduleScan(mutation.target);
           } else {
             for (const node of mutation.addedNodes) scheduleScan(node);
@@ -3462,9 +3488,10 @@
       state.observer.observe(doc.body, {
         childList: true,
         subtree: true,
+        characterData: true,
         attributes: true,
         attributeFilter: [
-          'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label',
+          'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label', 'title', 'role',
           'hidden', 'inert', 'aria-hidden', 'data-state', 'style', 'class',
           'data-message-author-role', 'data-turn', 'data-testid', 'data-is-streaming', 'data-streaming',
         ],
@@ -3574,6 +3601,7 @@
     assistantTurnFingerprint,
     conversationContextFingerprint,
     cleanStartWriting,
+    cleanShareHighlighted,
     restoreStartWriting,
     canonicalPageUrl,
     routeKey,

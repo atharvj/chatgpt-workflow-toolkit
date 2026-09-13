@@ -33,6 +33,7 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 ## Selected instruction
 
 - Select part of one instruction in an assistant response.
+- Confirm **Share highlighted** is hidden, but normal **Share**, **Ask ChatGPT**, and **Ask in new chat** controls remain available. Repeat after changing the selection and after navigating to another chat.
 - Confirm ChatGPT's native **Ask ChatGPT** control stays above the selection while the temporary **Ask in new chat** pill remains fully visible below it in light and dark mode.
 - Open it and confirm the selected text appears in a separate preview, including multiline selections.
 - Type a question and confirm the preview is unchanged. Submit and confirm the new message quotes only the selected passage, followed by your question (not a copied transcript).
@@ -61,3 +62,9 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Open a conversation with many turns and stream a long response.
 - Confirm Workflow Toolkit adds one response action per assistant turn, does not add duplicate buttons after rerenders, and does not noticeably affect input or scrolling.
 - Leave the tab open for several minutes and confirm there is no recurring CPU usage from Workflow Toolkit when the DOM is idle.
+
+## Desktop browser compatibility
+
+- On Windows Chrome or Edge with the userscript installed, allow popups for ChatGPT and run the side-question flow. Confirm the popup opens, branches, and sends without changing the original chat.
+- Repeat with **New tab** selected and with popups blocked; confirm tab mode works and blocked popups produce a clear notice without sending in the source chat.
+- These are live checks; mocked screen/platform tests do not establish real Windows browser compatibility.
