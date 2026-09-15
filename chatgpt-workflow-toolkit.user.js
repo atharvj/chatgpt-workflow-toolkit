@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.8.1
+// @version      1.9.0
 // @description  Ask about highlighted text in native ChatGPT branches and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.8.1';
+  const VERSION = '1.9.0';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -96,7 +96,11 @@
   const DEFAULT_SETTINGS = Object.freeze({
     openMode: 'popup',
     hideStartWriting: true,
+    hideShareHighlighted: true,
     showTurnButtons: true,
+    showSelectionButton: true,
+    preserveMathFormatting: true,
+    showMathNotices: false,
   });
 
   const STYLE_TEXT = `
@@ -504,7 +508,13 @@
     return {
       openMode: source.openMode === 'tab' ? 'tab' : 'popup',
       hideStartWriting: source.hideStartWriting !== false,
+      hideShareHighlighted: source.hideShareHighlighted !== false,
       showTurnButtons: source.showTurnButtons !== false,
+      // Older versions used one switch for both response and selection buttons.
+      showSelectionButton: typeof source.showSelectionButton === 'boolean'
+        ? source.showSelectionButton : source.showTurnButtons !== false,
+      preserveMathFormatting: source.preserveMathFormatting !== false,
+      showMathNotices: source.showMathNotices === true,
     };
   }
 
@@ -726,7 +736,7 @@
     return display ? `\n${text}\n` : text;
   }
 
-  function extractSelectionQuote(selection, turn) {
+  function extractSelectionQuote(selection, turn, options = {}) {
     const original = String(selection?.toString() || '').trim();
     const fallback = { text: original, note: '' };
     if (!selection || selection.rangeCount !== 1 || !turn) return fallback;
@@ -745,6 +755,7 @@
         return Boolean(overlap.toString().trim());
       });
       if (!roots.length) return fallback;
+      if (options.preserveMathFormatting === false) return { ...fallback, usesVisualMath: true };
       let usesVisualMath = false;
       const sources = roots.map((node) => {
         const source = mathSourceText(node);
@@ -1160,6 +1171,12 @@
       changes += 1;
     }
     return changes;
+  }
+
+  function restoreShareHighlighted(root) {
+    for (const control of collectMatches(root, `.${HIDDEN_SHARE_HIGHLIGHTED_CLASS}`)) {
+      control.classList.remove(HIDDEN_SHARE_HIGHLIGHTED_CLASS);
+    }
   }
 
   function canonicalPageUrl(value) {
@@ -2151,12 +2168,28 @@
             <select data-cgs-setting="openMode" aria-label="Open side questions in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
           </label>
           <label class="cgs-setting">
-            <span><strong>Show “Ask in new chat” on responses</strong><small>You can also select response text to get a temporary Ask in new chat button.</small></span>
+            <span><strong>Show “Ask in new chat” under answers</strong><small>Add a button below each ChatGPT answer.</small></span>
             <input type="checkbox" data-cgs-setting="showTurnButtons" aria-label="Show Ask in new chat buttons">
+          </label>
+          <label class="cgs-setting">
+            <span><strong>Show “Ask in new chat” when highlighting</strong><small>Add our button beside selected text. Does not hide ChatGPT’s own Ask button.</small></span>
+            <input type="checkbox" data-cgs-setting="showSelectionButton" aria-label="Show Ask in new chat when highlighting">
           </label>
           <label class="cgs-setting">
             <span><strong>Remove “Start writing”</strong><small>Clears that exact placeholder/control without touching message content.</small></span>
             <input type="checkbox" data-cgs-setting="hideStartWriting" aria-label="Remove Start writing">
+          </label>
+          <label class="cgs-setting">
+            <span><strong>Hide “Share highlighted”</strong><small>Turn off to restore ChatGPT’s selection-sharing button.</small></span>
+            <input type="checkbox" data-cgs-setting="hideShareHighlighted" aria-label="Hide Share highlighted">
+          </label>
+          <label class="cgs-setting">
+            <span><strong>Improve copied math</strong><small>Preserve available notation and include complete equations. Turn off for ordinary browser-selected text. Applies to your next highlight.</small></span>
+            <input type="checkbox" data-cgs-setting="preserveMathFormatting" aria-label="Improve copied math">
+          </label>
+          <label class="cgs-setting">
+            <span><strong>Show math-copy notes</strong><small>Optional explanations below the highlight preview. Hiding these does not change the question sent.</small></span>
+            <input type="checkbox" data-cgs-setting="showMathNotices" aria-label="Show math-copy notes">
           </label>
           <div class="cgs-version">v${VERSION}</div>
         </section>
@@ -2338,7 +2371,7 @@
 
     function processRoot(root, decorationContext = null) {
       if (!root || (root.closest && root.closest(`#${UI_ROOT_ID}`))) return;
-      cleanShareHighlighted(root);
+      if (state.settings.hideShareHighlighted) cleanShareHighlighted(root);
       if (state.settings.hideStartWriting) cleanStartWriting(root);
       if (state.settings.showTurnButtons && !isReadOnlyChatPage(win.location.href)) {
         for (const turn of potentialTurnsFromRoot(root)) decorateTurn(doc, turn, decorationContext);
@@ -2622,7 +2655,7 @@
       expandButton.textContent = 'Show full highlight';
       expandButton.setAttribute('aria-expanded', 'false');
       element('#cgs-selection-note').textContent = selectionNote;
-      element('#cgs-selection-note').hidden = !selectionNote;
+      element('#cgs-selection-note').hidden = !state.settings.showMathNotices || !selectionNote;
       element('#cgs-dialog-backdrop').hidden = false;
       win.setTimeout(() => {
         textarea.focus();
@@ -2674,12 +2707,12 @@
     }
 
     function updateSelectionPill() {
-      if (!state.settings.showTurnButtons) return hideSelectionPill();
+      if (!state.settings.showSelectionButton) return hideSelectionPill();
       const selection = win.getSelection && win.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) return hideSelectionPill();
       const turn = closestAssistantTurn(selection.anchorNode);
       if (!turn || !turn.contains(selection.focusNode) || state.root.contains(selection.anchorNode)) return hideSelectionPill();
-      const { text: quote, note, usesVisualMath = false } = extractSelectionQuote(selection, turn);
+      const { text: quote, note, usesVisualMath = false } = extractSelectionQuote(selection, turn, state.settings);
       if (!quote) return hideSelectionPill();
       const rect = selection.getRangeAt(0).getBoundingClientRect();
       if (!rect || (!rect.width && !rect.height)) return hideSelectionPill();
@@ -3460,7 +3493,6 @@
       const next = { ...state.settings };
       next[key] = target.type === 'checkbox' ? target.checked : target.value;
       state.settings = sanitizeSettings(next);
-      await saveSettings();
       syncSettingsUI();
       if (key === 'hideStartWriting') {
         if (state.settings.hideStartWriting) scheduleScan(doc.body);
@@ -3468,11 +3500,21 @@
       }
       if (key === 'showTurnButtons') {
         if (state.settings.showTurnButtons) scheduleScan(doc.body);
-        else {
-          removeTurnButtons(doc);
-          hideSelectionPill();
-        }
+        else removeTurnButtons(doc);
       }
+      if (key === 'showSelectionButton' || key === 'preserveMathFormatting') {
+        // Discard any stale pill so its next click uses the updated preference.
+        hideSelectionPill();
+      }
+      if (key === 'hideShareHighlighted') {
+        if (state.settings.hideShareHighlighted) scheduleScan(doc.body);
+        else restoreShareHighlighted(doc);
+      }
+      if (key === 'showMathNotices') {
+        const note = element('#cgs-selection-note');
+        note.hidden = !state.settings.showMathNotices || !note.textContent;
+      }
+      await saveSettings();
     }
 
     function onAutomationClick(event) {

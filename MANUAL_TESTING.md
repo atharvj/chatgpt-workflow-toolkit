@@ -18,6 +18,11 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Confirm the close button and Escape each close the modal.
 - Open the userscript menu and confirm **Open Workflow Toolkit settings…** is its only toolkit action and opens the same modal.
 - Repeat at a narrow mobile viewport and confirm the modal remains centered and scrolls internally.
+- Toggle **Hide Share highlighted** off/on: the native button should return/disappear immediately, including after changing the selection. Repeat for **Remove Start writing**.
+- Toggle response buttons and highlight buttons separately; each should work independently of the other.
+- Disable **Improve copied math** and make a new selection: confirm ordinary browser-selected text is used without expanding equations. Re-enable it and confirm math extraction returns on the next selection. Do not change a question already being edited.
+- Math-copy notes should be hidden by default. Enable **Show math-copy notes** to restore them, then disable it while a math question panel is open; the text should disappear without changing the saved quote or question.
+- Reload and confirm all settings persist. Upgrading an older installation with response buttons disabled should keep selection buttons disabled too until explicitly re-enabled.
 
 ## Ask in new chat
 
@@ -42,12 +47,12 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Repeat near the left, right, and bottom edges of the viewport and confirm the pill remains visible.
 - Select ordinary text outside an assistant response and confirm no pill appears.
 - Highlight a mix of prose and rendered equations (fractions, subscripts, powers, sums, degree symbols). Confirm the preview contains each equation's source notation once, in order, and the outgoing message matches it.
-- Start/end a highlight inside an equation. Confirm that equation is copied whole, the preview explains this, and neighboring unselected prose/equations are not included.
+- Start/end a highlight inside an equation. Confirm that equation is copied whole, the optional math-copy note explains this when enabled, and neighboring unselected prose/equations are not included.
 - Select ordinary prose again and confirm its text is unchanged and the math note disappears. Confirm selecting math does not change the original rendered answer or composer.
 - Repeat with HTML-only equations with no source annotation or MathML. Confirm each equation uses compact display text, not layout-induced line breaks, and the outgoing question asks the model to check the original equations for mathematical structure.
 - Mix source-backed and HTML-only equations in one selection; confirm source-backed formulas still keep their notation.
 - Click **Show full highlight**, then **Collapse highlight**. Confirm the full saved quote is unchanged and the last selected equation is included when sent, even if the preview is collapsed.
-- An equation with neither source nor readable display text should still give a warning, not an invented transcription.
+- An equation with neither source nor readable display text should remain unchanged, not become an invented transcription. With math-copy notes enabled, a warning should explain this.
 
 ## Start writing cleaner
 

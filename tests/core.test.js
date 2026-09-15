@@ -15,11 +15,26 @@ test('normalizeText and settings sanitization use stable defaults', () => {
     hideStartWriting: false,
     showTurnButtons: false,
   }), {
+    ...toolkit.DEFAULT_SETTINGS,
     openMode: 'tab',
     hideStartWriting: false,
     showTurnButtons: false,
+    showSelectionButton: false,
   });
   assert.equal(toolkit.sanitizeSettings({ openMode: 'window' }).openMode, 'popup');
+});
+
+test('optional changes have persistent independent switches with legacy selection migration', () => {
+  assert.equal(toolkit.sanitizeSettings({}).showMathNotices, false);
+  assert.equal(toolkit.sanitizeSettings({ showMathNotices: 'true' }).showMathNotices, false);
+  assert.equal(toolkit.sanitizeSettings({ showMathNotices: true }).showMathNotices, true);
+  assert.equal(toolkit.sanitizeSettings({ showTurnButtons: false }).showSelectionButton, false);
+  assert.equal(toolkit.sanitizeSettings({ showTurnButtons: false, showSelectionButton: true }).showSelectionButton, true);
+  assert.equal(toolkit.sanitizeSettings({ showSelectionButton: false }).showTurnButtons, true);
+  for (const key of ['hideStartWriting', 'hideShareHighlighted', 'showTurnButtons', 'showSelectionButton', 'preserveMathFormatting']) {
+    assert.equal(toolkit.sanitizeSettings({ [key]: false })[key], false);
+    assert.equal(toolkit.sanitizeSettings({ [key]: true })[key], true);
+  }
 });
 
 test('selected text is quoted and clipped safely for a side question', () => {
