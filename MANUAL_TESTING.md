@@ -41,6 +41,10 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Upload a file and an image, add several exchanges, then highlight an older answer. Confirm the native branch includes the latest exchange and the attachment history, and ask a follow-up that requires the attachments. Check this live: DOM tests cannot verify ChatGPT’s server-side file access.
 - Repeat near the left, right, and bottom edges of the viewport and confirm the pill remains visible.
 - Select ordinary text outside an assistant response and confirm no pill appears.
+- Highlight a mix of prose and rendered equations (fractions, subscripts, powers, sums, degree symbols). Confirm the preview contains each equation's source notation once, in order, and the outgoing message matches it.
+- Start/end a highlight inside an equation. Confirm that equation is copied whole, the preview explains this, and neighboring unselected prose/equations are not included.
+- Select ordinary prose again and confirm its text is unchanged and the math note disappears. Confirm selecting math does not change the original rendered answer or composer.
+- Repeat with an HTML-only equation with no source annotation or MathML. Confirm the ordinary selection is preserved and a warning asks you to check its layout.
 
 ## Start writing cleaner
 

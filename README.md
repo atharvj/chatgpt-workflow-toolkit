@@ -7,6 +7,7 @@ A lightweight userscript that adds separate contextual chats and small interface
 - Highlight a passage and **Ask in new chat**: automatically branch the whole chat, then send a question focused on that passage. Previous files and images stay in ChatGPT’s native history—not a text-only copy.
 - Remove “Start writing.”
 - Hide the “Share highlighted” selection button.
+- Math highlights preserve available LaTeX/MathML notation instead of scrambled display text. Partial equations include the whole equation; unsupported math stays unchanged with a warning. This improves context, not a guarantee of correct answers.
 
 Requires ChatGPT’s Branch action. Attachment availability and conversation limits still depend on ChatGPT.
 
