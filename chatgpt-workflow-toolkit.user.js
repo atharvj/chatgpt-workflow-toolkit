@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.9.0
+// @version      1.9.1
 // @description  Ask about highlighted text in native ChatGPT branches and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.9.0';
+  const VERSION = '1.9.1';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -99,8 +99,6 @@
     hideShareHighlighted: true,
     showTurnButtons: true,
     showSelectionButton: true,
-    preserveMathFormatting: true,
-    showMathNotices: false,
   });
 
   const STYLE_TEXT = `
@@ -513,8 +511,6 @@
       // Older versions used one switch for both response and selection buttons.
       showSelectionButton: typeof source.showSelectionButton === 'boolean'
         ? source.showSelectionButton : source.showTurnButtons !== false,
-      preserveMathFormatting: source.preserveMathFormatting !== false,
-      showMathNotices: source.showMathNotices === true,
     };
   }
 
@@ -736,7 +732,7 @@
     return display ? `\n${text}\n` : text;
   }
 
-  function extractSelectionQuote(selection, turn, options = {}) {
+  function extractSelectionQuote(selection, turn) {
     const original = String(selection?.toString() || '').trim();
     const fallback = { text: original, note: '' };
     if (!selection || selection.rangeCount !== 1 || !turn) return fallback;
@@ -755,7 +751,6 @@
         return Boolean(overlap.toString().trim());
       });
       if (!roots.length) return fallback;
-      if (options.preserveMathFormatting === false) return { ...fallback, usesVisualMath: true };
       let usesVisualMath = false;
       const sources = roots.map((node) => {
         const source = mathSourceText(node);
@@ -2183,14 +2178,6 @@
             <span><strong>Hide “Share highlighted”</strong><small>Turn off to restore ChatGPT’s selection-sharing button.</small></span>
             <input type="checkbox" data-cgs-setting="hideShareHighlighted" aria-label="Hide Share highlighted">
           </label>
-          <label class="cgs-setting">
-            <span><strong>Improve copied math</strong><small>Preserve available notation and include complete equations. Turn off for ordinary browser-selected text. Applies to your next highlight.</small></span>
-            <input type="checkbox" data-cgs-setting="preserveMathFormatting" aria-label="Improve copied math">
-          </label>
-          <label class="cgs-setting">
-            <span><strong>Show math-copy notes</strong><small>Optional explanations below the highlight preview. Hiding these does not change the question sent.</small></span>
-            <input type="checkbox" data-cgs-setting="showMathNotices" aria-label="Show math-copy notes">
-          </label>
           <div class="cgs-version">v${VERSION}</div>
         </section>
       </div>
@@ -2201,7 +2188,6 @@
           <p>We’ll branch the whole conversation so far using ChatGPT’s Branch action, keeping the history and its available attachments. Highlighted text is what your question will focus on. You can keep reading the original while you type.</p>
           <blockquote id="cgs-selected-context" aria-label="Highlighted passage" hidden></blockquote>
           <button type="button" class="cgs-link-button" data-cgs-action="toggle-selection-preview" aria-controls="cgs-selected-context" aria-expanded="false" hidden>Show full highlight</button>
-          <p id="cgs-selection-note" hidden></p>
           <textarea id="cgs-question" aria-label="Question for new chat" placeholder="What are you stuck on?" maxlength="${QUESTION_MAX_LENGTH}"></textarea>
           <div class="cgs-dialog-actions">
             <button class="cgs-secondary" type="button" data-cgs-action="cancel-question">Cancel</button>
@@ -2295,7 +2281,6 @@
       questionUsesVisualMath: false,
       selectedTurn: null,
       selectedQuote: '',
-      selectedNote: '',
       selectedUsesVisualMath: false,
       focusReturn: null,
       recoveryJob: null,
@@ -2624,7 +2609,7 @@
       }
     }
 
-    function openQuestion(turn, selectedText = '', selectionNote = '', usesVisualMath = false) {
+    function openQuestion(turn, selectedText = '', usesVisualMath = false) {
       if (isReadOnlyChatPage(win.location.href)) {
         toast('Shared ChatGPT pages are read-only. Open a signed-in conversation before using Workflow Toolkit.');
         return;
@@ -2654,8 +2639,6 @@
       expandButton.hidden = !selection;
       expandButton.textContent = 'Show full highlight';
       expandButton.setAttribute('aria-expanded', 'false');
-      element('#cgs-selection-note').textContent = selectionNote;
-      element('#cgs-selection-note').hidden = !state.settings.showMathNotices || !selectionNote;
       element('#cgs-dialog-backdrop').hidden = false;
       win.setTimeout(() => {
         textarea.focus();
@@ -2671,8 +2654,6 @@
       element('[data-cgs-action="toggle-selection-preview"]').hidden = true;
       element('#cgs-selected-context').textContent = '';
       element('#cgs-selected-context').hidden = true;
-      element('#cgs-selection-note').textContent = '';
-      element('#cgs-selection-note').hidden = true;
       if (restoreFocus && state.focusReturn && state.focusReturn.isConnected) state.focusReturn.focus();
       state.focusReturn = null;
     }
@@ -2702,7 +2683,6 @@
       if (pill) pill.hidden = true;
       state.selectedTurn = null;
       state.selectedQuote = '';
-      state.selectedNote = '';
       state.selectedUsesVisualMath = false;
     }
 
@@ -2712,13 +2692,12 @@
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) return hideSelectionPill();
       const turn = closestAssistantTurn(selection.anchorNode);
       if (!turn || !turn.contains(selection.focusNode) || state.root.contains(selection.anchorNode)) return hideSelectionPill();
-      const { text: quote, note, usesVisualMath = false } = extractSelectionQuote(selection, turn, state.settings);
+      const { text: quote, usesVisualMath = false } = extractSelectionQuote(selection, turn);
       if (!quote) return hideSelectionPill();
       const rect = selection.getRangeAt(0).getBoundingClientRect();
       if (!rect || (!rect.width && !rect.height)) return hideSelectionPill();
       state.selectedTurn = turn;
       state.selectedQuote = quote;
-      state.selectedNote = note;
       state.selectedUsesVisualMath = usesVisualMath;
       const pill = element('#cgs-selection-pill');
       pill.style.visibility = 'hidden';
@@ -3502,17 +3481,13 @@
         if (state.settings.showTurnButtons) scheduleScan(doc.body);
         else removeTurnButtons(doc);
       }
-      if (key === 'showSelectionButton' || key === 'preserveMathFormatting') {
+      if (key === 'showSelectionButton') {
         // Discard any stale pill so its next click uses the updated preference.
         hideSelectionPill();
       }
       if (key === 'hideShareHighlighted') {
         if (state.settings.hideShareHighlighted) scheduleScan(doc.body);
         else restoreShareHighlighted(doc);
-      }
-      if (key === 'showMathNotices') {
-        const note = element('#cgs-selection-note');
-        note.hidden = !state.settings.showMathNotices || !note.textContent;
       }
       await saveSettings();
     }
@@ -3561,10 +3536,9 @@
         event.preventDefault();
         const turn = state.selectedTurn;
         const quote = state.selectedQuote;
-        const note = state.selectedNote;
         const usesVisualMath = state.selectedUsesVisualMath;
         hideSelectionPill();
-        openQuestion(turn, quote, note, usesVisualMath);
+        openQuestion(turn, quote, usesVisualMath);
       } else if (action === 'toggle-selection-preview') {
         const preview = element('#cgs-selected-context');
         const expanded = preview.dataset.expanded !== 'true';

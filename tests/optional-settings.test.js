@@ -81,21 +81,16 @@ test('every public setting is exposed; hidden native controls can be restored an
   await waitFor(dom.window, () => share.classList.contains('cgs-hidden-share-highlighted') && start.classList.contains('cgs-hidden-start-writing'));
 });
 
-test('math-copy notes are off by default and toggle without changing the quote or draft', async (t) => {
-  const { doc, set, highlight } = await setup(t);
+test('math copying remains enabled without math settings or extra notes', async (t) => {
+  const { doc, highlight } = await setup(t);
   (await highlight()).click();
-  const note = doc.querySelector('#cgs-selection-note');
   const preview = doc.querySelector('#cgs-selected-context');
   const draft = doc.querySelector('#cgs-question');
   draft.value = 'Why?';
-  const quote = preview.textContent;
-  assert.equal(note.hidden, true);
-  assert.match(note.textContent, /whole equation/u);
-  await set('showMathNotices', true);
-  assert.equal(note.hidden, false);
-  await set('showMathNotices', false);
-  assert.equal(note.hidden, true);
-  assert.equal(preview.textContent, quote);
+  assert.equal(doc.querySelector('#cgs-selection-note'), null);
+  assert.equal(doc.querySelector('[data-cgs-setting="showMathNotices"]'), null);
+  assert.equal(doc.querySelector('[data-cgs-setting="preserveMathFormatting"]'), null);
+  assert.equal(preview.textContent, String.raw`\(x^2\)`);
   assert.equal(draft.value, 'Why?');
 });
 
@@ -105,9 +100,8 @@ test('a fresh page restores saved preferences and reflects them in the settings 
   await set('hideStartWriting', false);
   await set('showTurnButtons', false);
   await set('showSelectionButton', true);
-  await set('preserveMathFormatting', false);
-  await set('showMathNotices', true);
   const saved = structuredClone(values.get('chatgptSidecar.settings.v1'));
+  values.set('chatgptSidecar.settings.v1', { ...saved, preserveMathFormatting: false, showMathNotices: true });
   const fresh = new JSDOM('<!doctype html><body><button id="share">Share highlighted</button><button id="start">Start writing</button></body>', {
     url: 'https://chatgpt.com/c/after-reload', pretendToBeVisual: true,
   });
@@ -123,7 +117,7 @@ test('a fresh page restores saved preferences and reflects them in the settings 
   assert.notEqual(fresh.window.getComputedStyle(fresh.window.document.querySelector('#start')).display, 'none');
 });
 
-test('response and highlight buttons are independent; math changes only apply to new highlights', async (t) => {
+test('response and highlight buttons are independent while math copying stays enabled', async (t) => {
   const { doc, app, set, highlight } = await setup(t);
   await set('showTurnButtons', false);
   assert.equal(doc.querySelector('.cgs-turn-action'), null);
@@ -132,19 +126,12 @@ test('response and highlight buttons are independent; math changes only apply to
   pill.click();
   const preview = doc.querySelector('#cgs-selected-context');
   assert.equal(preview.textContent, String.raw`\(x^2\)`);
-  await set('preserveMathFormatting', false);
-  assert.equal(preview.textContent, String.raw`\(x^2\)`, 'do not silently change an open question');
-  doc.querySelector('[data-cgs-action="cancel-question"]').click();
-  (await highlight()).click();
-  assert.equal(preview.textContent, 'x', 'ordinary selection is not expanded to the whole equation');
-  assert.equal(app.state.questionUsesVisualMath, true, 'raw math still gets the original-equation caution');
   doc.querySelector('[data-cgs-action="cancel-question"]').click();
   await set('showTurnButtons', true);
   app.processRoot(doc.body);
   await set('showSelectionButton', false);
   assert.ok(doc.querySelector('.cgs-turn-action'));
   assert.equal((await highlight()).hidden, true);
-  await set('preserveMathFormatting', true);
   await set('showSelectionButton', true);
   (await highlight()).click();
   assert.equal(preview.textContent, String.raw`\(x^2\)`);

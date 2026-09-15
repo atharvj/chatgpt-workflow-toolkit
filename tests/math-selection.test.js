@@ -183,7 +183,7 @@ test('math-aware selection reaches the preview and saved native-branch question'
   assert.equal(doc.querySelector('#cgs-selection-pill').hidden, false);
   doc.querySelector('#cgs-selection-pill').click();
   assert.equal(doc.querySelector('#cgs-selected-context').textContent, `\\[${tex}\\]`);
-  assert.match(doc.querySelector('#cgs-selection-note').textContent, /whole equation/u);
+  assert.equal(doc.querySelector('#cgs-selection-note'), null);
   assert.equal(doc.querySelector('#cgs-selected-context').children.length, 0, 'source is shown as text, not executed as HTML');
   dom.window.open = () => ({ location: { replace() {} }, focus() {} });
   doc.querySelector('#cgs-question').value = 'Why are these angles different?';

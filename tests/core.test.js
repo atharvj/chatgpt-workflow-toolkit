@@ -25,13 +25,14 @@ test('normalizeText and settings sanitization use stable defaults', () => {
 });
 
 test('optional changes have persistent independent switches with legacy selection migration', () => {
-  assert.equal(toolkit.sanitizeSettings({}).showMathNotices, false);
-  assert.equal(toolkit.sanitizeSettings({ showMathNotices: 'true' }).showMathNotices, false);
-  assert.equal(toolkit.sanitizeSettings({ showMathNotices: true }).showMathNotices, true);
+  const migrated = toolkit.sanitizeSettings({ preserveMathFormatting: false, showMathNotices: true });
+  assert.deepEqual(migrated, toolkit.DEFAULT_SETTINGS, 'obsolete math preferences are ignored');
+  assert.equal('showMathNotices' in migrated, false);
+  assert.equal('preserveMathFormatting' in migrated, false);
   assert.equal(toolkit.sanitizeSettings({ showTurnButtons: false }).showSelectionButton, false);
   assert.equal(toolkit.sanitizeSettings({ showTurnButtons: false, showSelectionButton: true }).showSelectionButton, true);
   assert.equal(toolkit.sanitizeSettings({ showSelectionButton: false }).showTurnButtons, true);
-  for (const key of ['hideStartWriting', 'hideShareHighlighted', 'showTurnButtons', 'showSelectionButton', 'preserveMathFormatting']) {
+  for (const key of ['hideStartWriting', 'hideShareHighlighted', 'showTurnButtons', 'showSelectionButton']) {
     assert.equal(toolkit.sanitizeSettings({ [key]: false })[key], false);
     assert.equal(toolkit.sanitizeSettings({ [key]: true })[key], true);
   }

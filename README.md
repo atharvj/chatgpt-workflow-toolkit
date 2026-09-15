@@ -17,4 +17,4 @@ Requires ChatGPT’s Branch action. Attachment availability and conversation lim
 2. Open the [userscript](https://raw.githubusercontent.com/atharvj/chatgpt-workflow-toolkit/main/chatgpt-workflow-toolkit.user.js) and confirm installation.
 3. Reload [ChatGPT](https://chatgpt.com/).
 
-Use the gear to choose a window/tab, toggle response and highlight buttons, restore “Start writing” or “Share highlighted,” and toggle math copying improvements. Math-copy notes are off by default and can be enabled there. Disable the older **ChatGPT Sidecar** userscript first if it is installed.
+Use the gear to choose a window/tab, toggle response and highlight buttons, or restore “Start writing” and “Share highlighted.” Math copying improvements are always enabled, without extra notices. Disable the older **ChatGPT Sidecar** userscript first if it is installed.
