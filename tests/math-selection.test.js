@@ -85,13 +85,49 @@ test('unselected adjacent equations are not pulled into a prose highlight', (t) 
   assert.deepEqual(toolkit.extractSelectionQuote(selection, turn), { text: 'ordinary prose', note: '' });
 });
 
-test('source-free math is left unchanged with a warning rather than guessed', (t) => {
+test('HTML-only math uses compact display text without guessing missing structure', (t) => {
   const { dom, turn, answer } = fixture(t);
   answer.innerHTML = '<span class="katex"><span class="katex-html"><span>x</span><span>2</span></span></span>';
   const selection = select(dom, answer, 0, answer, 1);
   const result = toolkit.extractSelectionQuote(selection, turn);
   assert.equal(result.text, selection.toString());
-  assert.match(result.note, /no source notation/u);
+  assert.match(result.note, /compact display text/u);
+  assert.equal(result.usesVisualMath, true);
+  assert.doesNotMatch(result.text, /x\^2/u, 'no guessed exponent');
+});
+
+test('mixed source and HTML-only math preserves each available source independently', (t) => {
+  const { dom, doc, turn, answer } = fixture(t);
+  const tex = String.raw`\frac{a_1}{b^2}`;
+  const sourceBacked = equation(doc, tex);
+  const htmlOnly = equation(doc, 'discard');
+  htmlOnly.querySelector('.katex-mathml').remove();
+  htmlOnly.querySelector('.katex-html').innerHTML = '<span>F</span><span class="vlist"><span>x</span></span><span>=0</span><span class="vlist-s">\u200b|</span>';
+  answer.append(sourceBacked, ' and ', htmlOnly);
+  const selection = select(dom, answer, 0, answer, 3);
+  selection.toString = () => 'a\n1\nb\n2 and F\nx\n=0';
+  const result = toolkit.extractSelectionQuote(selection, turn);
+  assert.equal(result.text, `\\(${tex}\\) and Fx=0`);
+  assert.equal(result.usesVisualMath, true);
+  assert.match(result.note, /compact display text/u);
+});
+
+test('equations without source or readable text still warn and do not invent a transcription', (t) => {
+  const { dom, turn, answer } = fixture(t);
+  answer.innerHTML = '<mjx-container><svg><text>inaccessible glyphs</text></svg></mjx-container>';
+  const selection = select(dom, answer, 0, answer, 1);
+  const result = toolkit.extractSelectionQuote(selection, turn);
+  assert.equal(result.text, selection.toString());
+  assert.match(result.note, /neither source notation nor readable display text/u);
+  assert.equal(result.usesVisualMath, true);
+});
+
+test('flattened math prompts require original-equation verification without affecting ordinary questions', () => {
+  const prompt = toolkit.buildSelectedQuestion('Fx=0', 'Why?', true);
+  assert.match(prompt, /Locate the original equations in this branched conversation/u);
+  assert.match(prompt, /ask for clarification instead of guessing/u);
+  assert.match(prompt, /My question:\nWhy\?$/u);
+  assert.doesNotMatch(toolkit.buildSelectedQuestion('Normal prose', 'Why?'), /flattened display text/u);
 });
 
 test('a range beginning at the end of a math span does not add an unselected equation', (t) => {
@@ -158,4 +194,65 @@ test('math-aware selection reaches the preview and saved native-branch question'
   assert.match(job.question, /Why are these angles different\?/u);
   assert.equal(doc.querySelector('#prompt-textarea').value, '');
   assert.equal(turn.querySelectorAll('.katex').length, 1);
+});
+
+test('HTML-only screenshot equations reach the full preview and outgoing question despite a collapsed preview', async (t) => {
+  const { dom, doc, answer } = fixture(t);
+  const strings = ['W=mg=55(9.81)=539.55 N', '∑Fx=0:−TABsin34°+TACcos50°=0', '∑Fy=0:TABcos34°+TACsin50°−539.55=0'];
+  answer.innerHTML = '<p>At point A:</p>';
+  strings.forEach((text, index) => {
+    if (index === 1) {
+      const label = doc.createElement('p'); label.textContent = 'Equilibrium:'; answer.append(label);
+    }
+    const math = equation(doc, 'unused', true);
+    math.querySelector('.katex-mathml').remove();
+    const visual = math.querySelector('.katex-html');
+    visual.replaceChildren();
+    for (const character of text) {
+      const span = doc.createElement('span'); span.textContent = character; visual.append(span);
+    }
+    answer.append(math);
+  });
+  const selection = select(dom, answer, 0, answer, answer.childNodes.length);
+  // Browsers insert newlines around positioned math spans; jsdom does not.
+  selection.toString = () => `At point A:\n${strings[0]}\nEquilibrium:\n∑F\nx\n=0:−TABsin34°+TACcos50°=0\n∑F\ny\n=0:TABcos34°+TACsin50°−539.55=0`;
+  const previousGM = globalThis.GM;
+  const values = new Map();
+  globalThis.GM = {
+    async getValue(key, fallback) { return values.get(key) ?? fallback; },
+    async setValue(key, value) { values.set(key, value); },
+    async deleteValue(key) { values.delete(key); },
+  };
+  t.after(() => { if (previousGM === undefined) delete globalThis.GM; else globalThis.GM = previousGM; });
+  const app = await toolkit.install(doc, dom.window);
+  t.after(() => app.state.observer.disconnect());
+  answer.dispatchEvent(new dom.window.MouseEvent('mouseup', { bubbles: true }));
+  const deadline = Date.now() + 1500;
+  while (doc.querySelector('#cgs-selection-pill').hidden && Date.now() < deadline) await new Promise((resolve) => dom.window.setTimeout(resolve, 20));
+  assert.equal(doc.querySelector('#cgs-selection-pill').hidden, false);
+  doc.querySelector('#cgs-selection-pill').click();
+  const preview = doc.querySelector('#cgs-selected-context');
+  for (const equation of strings) assert.ok(preview.textContent.includes(equation), equation);
+  assert.doesNotMatch(preview.textContent, /∑F\n/u);
+  const allText = preview.textContent;
+  const toggle = doc.querySelector('[data-cgs-action="toggle-selection-preview"]');
+  assert.equal(toggle.hidden, false);
+  toggle.click();
+  assert.equal(preview.dataset.expanded, 'true');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  toggle.click();
+  assert.equal(preview.dataset.expanded, 'false');
+  assert.equal(preview.textContent, allText);
+  dom.window.open = () => ({ location: { replace() {} }, focus() {} });
+  doc.querySelector('#cgs-question').value = 'Why sine instead of cosine?';
+  doc.querySelector('[data-cgs-action="submit-question"]').click();
+  assert.equal(await app.state.sideLaunchPromise, true);
+  const job = [...values.values()].find((value) => value.kind === 'ask');
+  for (const equation of strings) assert.ok(job.question.includes(equation));
+  assert.match(job.question, /Locate the original equations/u);
+  assert.equal(doc.querySelector('#prompt-textarea').value, '');
+  app.processRoot(doc.body);
+  doc.querySelector('.cgs-turn-action').click();
+  assert.equal(app.state.questionUsesVisualMath, false, 'new ordinary question does not inherit the math caveat');
+  assert.equal(toggle.hidden, true);
 });

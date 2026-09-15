@@ -44,7 +44,10 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Highlight a mix of prose and rendered equations (fractions, subscripts, powers, sums, degree symbols). Confirm the preview contains each equation's source notation once, in order, and the outgoing message matches it.
 - Start/end a highlight inside an equation. Confirm that equation is copied whole, the preview explains this, and neighboring unselected prose/equations are not included.
 - Select ordinary prose again and confirm its text is unchanged and the math note disappears. Confirm selecting math does not change the original rendered answer or composer.
-- Repeat with an HTML-only equation with no source annotation or MathML. Confirm the ordinary selection is preserved and a warning asks you to check its layout.
+- Repeat with HTML-only equations with no source annotation or MathML. Confirm each equation uses compact display text, not layout-induced line breaks, and the outgoing question asks the model to check the original equations for mathematical structure.
+- Mix source-backed and HTML-only equations in one selection; confirm source-backed formulas still keep their notation.
+- Click **Show full highlight**, then **Collapse highlight**. Confirm the full saved quote is unchanged and the last selected equation is included when sent, even if the preview is collapsed.
+- An equation with neither source nor readable display text should still give a warning, not an invented transcription.
 
 ## Start writing cleaner
 
