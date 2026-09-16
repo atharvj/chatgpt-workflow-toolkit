@@ -53,9 +53,9 @@ function openHighlight({ dom, doc, app }, text = 'Compare both groups.') {
   dom.window.getSelection().removeAllRanges();
 }
 
-for (const { typedQuestion, pointerMenu } of ['Why is this necessary?', ''].flatMap((typedQuestion) =>
-  [false, true].map((pointerMenu) => ({ typedQuestion, pointerMenu })))) {
-  test(`highlight from an older answer survives typing and branches all history (${typedQuestion ? 'custom question' : 'default explanation'}, ${pointerMenu ? 'pointer menu' : 'direct action'})`, async (t) => {
+for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((typedQuestion) =>
+  ['direct', 'pointer', 'popup'].map((mode) => ({ typedQuestion, mode })))) {
+  test(`highlight from an older answer survives typing and branches all history (${typedQuestion ? 'custom question' : 'default explanation'}, ${mode})`, async (t) => {
     const values = storage(t);
     const source = await fixture(t);
     const child = { location: { replace(url) { this.href = url; } }, focus() {} };
@@ -84,13 +84,28 @@ for (const { typedQuestion, pointerMenu } of ['Why is this necessary?', ''].flat
 
     const jobId = toolkit.parseJobId(child.location.href);
     let reloads = 0;
+    let navigatedUrl = '';
+    let navigations = 0;
+    let nativePopups = 0;
+    const pageWindow = { open() { nativePopups += 1; return null; } };
+    const originalOpen = pageWindow.open;
     const copy = await fixture(t, 'https://chatgpt.com/c/source-chat', {
       pageInstanceId: 'source_copy_page_1234',
       reloadPage: () => { reloads += 1; return true; },
+      pageWindow,
+      branchNavigationTimeout: 600,
+      navigatePage: (url) => {
+        navigations += 1;
+        navigatedUrl = url;
+        const saved = values.get(`chatgptSidecar.job.v1.${jobId}`);
+        assert.equal(saved.branchConversation, 'native-branch', 'persist the destination before unloading');
+        assert.equal(saved.branchReloadFrom, 'source_copy_page_1234');
+        return !(mode === 'popup' && !typedQuestion && navigations === 1);
+      },
     });
     let branches = 0;
     const branchAction = copy.doc.querySelector('[data-testid="branch-turn-action-button"]');
-    if (pointerMenu) {
+    if (mode !== 'direct') {
       const trigger = copy.doc.createElement('button');
       trigger.dataset.testid = 'turn-actions-menu-button';
       trigger.dataset.state = 'closed';
@@ -114,12 +129,29 @@ for (const { typedQuestion, pointerMenu } of ['Why is this necessary?', ''].flat
     }
     branchAction.addEventListener('click', () => {
       branches += 1;
-      copy.dom.window.history.pushState({}, '', '/c/native-branch');
+      if (mode === 'popup') {
+        // Native Branch can finish asynchronously and open ANOTHER tab instead
+        // of navigating this window. The unhooked browser would block it.
+        copy.dom.window.setTimeout(() => pageWindow.open('/c/native-branch', '_blank', 'noopener'), 50);
+      } else copy.dom.window.history.pushState({}, '', '/c/native-branch');
     });
     copy.app.state.incomingJobId = jobId;
     assert.equal(await copy.app.runIncomingJob(job), false, 'native branch must reload before sending');
     assert.equal(branches, 1);
-    assert.equal(reloads, 1);
+    assert.equal(reloads, mode === 'popup' ? 0 : 1);
+    assert.equal(nativePopups, 0, 'reuse the existing side window, not a blocked second popup');
+    assert.equal(pageWindow.open, originalOpen, 'restore the page window after the branch step');
+    if (mode === 'popup') {
+      assert.equal(toolkit.conversationIdentity(navigatedUrl), 'native-branch');
+      assert.equal(toolkit.parseJobId(navigatedUrl), jobId);
+      if (!typedQuestion) {
+        assert.match(copy.doc.querySelector('#cgs-recovery-reason').textContent, /without branching twice/u);
+        const retryJob = toolkit.sanitizeJob(values.get(`chatgptSidecar.job.v1.${jobId}`));
+        assert.equal(await copy.app.runIncomingJob(retryJob), false);
+        assert.equal(branches, 1, 'retry navigates the saved branch instead of creating another');
+        assert.equal(navigations, 2);
+      }
+    }
     assert.equal(copy.doc.querySelector('#prompt-textarea').value, '');
 
     const saved = values.get(`chatgptSidecar.job.v1.${jobId}`);

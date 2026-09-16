@@ -19,6 +19,7 @@ for (const mode of ['pointer', 'click', 'remount', 'closed', 'missing-branch', '
       <form><textarea id="prompt-textarea">My existing draft</textarea><button type="button" data-testid="send-button">Send</button></form>
     </main></body></html>`, { url: 'https://chatgpt.com/c/source-chat', pretendToBeVisual: true });
     const win = dom.window;
+    const originalOpen = win.open;
     const doc = win.document;
     const turn = doc.querySelector('#turn');
     const menu = doc.querySelector('#menu');
@@ -69,6 +70,7 @@ for (const mode of ['pointer', 'click', 'remount', 'closed', 'missing-branch', '
     });
     // No transfer ID: stop after the branch route, before destination reload/send.
     assert.equal(await app.runIncomingJob(job), false);
+    assert.equal(win.open, originalOpen, 'restore popup behavior on success, timeout, and source changes');
     assert.equal(clicks, 1);
     assert.equal(sends, 0, 'never send into the source page or unverified destination');
     assert.equal(doc.querySelector('#prompt-textarea').value, 'My existing draft');

@@ -1429,7 +1429,7 @@ test('query-only navigation never inserts or sends a side question in the source
   assert.equal(composer.value, '');
   assert.equal(sendCount, 0);
   assert.equal(document.querySelector('#cgs-recovery-backdrop').hidden, false);
-  assert.match(document.querySelector('#cgs-recovery-reason').textContent, /did not confirm a separate conversation/iu);
+  assert.match(document.querySelector('#cgs-recovery-reason').textContent, /destination was not detected/iu);
 
   app.state.observer.disconnect();
   dom.window.close();
@@ -1480,7 +1480,7 @@ test('retry after an ambiguous Branch click never clicks Branch a second time', 
   assert.equal(await app.runIncomingJob(job), false);
   assert.equal(branchCount, 1);
   assert.equal(composer.value, '');
-  assert.match(document.querySelector('#cgs-recovery-reason').textContent, /will not click Branch twice/iu);
+  assert.match(document.querySelector('#cgs-recovery-reason').textContent, /will not create a duplicate branch/iu);
 
   app.state.observer.disconnect();
   dom.window.close();
@@ -1536,7 +1536,7 @@ test('route reverting to the source during branch setup aborts before any compos
   assert.equal(toolkit.conversationIdentity(dom.window.location.href), 'source-chat');
   assert.equal(composer.value, '');
   assert.equal(sendCount, 0);
-  assert.match(document.querySelector('#cgs-recovery-reason').textContent, /did not confirm a separate conversation/iu);
+  assert.match(document.querySelector('#cgs-recovery-reason').textContent, /destination was not detected/iu);
 
   app.state.observer.disconnect();
   dom.window.close();

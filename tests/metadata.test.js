@@ -44,7 +44,7 @@ test('metadata targets both supported ChatGPT origins', () => {
   ]);
 });
 
-test('metadata declares only the storage, style, and menu grants it uses', () => {
+test('metadata declares only storage, style, menu and scoped page-window access grants', () => {
   const metadata = parseMetadata(source);
 
   assert.deepEqual(metadata.get('grant'), [
@@ -58,6 +58,7 @@ test('metadata declares only the storage, style, and menu grants it uses', () =>
     'GM.deleteValue',
     'GM.addStyle',
     'GM.registerMenuCommand',
+    'unsafeWindow',
   ]);
   assert.equal(metadata.has('require'), false);
   assert.equal(metadata.has('connect'), false);

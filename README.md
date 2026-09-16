@@ -11,6 +11,8 @@ A lightweight userscript that adds separate contextual chats and small interface
 
 Requires ChatGPT’s Branch action. Attachment availability and conversation limits still depend on ChatGPT.
 
+The script uses page-window access only during automatic branching to open the result in the existing side window instead of another popup.
+
 ## Install
 
 1. Install Tampermonkey or Violentmonkey.

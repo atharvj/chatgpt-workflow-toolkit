@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.9.2
+// @version      1.9.3
 // @description  Ask about highlighted text in native ChatGPT branches and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -23,6 +23,7 @@
 // @grant        GM.deleteValue
 // @grant        GM.addStyle
 // @grant        GM.registerMenuCommand
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function chatGPTWorkflowToolkitModule(global, factory) {
@@ -44,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.9.2';
+  const VERSION = '1.9.3';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1284,6 +1285,7 @@
     const sourceConversation = conversationIdentity(sourceUrl);
     const branchConversation = sanitizeConversationIdentity(raw.branchConversation);
     const branchReloadFrom = isValidJobId(raw.branchReloadFrom) ? String(raw.branchReloadFrom) : '';
+    const branchDestinationUrl = validatedBranchUrl(raw.branchDestinationUrl, sourceUrl);
     return {
       version: 1,
       createdAt,
@@ -1301,6 +1303,7 @@
       branchClickAttempted: raw.branchClickAttempted === true,
       branchConversation: branchConversation && branchConversation !== sourceConversation ? branchConversation : '',
       branchReloadFrom,
+      branchDestinationUrl: conversationIdentity(branchDestinationUrl) === branchConversation ? branchDestinationUrl : '',
       questionInserted: raw.questionInserted === true,
       baselineUserCount: clampInteger(raw.baselineUserCount, -1, -1, 100_000),
       sendAttempted: raw.sendAttempted === true,
@@ -1781,13 +1784,78 @@
     });
   }
 
-  function waitForConversationChange(win, before, timeout = 15_000) {
+  function validatedBranchUrl(value, sourceUrl) {
+    if (!value) return '';
+    try {
+      const source = new URL(sourceUrl);
+      const url = new URL(String(value), source);
+      const identity = conversationIdentity(url.href);
+      if (!isAllowedChatGPTUrl(url.href) || url.origin !== source.origin || url.username || url.password ||
+        !sanitizeConversationIdentity(identity) || identity === conversationIdentity(source.href)) return '';
+      return canonicalPageUrl(url.href);
+    } catch (_error) { return ''; }
+  }
+
+  function captureBranchNavigation(doc, win, pageWindow, sourceUrl) {
+    let armed = false;
+    let destination = '';
+    const originals = [];
+    const capture = (value) => {
+      if (!armed || conversationIdentity(win.location.href) !== conversationIdentity(sourceUrl)) return false;
+      const url = validatedBranchUrl(value, sourceUrl);
+      if (!url || (destination && destination !== url)) return false;
+      destination = url;
+      return true;
+    };
+    // Only in the job's side window, only while the native Branch operation is
+    // pending. The page realm matters: patching a userscript sandbox alone does
+    // not catch ChatGPT's window.open call after its branch request completes.
+    for (const target of new Set([pageWindow, win].filter(Boolean))) {
+      try {
+        const original = target.open;
+        if (typeof original !== 'function') continue;
+        const replacement = function (...args) {
+          if (capture(args[0])) return win;
+          return Reflect.apply(original, this, args);
+        };
+        target.open = replacement;
+        if (target.open === replacement) originals.push({ target, original, replacement });
+      } catch (_error) { /* A restricted realm may reject the hook. */ }
+    }
+    const onLink = (event) => {
+      const link = event.target?.closest?.('a[href]');
+      if (link && !event.isTrusted && !event.defaultPrevented && link.target === '_blank' && capture(link.href)) {
+        event.preventDefault();
+      }
+    };
+    doc.addEventListener('click', onLink, true);
+    return {
+      arm() { armed = true; },
+      getDestination() { return destination; },
+      dispose() {
+        armed = false;
+        doc.removeEventListener('click', onLink, true);
+        // Restore in reverse order if the two realms share the same property.
+        for (const { target, original, replacement } of originals.reverse()) {
+          try { if (target.open === replacement) target.open = original; } catch (_error) { /* Do not replace another script's hook. */ }
+        }
+      },
+    };
+  }
+
+  function waitForConversationChange(win, before, timeout = 15_000, capturedDestination = () => '') {
     if (!before) return Promise.resolve('');
     return new Promise((resolve) => {
       const startedAt = Date.now();
       let lastIdentity = '';
       let stableChecks = 0;
       const interval = win.setInterval(() => {
+        const captured = conversationIdentity(capturedDestination());
+        if (captured && captured !== before) {
+          win.clearInterval(interval);
+          resolve(captured);
+          return;
+        }
         const current = conversationIdentity(win.location.href);
         if (current && current !== before) {
           if (current === lastIdentity) stableChecks += 1;
@@ -1882,6 +1950,7 @@
     expectedTargetFingerprint = '',
     expectedContextFingerprint = '',
     actionTimeout = 6_000,
+    beforeBranchClick = () => {},
   ) {
     const discoveryTimeout = clampInteger(actionTimeout, 6_000, 100, 20_000);
     const locator = getTurnLocator(turn, doc);
@@ -1935,6 +2004,7 @@
     if (directBranch) {
       if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
       try {
+        beforeBranchClick();
         directBranch.click();
         clearBranchTargetMarks(doc);
         return { ok: true, attempted: true };
@@ -1985,6 +2055,7 @@
       if (moreButton && moreButton.kind === 'branch') {
         if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
         try {
+          beforeBranchClick();
           moreButton.control.click();
           clearBranchTargetMarks(doc);
           return { ok: true, attempted: true };
@@ -2064,6 +2135,7 @@
       : 'The response’s three-dot menu did not open, so Workflow Toolkit could not reach the Branch action.' };
     if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
     try {
+      beforeBranchClick();
       branchAction.click();
     } catch (_error) {
       return { ok: false, attempted: true, reason: 'ChatGPT did not confirm whether the automatic branch action was accepted.' };
@@ -2307,6 +2379,11 @@
   }
 
   function createApp(doc, win, options = {}) {
+    const pageWindow = options.pageWindow || (typeof unsafeWindow !== 'undefined' ? unsafeWindow : win);
+    const navigatePage = typeof options.navigatePage === 'function' ? options.navigatePage : (url) => {
+      win.location.assign(url);
+      return true;
+    };
     const injectedMenuRegister = typeof options.registerMenuCommand === 'function'
       ? options.registerMenuCommand
       : null;
@@ -3197,6 +3274,26 @@
       return true;
     }
 
+    async function navigateToCapturedBranch(job) {
+      const destination = validatedBranchUrl(job.branchDestinationUrl, job.sourceUrl);
+      if (!destination || conversationIdentity(destination) !== job.branchConversation ||
+        conversationIdentity(win.location.href) !== job.sourceConversation || !state.incomingJobId) {
+        showRecovery(job, 'The branch destination could not be transferred safely. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+        return false;
+      }
+      job.branchReloadFrom = state.pageInstanceId;
+      if (!await persistIncomingJob(job) || conversationIdentity(win.location.href) !== job.sourceConversation) {
+        showRecovery(job, 'The branch transfer could not be saved or the current chat changed. Nothing was sent.');
+        return false;
+      }
+      try {
+        if (navigatePage(urlWithJob(destination, state.incomingJobId)) === false) throw new Error('navigation rejected');
+      } catch (_error) {
+        showRecovery(job, 'The branch was created, but its saved destination could not be opened. Try again will reopen it without branching twice.');
+      }
+      return false; // The destination reload verifies history before writing/sending.
+    }
+
     async function runIncomingJobCore(job) {
       if (job.fallbackMode === true) {
         showRecovery(job, 'This older text-only transfer cannot preserve attachments. Return to the original chat and use Ask in new chat again.', null, { canRetry: false });
@@ -3219,94 +3316,109 @@
       );
       let beforeComposer = findComposer(doc);
 
+      if (job.branchDestinationUrl && state.branchClickAttempted && currentConversation === job.sourceConversation) {
+        return navigateToCapturedBranch(job);
+      }
+
       if (!resumingConfirmedBranch) {
         if (!currentConversation || currentConversation !== job.sourceConversation) {
           showRecovery(job, 'The safety check could not confirm that this window is on the source or verified separate conversation. Nothing was sent.', state.recoveryTurn, { canRetry: false });
           return false;
         }
-        if (!state.branchClickAttempted) {
-          const turn = await waitForCondition(() => {
-            if (conversationIdentity(win.location.href) !== job.sourceConversation) return null;
-            if (hasActiveGeneration(doc)) return null;
-            const candidate = getLatestCompletedAssistantTurn(doc);
-            const turns = getTurns(doc);
-            return candidate && turns[turns.length - 1] === candidate ? candidate : null;
-          }, {
-            root: doc.documentElement,
-            win,
-            timeout: 15_000,
-            attributes: true,
-            characterData: true,
-          });
-          if (!turn) {
-            showRecovery(job, 'The newest completed response did not become ready, so Workflow Toolkit did not branch or send anything.');
-            return false;
-          }
-          if (conversationIdentity(win.location.href) !== job.sourceConversation) {
-            showRecovery(job, 'The source conversation changed before the newest response could be saved. Nothing was branched or sent.', state.recoveryTurn, { canRetry: false });
-            return false;
-          }
-          job.locator = getTurnLocator(turn, doc);
-          job.targetFingerprint = assistantTurnFingerprint(turn);
-          job.contextFingerprint = conversationContextFingerprint(doc, turn);
-          if (!await persistIncomingJob(job)) {
-            showRecovery(job, 'Workflow Toolkit could not safely update the saved whole-chat target. Nothing was branched or sent.', state.recoveryTurn, { canRetry: false });
-            return false;
-          }
-          if (conversationIdentity(win.location.href) !== job.sourceConversation ||
-            !branchTargetIsStillLatest(doc, turn, job.targetFingerprint, job.contextFingerprint)) {
-            showRecovery(job, 'The source chat changed before branching. Nothing was sent.', state.recoveryTurn, { canRetry: false });
-            return false;
-          }
-          state.recoveryTurn = turn;
-          beforeComposer = findComposer(doc);
-          state.branchClickAttempted = true;
-          job.branchClickAttempted = true;
-          if (!await persistIncomingJob(job)) {
-            state.branchClickAttempted = false;
-            job.branchClickAttempted = false;
-            showRecovery(job, 'Workflow Toolkit could not save the branch step safely. Nothing was branched or sent.', turn, { canRetry: false });
-            return false;
-          }
-          const clickResult = await clickNativeBranch(
-            doc,
-            win,
-            turn,
-            job.sourceConversation,
-            job.targetFingerprint,
-            job.contextFingerprint,
-            branchActionTimeout,
-          );
-          if (!clickResult.ok) {
-            if (!clickResult.attempted) {
+        const navigationCapture = captureBranchNavigation(doc, win, pageWindow, job.sourceUrl);
+        try {
+          if (!state.branchClickAttempted) {
+            const turn = await waitForCondition(() => {
+              if (conversationIdentity(win.location.href) !== job.sourceConversation) return null;
+              if (hasActiveGeneration(doc)) return null;
+              const candidate = getLatestCompletedAssistantTurn(doc);
+              const turns = getTurns(doc);
+              return candidate && turns[turns.length - 1] === candidate ? candidate : null;
+            }, {
+              root: doc.documentElement,
+              win,
+              timeout: 15_000,
+              attributes: true,
+              characterData: true,
+            });
+            if (!turn) {
+              showRecovery(job, 'The newest completed response did not become ready, so Workflow Toolkit did not branch or send anything.');
+              return false;
+            }
+            if (conversationIdentity(win.location.href) !== job.sourceConversation) {
+              showRecovery(job, 'The source conversation changed before the newest response could be saved. Nothing was branched or sent.', state.recoveryTurn, { canRetry: false });
+              return false;
+            }
+            job.locator = getTurnLocator(turn, doc);
+            job.targetFingerprint = assistantTurnFingerprint(turn);
+            job.contextFingerprint = conversationContextFingerprint(doc, turn);
+            if (!await persistIncomingJob(job)) {
+              showRecovery(job, 'Workflow Toolkit could not safely update the saved whole-chat target. Nothing was branched or sent.', state.recoveryTurn, { canRetry: false });
+              return false;
+            }
+            if (conversationIdentity(win.location.href) !== job.sourceConversation ||
+              !branchTargetIsStillLatest(doc, turn, job.targetFingerprint, job.contextFingerprint)) {
+              showRecovery(job, 'The source chat changed before branching. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+              return false;
+            }
+            state.recoveryTurn = turn;
+            beforeComposer = findComposer(doc);
+            state.branchClickAttempted = true;
+            job.branchClickAttempted = true;
+            if (!await persistIncomingJob(job)) {
               state.branchClickAttempted = false;
               job.branchClickAttempted = false;
-              if (!await persistIncomingJob(job)) {
-                showRecovery(job, 'The response menu changed and Workflow Toolkit could not safely reset the saved branch step.', turn, { canRetry: false });
-                return false;
-              }
+              showRecovery(job, 'Workflow Toolkit could not save the branch step safely. Nothing was branched or sent.', turn, { canRetry: false });
+              return false;
             }
-            showRecovery(job, clickResult.unavailable
-              ? `${clickResult.reason} No text-only copy was made. Nothing was sent. You can try again.`
-              : clickResult.reason, turn);
+            const clickResult = await clickNativeBranch(
+              doc,
+              win,
+              turn,
+              job.sourceConversation,
+              job.targetFingerprint,
+              job.contextFingerprint,
+              branchActionTimeout,
+              () => navigationCapture.arm(),
+            );
+            if (!clickResult.ok) {
+              if (!clickResult.attempted) {
+                state.branchClickAttempted = false;
+                job.branchClickAttempted = false;
+                if (!await persistIncomingJob(job)) {
+                  showRecovery(job, 'The response menu changed and Workflow Toolkit could not safely reset the saved branch step.', turn, { canRetry: false });
+                  return false;
+                }
+              }
+              showRecovery(job, clickResult.unavailable
+                ? `${clickResult.reason} No text-only copy was made. Nothing was sent. You can try again.`
+                : clickResult.reason, turn);
+              return false;
+            }
+          }
+          const changedConversation = await waitForConversationChange(win, currentConversation, branchNavigationTimeout, () => navigationCapture.getDestination());
+          if (!changedConversation) {
+            showRecovery(job, 'The Branch action was clicked, but its destination was not detected. A new tab may have been blocked by your browser. Nothing was sent. Try again only checks for the result; it will not create a duplicate branch.');
             return false;
           }
+          state.branchConversation = changedConversation;
+          job.branchConversation = changedConversation;
+          const capturedUrl = navigationCapture.getDestination();
+          if (capturedUrl && conversationIdentity(win.location.href) === job.sourceConversation) {
+            job.branchDestinationUrl = capturedUrl;
+            return await navigateToCapturedBranch(job);
+          }
+          if (!await persistIncomingJob(job)) {
+            showRecovery(job, 'The separate chat opened, but Workflow Toolkit could not save its verified identity. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+            return false;
+          }
+          clearBranchTargetMarks(doc);
+          state.recoveryTurn = null;
+          currentConversation = changedConversation;
+          resumingConfirmedBranch = true;
+        } finally {
+          navigationCapture.dispose();
         }
-        const changedConversation = await waitForConversationChange(win, currentConversation, branchNavigationTimeout);
-        if (!changedConversation) {
-          showRecovery(job, 'ChatGPT did not confirm a separate conversation after the automatic branch action. Try again only checks for the result; it will not click Branch twice.');
-          return false;
-        }
-        state.branchConversation = changedConversation;
-        job.branchConversation = changedConversation;
-        if (!await persistIncomingJob(job)) {
-          showRecovery(job, 'The separate chat opened, but Workflow Toolkit could not save its verified identity. Nothing was sent.', state.recoveryTurn, { canRetry: false });
-          return false;
-        }
-        clearBranchTargetMarks(doc);
-        state.recoveryTurn = null;
-        currentConversation = changedConversation;
-        resumingConfirmedBranch = true;
       }
 
       const expectedConversation = state.branchConversation;
@@ -3834,6 +3946,8 @@
     setComposerText,
     findSendButton,
     waitForConversationChange,
+    captureBranchNavigation,
+    validatedBranchUrl,
     waitForStableComposer,
     findMoreButton,
     isBranchLabel,
