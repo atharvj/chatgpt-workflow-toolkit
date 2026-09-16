@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.9.3
+// @version      1.9.4
 // @description  Ask about highlighted text in native ChatGPT branches and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.9.3';
+  const VERSION = '1.9.4';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1799,13 +1799,43 @@
   function captureBranchNavigation(doc, win, pageWindow, sourceUrl) {
     let armed = false;
     let destination = '';
+    let branchControl = null;
+    let openCalls = 0;
+    let blankRequests = 0;
+    let pageHookReady = false;
+    let pendingWindow = null;
     const originals = [];
+    const active = () => armed && conversationIdentity(win.location.href) === conversationIdentity(sourceUrl);
     const capture = (value) => {
-      if (!armed || conversationIdentity(win.location.href) !== conversationIdentity(sourceUrl)) return false;
+      if (!active()) return false;
       const url = validatedBranchUrl(value, sourceUrl);
       if (!url || (destination && destination !== url)) return false;
       destination = url;
       return true;
+    };
+    const reserveWindow = () => {
+      if (pendingWindow) return pendingWindow;
+      let closed = false;
+      let href = 'about:blank';
+      const assign = (value) => {
+        // A delayed native callback must never navigate after timeout/disposal,
+        // nor send us to an unrelated site or back to the original conversation.
+        if (!closed && capture(value)) href = destination;
+      };
+      const location = { assign, replace: assign, toString: () => href };
+      Object.defineProperty(location, 'href', { get: () => href, set: assign });
+      pendingWindow = {
+        // A detached document can accept a native loading placeholder without
+        // overwriting the original response or the side window's active page.
+        document: doc.implementation.createHTMLDocument('Preparing branch'),
+        opener: null,
+        focus() {},
+        blur() {},
+        close() { closed = true; },
+        get closed() { return closed || !active(); },
+      };
+      Object.defineProperty(pendingWindow, 'location', { get: () => location, set: assign });
+      return pendingWindow;
     };
     // Only in the job's side window, only while the native Branch operation is
     // pending. The page realm matters: patching a userscript sandbox alone does
@@ -1815,11 +1845,23 @@
         const original = target.open;
         if (typeof original !== 'function') continue;
         const replacement = function (...args) {
+          if (active()) {
+            openCalls += 1;
+            const value = args[0] == null ? '' : String(args[0]).trim();
+            const newWindowTarget = !['_self', '_parent', '_top'].includes(String(args[1] || '').toLowerCase());
+            if (newWindowTarget && (!value || /^about:blank(?:#.*)?$/iu.test(value))) {
+              blankRequests += 1;
+              return reserveWindow();
+            }
+          }
           if (capture(args[0])) return win;
           return Reflect.apply(original, this, args);
         };
         target.open = replacement;
-        if (target.open === replacement) originals.push({ target, original, replacement });
+        if (target.open === replacement) {
+          originals.push({ target, original, replacement });
+          if (target === pageWindow) pageHookReady = true;
+        }
       } catch (_error) { /* A restricted realm may reject the hook. */ }
     }
     const onLink = (event) => {
@@ -1830,8 +1872,14 @@
     };
     doc.addEventListener('click', onLink, true);
     return {
-      arm() { armed = true; },
+      arm(control = null) { branchControl = control; armed = true; },
       getDestination() { return destination; },
+      describe() {
+        const menu = branchControl?.closest('[role="menu"], [data-radix-menu-content], [data-slot="dropdown-menu-content"]');
+        const menuState = menu ? (isMountedAndNotHidden(menu) ? 'still open' : 'closed') : 'not observed';
+        // No conversation IDs, URLs, messages, or account data in diagnostics.
+        return `Details (v${VERSION}): page hook ${pageHookReady ? 'ready' : 'unavailable'}; window requests ${openCalls}; blank requests ${blankRequests}; branch menu ${menuState}.`;
+      },
       dispose() {
         armed = false;
         doc.removeEventListener('click', onLink, true);
@@ -2004,7 +2052,7 @@
     if (directBranch) {
       if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
       try {
-        beforeBranchClick();
+        beforeBranchClick(directBranch);
         directBranch.click();
         clearBranchTargetMarks(doc);
         return { ok: true, attempted: true };
@@ -2055,7 +2103,7 @@
       if (moreButton && moreButton.kind === 'branch') {
         if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
         try {
-          beforeBranchClick();
+          beforeBranchClick(moreButton.control);
           moreButton.control.click();
           clearBranchTargetMarks(doc);
           return { ok: true, attempted: true };
@@ -2135,7 +2183,7 @@
       : 'The response’s three-dot menu did not open, so Workflow Toolkit could not reach the Branch action.' };
     if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
     try {
-      beforeBranchClick();
+      beforeBranchClick(branchAction);
       branchAction.click();
     } catch (_error) {
       return { ok: false, attempted: true, reason: 'ChatGPT did not confirm whether the automatic branch action was accepted.' };
@@ -3379,7 +3427,7 @@
               job.targetFingerprint,
               job.contextFingerprint,
               branchActionTimeout,
-              () => navigationCapture.arm(),
+              (control) => navigationCapture.arm(control),
             );
             if (!clickResult.ok) {
               if (!clickResult.attempted) {
@@ -3398,7 +3446,7 @@
           }
           const changedConversation = await waitForConversationChange(win, currentConversation, branchNavigationTimeout, () => navigationCapture.getDestination());
           if (!changedConversation) {
-            showRecovery(job, 'The Branch action was clicked, but its destination was not detected. A new tab may have been blocked by your browser. Nothing was sent. Try again only checks for the result; it will not create a duplicate branch.');
+            showRecovery(job, `The branch destination was not detected; the script cannot confirm whether ChatGPT accepted its click. Nothing was sent. ${navigationCapture.describe()} Try again only checks for the result; it will not create a duplicate branch.`);
             return false;
           }
           state.branchConversation = changedConversation;

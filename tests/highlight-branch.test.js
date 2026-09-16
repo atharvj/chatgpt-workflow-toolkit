@@ -54,7 +54,7 @@ function openHighlight({ dom, doc, app }, text = 'Compare both groups.') {
 }
 
 for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((typedQuestion) =>
-  ['direct', 'pointer', 'popup'].map((mode) => ({ typedQuestion, mode })))) {
+  ['direct', 'pointer', 'popup', 'blank-href', 'blank-location'].map((mode) => ({ typedQuestion, mode })))) {
   test(`highlight from an older answer survives typing and branches all history (${typedQuestion ? 'custom question' : 'default explanation'}, ${mode})`, async (t) => {
     const values = storage(t);
     const source = await fixture(t);
@@ -129,7 +129,19 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
     }
     branchAction.addEventListener('click', () => {
       branches += 1;
-      if (mode === 'popup') {
+      if (mode.startsWith('blank-')) {
+        // Reserve the window synchronously, then receive the branch URL later.
+        // This was delegated to the browser and returned null in v1.9.3.
+        const pending = pageWindow.open('', '_blank');
+        if (!pending) return;
+        pending.document.write('<p>Preparing your branch...</p>');
+        pending.opener = null;
+        copy.dom.window.setTimeout(() => {
+          if (mode === 'blank-href') pending.location.href = '/c/native-branch';
+          else pending.location = '/c/native-branch';
+          pending.focus();
+        }, 50);
+      } else if (mode === 'popup') {
         // Native Branch can finish asynchronously and open ANOTHER tab instead
         // of navigating this window. The unhooked browser would block it.
         copy.dom.window.setTimeout(() => pageWindow.open('/c/native-branch', '_blank', 'noopener'), 50);
@@ -138,13 +150,14 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
     copy.app.state.incomingJobId = jobId;
     assert.equal(await copy.app.runIncomingJob(job), false, 'native branch must reload before sending');
     assert.equal(branches, 1);
-    assert.equal(reloads, mode === 'popup' ? 0 : 1);
+    const usesNewWindow = mode === 'popup' || mode.startsWith('blank-');
+    assert.equal(reloads, usesNewWindow ? 0 : 1);
     assert.equal(nativePopups, 0, 'reuse the existing side window, not a blocked second popup');
     assert.equal(pageWindow.open, originalOpen, 'restore the page window after the branch step');
-    if (mode === 'popup') {
+    if (usesNewWindow) {
       assert.equal(toolkit.conversationIdentity(navigatedUrl), 'native-branch');
       assert.equal(toolkit.parseJobId(navigatedUrl), jobId);
-      if (!typedQuestion) {
+      if (mode === 'popup' && !typedQuestion) {
         assert.match(copy.doc.querySelector('#cgs-recovery-reason').textContent, /without branching twice/u);
         const retryJob = toolkit.sanitizeJob(values.get(`chatgptSidecar.job.v1.${jobId}`));
         assert.equal(await copy.app.runIncomingJob(retryJob), false);

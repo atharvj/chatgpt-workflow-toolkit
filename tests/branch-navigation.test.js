@@ -55,6 +55,30 @@ test('capture stops after source navigation and does not overwrite another windo
   assert.equal(dom.window.open, replacement);
 });
 
+for (const blank of ['', 'about:blank', undefined]) {
+  test(`Branch can reserve a blank window (${String(blank)}) before assigning its URL`, (t) => {
+    const dom = new JSDOM('', { url: 'https://chatgpt.com/c/source' });
+    t.after(() => dom.window.close());
+    let popups = 0;
+    const page = { open() { popups += 1; return null; } };
+    const original = page.open;
+    const capture = toolkit.captureBranchNavigation(dom.window.document, dom.window, page, dom.window.location.href);
+    t.after(() => capture.dispose());
+    capture.arm();
+    const pending = page.open(blank, '_blank');
+    assert.ok(pending, 'a blocked blank-window allocation must not abort the native branch action');
+    assert.equal(popups, 0);
+    assert.equal(capture.getDestination(), '', 'a blank window is not evidence of a branch');
+    pending.opener = null;
+    pending.focus();
+    pending.location.href = '/c/created-branch';
+    assert.equal(capture.getDestination(), 'https://chatgpt.com/c/created-branch');
+    assert.equal(dom.window.location.pathname, '/c/source', 'save the job before navigating');
+    capture.dispose();
+    assert.equal(page.open, original);
+  });
+}
+
 test('native branch links targeting a new tab reuse the captured destination', (t) => {
   const dom = new JSDOM('<a href="/c/new" target="_blank">Branch in new chat</a>', { url: 'https://chatgpt.com/c/source' });
   t.after(() => dom.window.close());
@@ -65,6 +89,67 @@ test('native branch links targeting a new tab reuse the captured destination', (
   assert.equal(event.defaultPrevented, true);
   assert.equal(capture.getDestination(), 'https://chatgpt.com/c/new');
   capture.dispose();
+});
+
+for (const assignment of ['location', 'href', 'assign', 'replace']) {
+  test(`reserved branch window supports ${assignment} and leaves the active document alone`, (t) => {
+    const dom = new JSDOM('<p id="original">Keep this answer</p>', { url: 'https://chatgpt.com/c/source' });
+    t.after(() => dom.window.close());
+    const page = { open() { assert.fail('do not request another browser popup'); } };
+    const capture = toolkit.captureBranchNavigation(dom.window.document, dom.window, page, dom.window.location.href);
+    t.after(() => capture.dispose());
+    capture.arm();
+    const pending = page.open('about:blank', '_blank');
+    pending.document.write('<p>Preparing branch</p>');
+    assert.equal(dom.window.document.querySelector('#original').textContent, 'Keep this answer');
+    assert.equal(pending.closed, false);
+    if (assignment === 'location') pending.location = '/c/new';
+    else if (assignment === 'href') pending.location.href = '/c/new';
+    else pending.location[assignment]('/c/new');
+    assert.equal(String(pending.location), 'https://chatgpt.com/c/new');
+    assert.equal(capture.getDestination(), 'https://chatgpt.com/c/new');
+    assert.equal(dom.window.location.pathname, '/c/source');
+  });
+}
+
+test('reserved branch windows reject unrelated URLs and late writes after disposal or closure', (t) => {
+  const dom = new JSDOM('', { url: 'https://chatgpt.com/c/source' });
+  t.after(() => dom.window.close());
+  const capture = toolkit.captureBranchNavigation(dom.window.document, dom.window, dom.window, dom.window.location.href);
+  capture.arm();
+  const pending = dom.window.open('', '_blank');
+  for (const value of ['https://evil.test/c/new', '/c/source', 'javascript:alert(1)', '/share/new']) {
+    pending.location = value;
+    assert.equal(capture.getDestination(), '');
+  }
+  capture.dispose();
+  pending.location = '/c/too-late';
+  assert.equal(capture.getDestination(), '');
+  assert.equal(pending.closed, true);
+  const next = toolkit.captureBranchNavigation(dom.window.document, dom.window, dom.window, dom.window.location.href);
+  next.arm();
+  const closed = dom.window.open('', '_blank');
+  closed.close();
+  closed.location.href = '/c/closed';
+  assert.equal(next.getDestination(), '');
+  next.dispose();
+  assert.equal(dom.window.location.pathname, '/c/source');
+});
+
+test('failure diagnostics distinguish missing page access from an unresolved blank window without leaking content', (t) => {
+  const dom = new JSDOM('<div role="menu"><button>Branch in new chat</button></div>', { url: 'https://chatgpt.com/c/private-source-id' });
+  t.after(() => dom.window.close());
+  const page = {};
+  Object.defineProperty(page, 'open', { value: () => null, writable: false });
+  const capture = toolkit.captureBranchNavigation(dom.window.document, dom.window, page, dom.window.location.href);
+  t.after(() => capture.dispose());
+  capture.arm(dom.window.document.querySelector('button'));
+  assert.match(capture.describe(), /page hook unavailable/u);
+  dom.window.open('', '_blank');
+  assert.match(capture.describe(), /window requests 1; blank requests 1; branch menu still open/u);
+  dom.window.document.querySelector('[role="menu"]').hidden = true;
+  assert.match(capture.describe(), /branch menu closed/u);
+  assert.doesNotMatch(capture.describe(), /private-source-id|chatgpt.com|Branch in new chat/u);
 });
 
 test('persisted branch destination cannot change origin or mismatch the saved branch', () => {
