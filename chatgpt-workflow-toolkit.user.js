@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.9.1
+// @version      1.9.2
 // @description  Ask about highlighted text in native ChatGPT branches and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -44,7 +44,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.9.1';
+  const VERSION = '1.9.2';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1350,10 +1350,16 @@
     return true;
   }
 
-  function isMountedAndNotHidden(element) {
+  function isMountedAndNotHidden(element, allowClosedMenuTrigger = false) {
     if (!element || !element.isConnected || element.hidden || element.getAttribute('aria-hidden') === 'true') return false;
-    const hiddenParent = element.closest && element.closest('[hidden], [aria-hidden="true"], [inert], [data-state="closed"]');
+    const hiddenParent = element.closest && element.closest('[hidden], [aria-hidden="true"], [inert]');
     if (hiddenParent) return false;
+    // On a menu trigger, "closed" describes its menu, not the button's visibility.
+    // Closed content/ancestors must still be rejected.
+    const closedParent = element.closest && element.closest('[data-state="closed"]');
+    if (closedParent && !(allowClosedMenuTrigger && closedParent === element &&
+      element.matches('button[aria-haspopup="menu"], [role="button"][aria-haspopup="menu"]') &&
+      !element.parentElement?.closest('[data-state="closed"]'))) return false;
     try {
       const view = element.ownerDocument && element.ownerDocument.defaultView;
       for (let current = element; view && current && current.nodeType === 1; current = current.parentElement) {
@@ -1592,10 +1598,20 @@
     );
     if (explicit) return explicit;
     const group = control.closest('[role="group"]');
-    if (!group) return null;
-    return group.querySelector(
+    if (group && group.querySelector(
       '[data-testid*="copy" i], [data-testid*="feedback" i], [data-testid*="good-response" i], [data-testid*="bad-response" i], [aria-label^="Copy" i], [aria-label*="Read aloud" i]',
-    ) ? group : null;
+    )) return group;
+    // Some response footers are plain divs without a role/test ID. Require a
+    // bounded row with Copy plus feedback/retry controls, outside answer content.
+    for (let row = control.parentElement, depth = 0; row && depth < 3; row = row.parentElement, depth += 1) {
+      if (row.matches('article, main, body, nav, aside, header, form') ||
+        row.closest('[data-message-author-role], .markdown, .prose, pre, code')) break;
+      if (row.querySelector(TURN_SELECTOR)) break;
+      const copy = row.querySelector('[data-testid="copy-turn-action-button"], button[aria-label="Copy" i], button[aria-label="Copy response" i]');
+      const feedback = row.querySelector('[data-testid="good-response-turn-action-button"], [data-testid="bad-response-turn-action-button"], [data-testid="regenerate-response-button"], button[aria-label="Good response" i], button[aria-label="Bad response" i], button[aria-label="Try again" i]');
+      if (copy && feedback) return row;
+    }
+    return null;
   }
 
   function moreControlScore(control, scopes, messageIds) {
@@ -1652,7 +1668,7 @@
       control,
       index,
       score: moreControlScore(control, scopes, messageIds),
-    })).filter(({ control, score }) => score >= 45 && isMountedAndNotHidden(control));
+    })).filter(({ control, score }) => score >= 45 && isMountedAndNotHidden(control, true));
     if (!candidates.length) return null;
     candidates.sort((left, right) => right.score - left.score || right.index - left.index);
     if (candidates[1] && candidates[1].score === candidates[0].score) return null;
@@ -1978,7 +1994,7 @@
       }
       moreButton = moreButton && moreButton.control;
     }
-    if (!moreButton) return { ok: false, attempted: false, unavailable: true, reason: 'ChatGPT’s response actions were unavailable.' };
+    if (!moreButton) return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not identify the latest response’s three-dot menu.' };
     if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
     try {
       moreButton.click();
@@ -1986,30 +2002,66 @@
       return { ok: false, attempted: false, unavailable: true, reason: 'ChatGPT did not open the response menu.' };
     }
 
-    const branchAction = await waitForCondition(
-      () => {
-        if (!stillExpected()) return null;
-        const controlledId = normalizeText(moreButton.getAttribute('aria-controls'));
-        const controlledMenu = controlledId ? doc.getElementById(controlledId) : null;
-        if (controlledMenu && controlledMenu.isConnected) return findBranchAction(controlledMenu);
-        const triggerId = normalizeText(moreButton.id);
-        const menuRoots = mountedMenuRoots();
-        const linkedRoots = triggerId ? menuRoots.filter((candidate) =>
-          normalizeText(candidate.getAttribute('aria-labelledby')).split(/\s+/u).includes(triggerId)) : [];
-        const newlyOpenedRoots = menuRoots.filter((candidate) => !menuRootsBeforeOpen.has(candidate));
-        const triggerStateIsExposed = moreButton.hasAttribute('aria-expanded') || moreButton.hasAttribute('data-state');
-        const triggerIsOpen = moreButton.getAttribute('aria-expanded') === 'true' || moreButton.getAttribute('data-state') === 'open';
-        const roots = linkedRoots.length ? linkedRoots : (!triggerStateIsExposed || triggerIsOpen ? newlyOpenedRoots : []);
-        const menuActions = uniqueElements(roots.map((candidate) => findBranchAction(candidate)).filter(Boolean));
-        return menuActions.length === 1 ? menuActions[0] : null;
-      }, {
+    const matchingMenuRoots = () => {
+      if (!stillExpected()) return null;
+      // The trigger itself can be replaced while ChatGPT opens a portal.
+      if (!moreButton.isConnected) {
+        const target = resolveTarget(false);
+        const replacement = target && findMoreButton(target);
+        if (replacement) moreButton = replacement;
+      }
+      const controlledId = normalizeText(moreButton.getAttribute('aria-controls'));
+      const controlledMenu = controlledId ? doc.getElementById(controlledId) : null;
+      if (controlledMenu && isMountedAndNotHidden(controlledMenu)) return [controlledMenu];
+      const triggerId = normalizeText(moreButton.id);
+      const menuRoots = mountedMenuRoots();
+      const linkedRoots = triggerId ? menuRoots.filter((candidate) =>
+        normalizeText(candidate.getAttribute('aria-labelledby')).split(/\s+/u).includes(triggerId)) : [];
+      const newlyOpenedRoots = menuRoots.filter((candidate) => !menuRootsBeforeOpen.has(candidate));
+      const triggerStateIsExposed = moreButton.hasAttribute('aria-expanded') || moreButton.hasAttribute('data-state');
+      const triggerIsOpen = moreButton.getAttribute('aria-expanded') === 'true' || moreButton.getAttribute('data-state') === 'open';
+      return linkedRoots.length ? linkedRoots : (!triggerStateIsExposed || triggerIsOpen ? newlyOpenedRoots : []);
+    };
+    const menuIsOpen = () => Boolean(matchingMenuRoots()?.length ||
+      moreButton.getAttribute('aria-expanded') === 'true' || moreButton.getAttribute('data-state') === 'open');
+    await waitForCondition(menuIsOpen, {
+      root: doc.documentElement, win, timeout: 300, attributes: true, pollInterval: 75,
+    });
+    if (!menuIsOpen()) {
+      if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before opening the response menu. Nothing was sent.' };
+      if (!moreButton.isConnected || !actionControlIsUsable(moreButton) || !isMountedAndNotHidden(moreButton, true)) {
+        return { ok: false, attempted: false, unavailable: true, reason: 'The response menu button changed before it could be opened.' };
+      }
+      try {
+        // Pointer-driven menus (including Radix) ignore HTMLElement.click().
+        // Only use this fallback if still closed; don't click again and toggle it shut.
+        const Pointer = win.PointerEvent || win.MouseEvent;
+        moreButton.dispatchEvent(new Pointer('pointerdown', {
+          bubbles: true, cancelable: true, view: win, button: 0, buttons: 1,
+          pointerId: 1, pointerType: 'mouse', isPrimary: true, ctrlKey: false,
+        }));
+        moreButton.dispatchEvent(new Pointer('pointerup', {
+          bubbles: true, cancelable: true, view: win, button: 0, buttons: 0,
+          pointerId: 1, pointerType: 'mouse', isPrimary: true, ctrlKey: false,
+        }));
+      } catch (_error) {
+        return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not open the response’s three-dot menu.' };
+      }
+    }
+    const branchAction = await waitForCondition(() => {
+      const roots = matchingMenuRoots() || [];
+      const actions = uniqueElements(roots.map((root) => findBranchAction(root)).filter(Boolean));
+      return actions.length === 1 ? actions[0] : null;
+    }, {
       root: doc.documentElement,
       win,
       timeout: Math.max(1_000, Math.min(5_000, discoveryTimeout)),
       attributes: true,
       pollInterval: 125,
     });
-    if (!branchAction) return { ok: false, attempted: false, unavailable: true, reason: 'ChatGPT’s Branch action was unavailable.' };
+    if (!branchAction) return { ok: false, attempted: false, unavailable: true, reason: menuIsOpen()
+      ? 'The response menu opened, but Workflow Toolkit could not identify “Branch in new chat” inside it.'
+      : 'The response’s three-dot menu did not open, so Workflow Toolkit could not reach the Branch action.' };
     if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
     try {
       branchAction.click();
@@ -3235,7 +3287,7 @@
               }
             }
             showRecovery(job, clickResult.unavailable
-              ? 'ChatGPT’s Branch action was not available. No text-only copy was made, because it would lose the files and images. Nothing was sent. You can retry when Branch is available.'
+              ? `${clickResult.reason} No text-only copy was made. Nothing was sent. You can try again.`
               : clickResult.reason, turn);
             return false;
           }

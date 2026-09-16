@@ -31,6 +31,7 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Confirm the panel has no context or send checkbox: the whole conversation is always used and sending is automatic.
 - Confirm a separate popup/tab is created, its URL changes to a different conversation ID, and the question sends automatically.
 - Confirm the original tab remains at the same scroll position and has no new message.
+- Verify the latest response's closed three-dot menu opens automatically, including a pointer-down-driven menu. Confirm it opens once and creates only one branch; repeat after switching chats or resizing the window.
 - Ask a second follow-up in the new branch and confirm it understands the earlier conversation.
 - Add another exchange to the original, click **Ask in new chat** on an older response, and confirm the separate chat still contains everything through the newest completed answer.
 
@@ -63,7 +64,7 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 ## Failure recovery
 
 - Temporarily change `findMoreButton` and `findDirectBranchAction` locally so both return `null`.
-- Start a side question and confirm the side window explains that native Branch is unavailable; it must not open a blank chat or send a text-only substitute.
+- Start a side question and confirm the side window says it could not identify the response's three-dot menu; it must not claim Branch is unavailable or send a text-only substitute. A menu that cannot open and an open menu without a recognized Branch action should have different error messages.
 - Confirm the original chat receives no draft or message. Restore the selectors and retry; confirm only one native branch and one question are created.
 - Confirm oversized highlights/questions show a size warning rather than being silently cut off.
 - Block popups for `chatgpt.com`; confirm Workflow Toolkit reports the block and the original chat remains untouched.

@@ -186,6 +186,39 @@ test('findMoreButton supports preferred selectors and ellipsis fallback', () => 
   assert.equal(toolkit.findMoreButton(document.querySelector('#fallback')), document.querySelector('#ellipsis'));
 });
 
+test('findMoreButton accepts a closed menu trigger but not a trigger inside closed content', () => {
+  const { document } = createDom(`
+    <article id="turn" data-testid="conversation-turn-1" data-turn="assistant">
+      <div data-testid="message-actions">
+        <button id="more" aria-label="More actions" aria-haspopup="menu" data-state="closed" aria-expanded="false"></button>
+      </div>
+    </article>
+  `).window;
+  const turn = document.querySelector('#turn');
+  const more = document.querySelector('#more');
+  assert.equal(toolkit.findMoreButton(turn), more);
+  more.parentElement.dataset.state = 'closed';
+  assert.equal(toolkit.findMoreButton(turn), null);
+  delete more.parentElement.dataset.state;
+  more.parentElement.hidden = true;
+  assert.equal(toolkit.findMoreButton(turn), null);
+});
+
+test('findMoreButton recognizes an unmarked native footer without selecting content menus', () => {
+  const { document } = createDom(`
+    <article id="turn" data-testid="conversation-turn-1" data-turn="assistant">
+      <div class="markdown"><button aria-label="More actions" aria-haspopup="menu">Content menu</button></div>
+      <div><button aria-label="Copy response"></button><button aria-label="Bad response"></button>
+        <span><button id="more" aria-haspopup="menu" data-state="closed" aria-expanded="false"><svg></svg></button></span>
+      </div>
+    </article>
+  `).window;
+  const turn = document.querySelector('#turn');
+  assert.equal(toolkit.findMoreButton(turn), document.querySelector('#more'));
+  document.querySelector('#more').remove();
+  assert.equal(toolkit.findMoreButton(turn), null);
+});
+
 test('findMoreButton resolves a response toolbar outside the article by message ID', () => {
   const { document } = createDom(`
     <article data-testid="conversation-turn-1">

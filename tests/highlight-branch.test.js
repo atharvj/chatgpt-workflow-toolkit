@@ -53,8 +53,9 @@ function openHighlight({ dom, doc, app }, text = 'Compare both groups.') {
   dom.window.getSelection().removeAllRanges();
 }
 
-for (const typedQuestion of ['Why is this necessary?', '']) {
-  test(`highlight from an older answer survives typing and branches all history (${typedQuestion ? 'custom question' : 'default explanation'})`, async (t) => {
+for (const { typedQuestion, pointerMenu } of ['Why is this necessary?', ''].flatMap((typedQuestion) =>
+  [false, true].map((pointerMenu) => ({ typedQuestion, pointerMenu })))) {
+  test(`highlight from an older answer survives typing and branches all history (${typedQuestion ? 'custom question' : 'default explanation'}, ${pointerMenu ? 'pointer menu' : 'direct action'})`, async (t) => {
     const values = storage(t);
     const source = await fixture(t);
     const child = { location: { replace(url) { this.href = url; } }, focus() {} };
@@ -88,7 +89,30 @@ for (const typedQuestion of ['Why is this necessary?', '']) {
       reloadPage: () => { reloads += 1; return true; },
     });
     let branches = 0;
-    copy.doc.querySelector('[data-testid="branch-turn-action-button"]').addEventListener('click', () => {
+    const branchAction = copy.doc.querySelector('[data-testid="branch-turn-action-button"]');
+    if (pointerMenu) {
+      const trigger = copy.doc.createElement('button');
+      trigger.dataset.testid = 'turn-actions-menu-button';
+      trigger.dataset.state = 'closed';
+      trigger.setAttribute('aria-haspopup', 'menu');
+      trigger.setAttribute('aria-expanded', 'false');
+      trigger.setAttribute('aria-controls', 'native-menu');
+      branchAction.before(trigger);
+      const menu = copy.doc.createElement('div');
+      menu.id = 'native-menu';
+      menu.setAttribute('role', 'menu');
+      menu.dataset.state = 'closed';
+      branchAction.removeAttribute('data-testid');
+      branchAction.setAttribute('role', 'menuitem');
+      menu.append(branchAction);
+      copy.doc.body.append(menu);
+      trigger.addEventListener('pointerdown', () => {
+        trigger.dataset.state = 'open';
+        trigger.setAttribute('aria-expanded', 'true');
+        menu.dataset.state = 'open';
+      });
+    }
+    branchAction.addEventListener('click', () => {
       branches += 1;
       copy.dom.window.history.pushState({}, '', '/c/native-branch');
     });
