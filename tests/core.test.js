@@ -224,6 +224,8 @@ test('sanitizeJob returns a bounded, normalized one-shot job', () => {
     branchConversation: '',
     branchReloadFrom: '',
     branchDestinationUrl: '',
+    branchEntryUrl: '',
+    branchEntryStarted: false,
     questionInserted: false,
     baselineUserCount: -1,
     sendAttempted: false,

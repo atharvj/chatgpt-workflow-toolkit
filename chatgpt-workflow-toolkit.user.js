@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.9.4
+// @version      1.9.5
 // @description  Ask about highlighted text in native ChatGPT branches and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.9.4';
+  const VERSION = '1.9.5';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -53,6 +53,7 @@
   const JOB_PREFIX = 'chatgptSidecar.job.v1.';
   const JOB_LOCK_PREFIX = 'chatgptWorkflowToolkit.sideJob.v1.';
   const JOB_HASH_KEY = 'cwt-job';
+  const PENDING_BRANCH_KEY = 'chatgptWorkflowToolkit.pendingBranch.v1';
   const JOB_MAX_AGE_MS = 5 * 60 * 1000;
   const ASSISTANT_CONTENT_MAX_LENGTH = 28_000;
   const QUESTION_MAX_LENGTH = 30_000;
@@ -1198,7 +1199,7 @@
     try {
       const segments = new URL(String(value)).pathname.split('/').filter(Boolean);
       for (let index = segments.length - 2; index >= 0; index -= 1) {
-        if (segments[index] === 'c' && segments[index + 1]) return segments[index + 1];
+        if (segments[index] === 'c' && segments[index + 1]) return sanitizeConversationIdentity(decodeURIComponent(segments[index + 1]));
       }
       return '';
     } catch (_error) {
@@ -1208,7 +1209,38 @@
 
   function sanitizeConversationIdentity(value) {
     const identity = String(value == null ? '' : value).trim();
-    return /^[a-z0-9_-]{1,200}$/iu.test(identity) ? identity : '';
+    return /^[a-z0-9_-]{1,200}$/iu.test(identity) || isWebConversationIdentity(identity) ? identity : '';
+  }
+
+  function isWebConversationIdentity(identity) {
+    return /^WEB:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(String(identity));
+  }
+
+  function validatedBranchEntryUrl(value, sourceUrl) {
+    if (!value) return '';
+    try {
+      const source = new URL(sourceUrl);
+      const url = new URL(String(value), source);
+      const match = /^\/branch\/([^/]+)\/([a-z0-9_-]{1,200})\/?$/iu.exec(url.pathname);
+      if (!isAllowedChatGPTUrl(url.href) || url.origin !== source.origin || url.username || url.password || !match ||
+        !conversationIdentity(source.href) || decodeURIComponent(match[1]) !== conversationIdentity(source.href)) return '';
+      return canonicalPageUrl(url.href);
+    } catch (_error) { return ''; }
+  }
+
+  function pendingBranchJobId(win) {
+    try {
+      const pending = JSON.parse(win.sessionStorage.getItem(PENDING_BRANCH_KEY) || 'null');
+      if (!pending || !isValidJobId(pending.id) || !Number.isFinite(pending.createdAt) ||
+        Date.now() - pending.createdAt > JOB_MAX_AGE_MS || pending.createdAt > Date.now() + 60_000 ||
+        !validatedBranchEntryUrl(pending.entryUrl, pending.sourceUrl)) return '';
+      const current = new URL(win.location.href);
+      if (current.origin !== new URL(pending.sourceUrl).origin) return '';
+      const identity = conversationIdentity(current.href);
+      const eligible = canonicalPageUrl(current.href) === pending.entryUrl ||
+        Boolean(identity && identity !== conversationIdentity(pending.sourceUrl));
+      return eligible ? pending.id : '';
+    } catch (_error) { return ''; }
   }
 
   function isReadOnlyChatPage(value) {
@@ -1286,6 +1318,7 @@
     const branchConversation = sanitizeConversationIdentity(raw.branchConversation);
     const branchReloadFrom = isValidJobId(raw.branchReloadFrom) ? String(raw.branchReloadFrom) : '';
     const branchDestinationUrl = validatedBranchUrl(raw.branchDestinationUrl, sourceUrl);
+    const branchEntryUrl = raw.branchClickAttempted === true ? validatedBranchEntryUrl(raw.branchEntryUrl, sourceUrl) : '';
     return {
       version: 1,
       createdAt,
@@ -1304,6 +1337,8 @@
       branchConversation: branchConversation && branchConversation !== sourceConversation ? branchConversation : '',
       branchReloadFrom,
       branchDestinationUrl: conversationIdentity(branchDestinationUrl) === branchConversation ? branchDestinationUrl : '',
+      branchEntryUrl,
+      branchEntryStarted: Boolean(branchEntryUrl && raw.branchEntryStarted === true),
       questionInserted: raw.questionInserted === true,
       baselineUserCount: clampInteger(raw.baselineUserCount, -1, -1, 100_000),
       sendAttempted: raw.sendAttempted === true,
@@ -1799,6 +1834,7 @@
   function captureBranchNavigation(doc, win, pageWindow, sourceUrl) {
     let armed = false;
     let destination = '';
+    let entryUrl = '';
     let branchControl = null;
     let openCalls = 0;
     let blankRequests = 0;
@@ -1808,6 +1844,12 @@
     const active = () => armed && conversationIdentity(win.location.href) === conversationIdentity(sourceUrl);
     const capture = (value) => {
       if (!active()) return false;
+      const entry = validatedBranchEntryUrl(value, sourceUrl);
+      if (entry) {
+        if (entryUrl && entryUrl !== entry || destination) return false;
+        entryUrl = entry;
+        return true;
+      }
       const url = validatedBranchUrl(value, sourceUrl);
       if (!url || (destination && destination !== url)) return false;
       destination = url;
@@ -1820,7 +1862,7 @@
       const assign = (value) => {
         // A delayed native callback must never navigate after timeout/disposal,
         // nor send us to an unrelated site or back to the original conversation.
-        if (!closed && capture(value)) href = destination;
+        if (!closed && capture(value)) href = destination || entryUrl;
       };
       const location = { assign, replace: assign, toString: () => href };
       Object.defineProperty(location, 'href', { get: () => href, set: assign });
@@ -1874,6 +1916,7 @@
     return {
       arm(control = null) { branchControl = control; armed = true; },
       getDestination() { return destination; },
+      getEntryUrl() { return entryUrl; },
       describe() {
         const menu = branchControl?.closest('[role="menu"], [data-radix-menu-content], [data-slot="dropdown-menu-content"]');
         const menuState = menu ? (isMountedAndNotHidden(menu) ? 'still open' : 'closed') : 'not observed';
@@ -3019,8 +3062,24 @@
 
     async function waitForSideSendAcknowledgement(job, expectedConversation, baselineUserCount) {
       return waitForCondition(() => {
-        if (!isExpectedBranchConversation(job, expectedConversation)) return { status: 'drift' };
-        const userCount = getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user').length;
+        const users = getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user');
+        const userCount = users.length;
+        if (!isExpectedBranchConversation(job, expectedConversation)) {
+          // A WEB: chat may receive a server ID on its first Send. Accept that
+          // transition only AFTER Send and only with our exact question and
+          // the same inherited context; it never authorizes another Send.
+          const current = conversationIdentity(win.location.href);
+          const sent = users[baselineUserCount];
+          if (job.sendAttempted && isWebConversationIdentity(expectedConversation) && current &&
+            !isWebConversationIdentity(current) && current !== job.sourceConversation && sent &&
+            normalizeText(readableNodeText(sent)) === normalizeText(buildAccuracyGuardedPrompt(job.question)) &&
+            turnMatchesBranchJob(locateTurn(doc, job.locator), job)) {
+            state.branchConversation = current;
+            job.branchConversation = current;
+            return { status: 'sent' };
+          }
+          return { status: 'drift' };
+        }
         if (userCount > baselineUserCount) return { status: 'sent' };
         return null;
       }, {
@@ -3342,6 +3401,47 @@
       return false; // The destination reload verifies history before writing/sending.
     }
 
+    async function navigateToBranchEntry(job) {
+      const entry = validatedBranchEntryUrl(job.branchEntryUrl, job.sourceUrl);
+      if (!entry || !state.incomingJobId || job.branchEntryStarted ||
+        conversationIdentity(win.location.href) !== job.sourceConversation) {
+        showRecovery(job, 'The native branch page could not be opened safely. Nothing was sent.', null, { canRetry: false });
+        return false;
+      }
+      job.branchEntryStarted = true;
+      job.branchReloadFrom = state.pageInstanceId;
+      if (!await persistIncomingJob(job) || conversationIdentity(win.location.href) !== job.sourceConversation) {
+        showRecovery(job, 'The native branch transfer could not be saved. Nothing was sent.', null, { canRetry: false });
+        return false;
+      }
+      try {
+        // ChatGPT can remove the fragment while /branch redirects to /c/WEB:.
+        // Keep only the job reference in this tab, never the question/history.
+        win.sessionStorage.setItem(PENDING_BRANCH_KEY, JSON.stringify({
+          id: state.incomingJobId, sourceUrl: job.sourceUrl, entryUrl: entry, createdAt: job.createdAt,
+        }));
+        if (navigatePage(urlWithJob(entry, state.incomingJobId)) === false) throw new Error('navigation rejected');
+      } catch (_error) {
+        showRecovery(job, 'The native branch page could not be opened. Nothing was sent.', null, { canRetry: false });
+      }
+      return false;
+    }
+
+    async function waitForNativeBranchDestination(sourceConversation, navigationCapture) {
+      let candidate = '';
+      let since = 0;
+      return waitForCondition(() => {
+        const entryUrl = navigationCapture.getEntryUrl();
+        if (entryUrl) return { entryUrl };
+        const capturedUrl = navigationCapture.getDestination();
+        if (capturedUrl) return { conversation: conversationIdentity(capturedUrl), capturedUrl };
+        const current = conversationIdentity(win.location.href);
+        if (!current || current === sourceConversation) { candidate = ''; return null; }
+        if (current !== candidate) { candidate = current; since = Date.now(); }
+        return Date.now() - since >= 250 ? { conversation: current } : null;
+      }, { root: doc.documentElement, win, timeout: branchNavigationTimeout, pollInterval: 125 });
+    }
+
     async function runIncomingJobCore(job) {
       if (job.fallbackMode === true) {
         showRecovery(job, 'This older text-only transfer cannot preserve attachments. Return to the original chat and use Ask in new chat again.', null, { canRetry: false });
@@ -3351,6 +3451,20 @@
       state.branchConversation = state.branchConversation || job.branchConversation;
       state.sideSendAttempted = state.sideSendAttempted || job.sendAttempted;
       let currentConversation = conversationIdentity(win.location.href);
+      if (job.branchEntryStarted && !currentConversation &&
+        canonicalPageUrl(win.location.href) === job.branchEntryUrl) {
+        const redirected = await waitForCondition(() => {
+          const current = conversationIdentity(win.location.href);
+          if (current && current !== job.sourceConversation) return { conversation: current };
+          if (canonicalPageUrl(win.location.href) !== job.branchEntryUrl) return { drift: true };
+          return null;
+        }, { root: doc.documentElement, win, timeout: branchComposerTimeout, pollInterval: 125 });
+        if (!redirected || redirected.drift) {
+          showRecovery(job, 'ChatGPT did not finish opening the native branch. Nothing was sent.', null, { canRetry: false });
+          return false;
+        }
+        currentConversation = redirected.conversation;
+      }
       if (!state.branchConversation && state.branchClickAttempted && currentConversation && currentConversation !== job.sourceConversation) {
         state.branchConversation = currentConversation;
         job.branchConversation = currentConversation;
@@ -3363,6 +3477,10 @@
         state.branchConversation && currentConversation === state.branchConversation && currentConversation !== job.sourceConversation,
       );
       let beforeComposer = findComposer(doc);
+
+      if (job.branchEntryUrl && currentConversation === job.sourceConversation) {
+        return navigateToBranchEntry(job);
+      }
 
       if (job.branchDestinationUrl && state.branchClickAttempted && currentConversation === job.sourceConversation) {
         return navigateToCapturedBranch(job);
@@ -3444,14 +3562,19 @@
               return false;
             }
           }
-          const changedConversation = await waitForConversationChange(win, currentConversation, branchNavigationTimeout, () => navigationCapture.getDestination());
-          if (!changedConversation) {
+          const outcome = await waitForNativeBranchDestination(currentConversation, navigationCapture);
+          if (!outcome) {
             showRecovery(job, `The branch destination was not detected; the script cannot confirm whether ChatGPT accepted its click. Nothing was sent. ${navigationCapture.describe()} Try again only checks for the result; it will not create a duplicate branch.`);
             return false;
           }
+          if (outcome.entryUrl) {
+            job.branchEntryUrl = outcome.entryUrl;
+            return await navigateToBranchEntry(job);
+          }
+          const changedConversation = outcome.conversation;
           state.branchConversation = changedConversation;
           job.branchConversation = changedConversation;
-          const capturedUrl = navigationCapture.getDestination();
+          const capturedUrl = outcome.capturedUrl;
           if (capturedUrl && conversationIdentity(win.location.href) === job.sourceConversation) {
             job.branchDestinationUrl = capturedUrl;
             return await navigateToCapturedBranch(job);
@@ -3474,7 +3597,14 @@
         showRecovery(job, 'The separate-chat identity changed before its context could be verified. Nothing was sent.', state.recoveryTurn, { canRetry: false });
         return false;
       }
+      // WEB: routes may not yet be persisted. Do not reload them, but still
+      // require the transfer into a fresh page; a changed SPA URL alone cannot
+      // prove that its composer is no longer writing to the original chat.
       if (!job.branchReloadFrom || job.branchReloadFrom === state.pageInstanceId) {
+        if (isWebConversationIdentity(expectedConversation)) {
+          showRecovery(job, 'This WEB: branch has no verified page transfer. Nothing was sent. Start a new side question from the original chat.', null, { canRetry: false });
+          return false;
+        }
         await requestVerifiedBranchReload(job);
         return false;
       }
@@ -3544,6 +3674,7 @@
       state.branchClickAttempted = false;
       state.sideSendAttempted = false;
       try {
+        win.sessionStorage.removeItem(PENDING_BRANCH_KEY);
         if (parseJobId(win.location.href)) {
           win.history.replaceState(win.history.state, '', canonicalPageUrl(win.location.href));
         }
@@ -3589,7 +3720,7 @@
     }
 
     async function consumeIncomingJob(capturedJobId = '') {
-      const jobId = isValidJobId(capturedJobId) ? capturedJobId : parseJobId(win.location.href);
+      const jobId = isValidJobId(capturedJobId) ? capturedJobId : parseJobId(win.location.href) || pendingBranchJobId(win);
       if (!jobId) return;
       const consumeLockedJob = async () => {
         // Read only after acquiring the lock so a second page cannot run a
@@ -3936,7 +4067,7 @@
     // Capture one-shot fragments before the first await. ChatGPT may
     // canonicalize its SPA URL while the userscript is starting.
     const initialUrl = String(win.location.href);
-    const initialJobId = parseJobId(initialUrl);
+    const initialJobId = parseJobId(initialUrl) || pendingBranchJobId(win);
     await waitForBody(doc, win);
     injectStyles(doc);
     const app = createApp(doc, win, { initialJobId });
@@ -3996,6 +4127,8 @@
     waitForConversationChange,
     captureBranchNavigation,
     validatedBranchUrl,
+    validatedBranchEntryUrl,
+    pendingBranchJobId,
     waitForStableComposer,
     findMoreButton,
     isBranchLabel,

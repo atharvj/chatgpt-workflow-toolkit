@@ -33,6 +33,8 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Confirm the original tab remains at the same scroll position and has no new message.
 - Verify the latest response's closed three-dot menu opens automatically, including a pointer-down-driven menu. Confirm it opens once and creates only one branch; repeat after switching chats or resizing the window.
 - With the first user-opened side window allowed but automatic extra popups blocked, confirm Branch's new-tab result loads in that existing side window and sends once. Repeat in tab mode. Update the userscript's page-window permission when prompted.
+- Specifically check the native `/branch/<source>/<message>` launch route followed by `/c/WEB:<uuid>`. The launch route must load in the existing side window, then send once after the inherited history is ready. Do not force-reload the `WEB:` chat.
+- Check a redirect that removes the job fragment before the userscript starts. The tab-local job reference must resume the same question and be cleared on completion. If the first Send changes `WEB:` to a server ID, confirm no duplicate or false failure appears.
 - Repeat when native Branch reserves a blank tab before its result is ready: assigning the new URL via `location`, `location.href`, `assign`, or `replace` must resume the same saved job. A loading placeholder must not replace the original answer.
 - Confirm ordinary links/new-tab actions behave normally again after success or failure. No popup interception should run in the original chat or while idle.
 - Ask a second follow-up in the new branch and confirm it understands the earlier conversation.
