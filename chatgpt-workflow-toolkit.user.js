@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.9.5
+// @version      1.9.6
 // @description  Ask about highlighted text in native ChatGPT branches and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.9.5';
+  const VERSION = '1.9.6';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1093,6 +1093,45 @@
       update(`${role}\u241e${normalizeText(content)}\u241f`);
     }
     return `${lastIndex + 1}:${length}:${hashA.toString(16).padStart(8, '0')}:${hashB.toString(16).padStart(8, '0')}`;
+  }
+
+  function nativeBranchContext(doc, sourceUrl) {
+    if (!doc || !doc.querySelectorAll) return null;
+    // Native provenance is outside message content. Never accept a quoted
+    // "Branched from" link in an answer, code sample, sidebar, or our own UI.
+    const excluded = [
+      `#${UI_ROOT_ID}`, ROLE_SELECTOR, '[data-message-content]', '.markdown', '[class~="prose"]',
+      '[contenteditable]', 'form', 'pre', 'code', 'blockquote', 'nav', 'aside', 'header', '[role="dialog"]',
+    ].join(', ');
+    let notice = null;
+    for (const link of doc.querySelectorAll('p > a[href]')) {
+      const paragraph = link.parentElement;
+      if (paragraph.closest(excluded) || paragraph.querySelectorAll('a').length !== 1 ||
+        normalizeText(paragraph.textContent) !== normalizeText(`Branched from ${link.textContent}`) ||
+        !isMountedAndNotHidden(paragraph)) continue;
+      // Keep the LAST separator: a branch of a branch may retain older ones.
+      // A newer, conflicting source must not fall back to an older match.
+      notice = { paragraph, link, sourceMatches: false, turn: null, hasNewMessages: false };
+      try {
+        const source = new URL(sourceUrl);
+        const destination = new URL(link.getAttribute('href'), doc.location.href);
+        notice.sourceMatches = Boolean(isAllowedChatGPTUrl(destination.href) &&
+          !destination.username && !destination.password && destination.origin === source.origin &&
+          conversationIdentity(source.href) && conversationIdentity(destination.href) === conversationIdentity(source.href));
+      } catch (_error) { /* A malformed source link is not branch proof. */ }
+    }
+    if (!notice) return null;
+    let lastBefore = null;
+    for (const turn of getTurns(doc)) {
+      if (!['user', 'assistant'].includes(roleOfTurn(turn))) continue;
+      const content = turn.matches(ROLE_SELECTOR) ? turn : turn.querySelector(ROLE_SELECTOR) || turn;
+      if (content.contains(notice.paragraph) || notice.paragraph.contains(content)) continue;
+      const position = content.compareDocumentPosition(notice.paragraph);
+      if (position & 4) lastBefore = turn; // DOCUMENT_POSITION_FOLLOWING
+      if (position & 2) notice.hasNewMessages = true; // DOCUMENT_POSITION_PRECEDING
+    }
+    if (lastBefore && isAssistantTurn(lastBefore) && isMountedAndNotHidden(lastBefore)) notice.turn = lastBefore;
+    return notice;
   }
 
   function isEditableElement(element) {
@@ -3073,7 +3112,7 @@
           if (job.sendAttempted && isWebConversationIdentity(expectedConversation) && current &&
             !isWebConversationIdentity(current) && current !== job.sourceConversation && sent &&
             normalizeText(readableNodeText(sent)) === normalizeText(buildAccuracyGuardedPrompt(job.question)) &&
-            turnMatchesBranchJob(locateTurn(doc, job.locator), job)) {
+            findInheritedBranchTurn(job, true)) {
             state.branchConversation = current;
             job.branchConversation = current;
             return { status: 'sent' };
@@ -3161,6 +3200,7 @@
               continue;
             }
             if (writeAttempts >= 3) return { ok: false, reason: 'timeout' };
+            if (!findInheritedBranchTurn(job)) return { ok: false, reason: 'context' };
             setComposerText(composer, outgoingQuestion, win);
             writeAttempts += 1;
             nextWriteAt = Date.now() + Math.min(250 * (2 ** (writeAttempts - 1)), 750);
@@ -3183,6 +3223,7 @@
               stableDraft = liveDraft;
               stableSince = Date.now();
             } else if (Date.now() - stableSince >= 240) {
+              if (!findInheritedBranchTurn(job)) return { ok: false, reason: 'context' };
               return { ok: true, composer, sendButton, draft: liveDraft };
             }
           } else {
@@ -3239,9 +3280,11 @@
             ? 'The separate chat already has a different draft. Workflow Toolkit left it untouched.'
             : staged.reason === 'destination'
               ? 'The conversation changed before the question could be sent. Nothing was sent.'
-              : staged.reason === 'interaction'
-                ? 'The automatic step stopped because you interacted with the separate chat. Nothing was sent.'
-                : 'ChatGPT’s message box did not stay ready long enough to send the question.';
+              : staged.reason === 'context'
+                ? 'The separate chat’s branch confirmation changed before sending. Nothing was sent.'
+                : staged.reason === 'interaction'
+                  ? 'The automatic step stopped because you interacted with the separate chat. Nothing was sent.'
+                  : 'ChatGPT’s message box did not stay ready long enough to send the question.';
         showRecovery(job, reason, state.recoveryTurn, { canRetry: ['timeout', 'interaction'].includes(staged.reason) });
         return false;
       }
@@ -3271,7 +3314,7 @@
             beforeSend: async () => {
               const currentComposer = findComposer(doc);
               const currentSendButton = currentComposer && findSendButton(doc, currentComposer);
-              if (!isExpectedBranchConversation(job, expectedConversation) ||
+              if (!isExpectedBranchConversation(job, expectedConversation) || !findInheritedBranchTurn(job) ||
                 currentUserCount() > baselineUserCount || hasActiveGeneration(doc) ||
                 !currentComposer || !composerTextEquals(currentComposer, outgoingQuestion) ||
                 attachmentState(currentComposer).count || !currentSendButton ||
@@ -3280,7 +3323,7 @@
               sendIntentPersisted = true;
               const persistedComposer = findComposer(doc);
               const persistedSendButton = persistedComposer && findSendButton(doc, persistedComposer);
-              if (isExpectedBranchConversation(job, expectedConversation) &&
+              if (isExpectedBranchConversation(job, expectedConversation) && findInheritedBranchTurn(job) &&
                 currentUserCount() === baselineUserCount && !hasActiveGeneration(doc) &&
                 persistedComposer && composerTextEquals(persistedComposer, outgoingQuestion) &&
                 !attachmentState(persistedComposer).count && persistedSendButton &&
@@ -3347,6 +3390,32 @@
       if (!turn || !isAssistantTurn(turn)) return false;
       if (job.targetFingerprint && assistantTurnFingerprint(turn) !== job.targetFingerprint) return false;
       return !job.contextFingerprint || conversationContextFingerprint(turn.ownerDocument, turn) === job.contextFingerprint;
+    }
+
+    function findInheritedBranchTurn(job, allowNewMessages = job.questionInserted || job.sendAttempted) {
+      const native = nativeBranchContext(doc, job.sourceUrl);
+      if (native) {
+        // The native source separator replaces brittle DOM equality ONLY after
+        // our branch action and fresh-page transfer. The original chat and a
+        // stale composer still cannot qualify. Readiness is checked separately.
+        if (!job.branchClickAttempted || !job.branchReloadFrom || job.branchReloadFrom === state.pageInstanceId ||
+          !conversationIdentity(win.location.href) || conversationIdentity(win.location.href) === job.sourceConversation ||
+          !native.sourceMatches || !allowNewMessages && native.hasNewMessages) return null;
+        return native.turn;
+      }
+      // Older native layouts without a source separator keep the strict check.
+      const candidate = locateTurn(doc, job.locator);
+      return turnMatchesBranchJob(candidate, job) ? candidate : null;
+    }
+
+    function inheritedBranchDiagnostic(job) {
+      const native = nativeBranchContext(doc, job.sourceUrl);
+      if (native) {
+        return `Details (v${VERSION}): native source ${native.sourceMatches ? 'matches' : 'does not match'}; inherited response ${native.turn ? 'mounted' : 'not mounted'}; messages after separator ${native.hasNewMessages ? 'yes' : 'no'}.`;
+      }
+      const candidate = locateTurn(doc, job.locator);
+      const targetMatches = candidate && (!job.targetFingerprint || assistantTurnFingerprint(candidate) === job.targetFingerprint);
+      return `Details (v${VERSION}): native source marker not found; saved response ${!candidate ? 'not located' : targetMatches ? 'matches' : 'display differs'}; displayed history ${candidate && turnMatchesBranchJob(candidate, job) ? 'matches' : 'differs'}.`;
     }
 
     async function persistIncomingJob(job) {
@@ -3615,8 +3684,7 @@
       }
       const inheritedTurn = await waitForCondition(() => {
         if (!isExpectedBranchConversation(job, expectedConversation)) return null;
-        const candidate = locateTurn(doc, job.locator);
-        return turnMatchesBranchJob(candidate, job) ? candidate : null;
+        return findInheritedBranchTurn(job);
       }, {
         root: doc.documentElement,
         win,
@@ -3628,7 +3696,7 @@
         showRecovery(
           job,
           isExpectedBranchConversation(job, expectedConversation)
-            ? 'The separate chat opened, but its inherited conversation context could not be verified. Nothing was sent.'
+            ? `The separate chat opened, but its inherited conversation context could not be verified. Nothing was sent. ${inheritedBranchDiagnostic(job)}`
             : 'The conversation changed before its inherited context could be verified. Nothing was sent.',
           state.recoveryTurn,
           { canRetry: isExpectedBranchConversation(job, expectedConversation) },
@@ -3637,7 +3705,7 @@
       }
       const branchComposer = await waitForStableComposer(doc, win, beforeComposer, branchComposerTimeout, { allowReused: true });
       if (!branchComposer || !isExpectedBranchConversation(job, expectedConversation) ||
-        !turnMatchesBranchJob(locateTurn(doc, job.locator), job)) {
+        !findInheritedBranchTurn(job)) {
         showRecovery(
           job,
           isExpectedBranchConversation(job, expectedConversation)
@@ -4104,6 +4172,7 @@
     extractAssistantContent,
     assistantTurnFingerprint,
     conversationContextFingerprint,
+    nativeBranchContext,
     cleanStartWriting,
     cleanShareHighlighted,
     restoreStartWriting,

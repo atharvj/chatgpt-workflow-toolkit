@@ -67,7 +67,7 @@ test('WEB: conversation IDs survive URL decoding and job persistence without loo
   }
 });
 
-for (const mode of ['redirect-after-start', 'redirect-before-start', 'WEB-to-server-on-send']) {
+for (const mode of ['redirect-after-start', 'redirect-before-start', 'WEB-to-server-on-send', 'native-marker-rendering-diff']) {
   test(`native launch → WEB branch → exactly one focused Send (${mode})`, async (t) => {
     const values = storage(t);
     const original = page(t, sourceUrl);
@@ -115,7 +115,11 @@ for (const mode of ['redirect-after-start', 'redirect-before-start', 'WEB-to-ser
     assert.ok(marker);
     assert.equal(marker.includes(question), false, 'tab marker contains no conversation/question text');
 
-    const startsAtEntry = mode === 'redirect-after-start';
+    const startsAtEntry = mode === 'redirect-after-start' || mode === 'native-marker-rendering-diff';
+    const branchHistory = mode === 'native-marker-rendering-diff'
+      ? history.replace('Keep the units consistent.', 'Keep the units consistent.<span> [Source]</span>')
+        .replace('<form>', `<p class="mx-3 shrink text-xs whitespace-nowrap text-gray-500">Branched from <a rel="noopener" class="cursor-pointer font-normal underline font-semibold" target="_self" href="/c/${sourceId}">Example lab</a></p><form>`)
+      : history;
     const branch = page(t, startsAtEntry ? navigation : webUrl, startsAtEntry ? '<p>Loading...</p>' : history);
     branch.win.sessionStorage.setItem(pendingKey, marker);
     let sends = 0;
@@ -139,7 +143,7 @@ for (const mode of ['redirect-after-start', 'redirect-before-start', 'WEB-to-ser
       // React replaces the URL and drops the transfer fragment.
       branch.win.history.replaceState({}, '', webUrl);
       const main = branch.doc.createElement('div');
-      main.innerHTML = history;
+      main.innerHTML = branchHistory;
       branch.doc.body.append(...main.childNodes);
     }, 100);
     const installed = await toolkit.install(branch.doc, branch.win);
