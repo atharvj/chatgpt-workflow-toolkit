@@ -30,6 +30,7 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Scroll and read the original answer while typing a question about step 3 in the panel.
 - Confirm the panel has no context or send checkbox: the whole conversation is always used and sending is automatic.
 - Confirm a separate popup/tab is created, its URL changes to a different conversation ID, and the question sends automatically.
+- In ChatGPT's rich-text message box, repeat with a multiline highlight containing blank lines, indented code, math, and emoji. Verify the sent message preserves those lines/characters and sends once without a false **different draft** error. An actual existing or changed draft must still stop automation.
 - Confirm the original tab remains at the same scroll position and has no new message.
 - Verify the latest response's closed three-dot menu opens automatically, including a pointer-down-driven menu. Confirm it opens once and creates only one branch; repeat after switching chats or resizing the window.
 - With the first user-opened side window allowed but automatic extra popups blocked, confirm Branch's new-tab result loads in that existing side window and sends once. Repeat in tab mode. Update the userscript's page-window permission when prompted.

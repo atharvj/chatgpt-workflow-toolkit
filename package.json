@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-workflow-toolkit",
-  "version": "1.9.6",
+  "version": "1.9.7",
   "private": true,
   "description": "Separate contextual chats and UI cleanup for ChatGPT.",
   "main": "chatgpt-workflow-toolkit.user.js",
@@ -23,7 +23,11 @@
     "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
   },
   "devDependencies": {
-    "jsdom": "29.1.1"
+    "jsdom": "29.1.1",
+    "prosemirror-model": "1.25.11",
+    "prosemirror-schema-basic": "1.2.4",
+    "prosemirror-state": "1.4.4",
+    "prosemirror-view": "1.42.3"
   },
   "license": "MIT"
 }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.9.6
+// @version      1.9.7
 // @description  Ask about highlighted text in native ChatGPT branches and hide Start writing.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.9.6';
+  const VERSION = '1.9.7';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1494,7 +1494,34 @@
     if (!composer) return '';
     const tag = composer.tagName && composer.tagName.toLowerCase();
     if (tag === 'textarea' || tag === 'input') return String(composer.value || '');
-    return String(composer.innerText || composer.textContent || '').replace(/\u00a0/gu, ' ');
+    // Read the editor document, not layout-dependent innerText (which can add
+    // paragraph spacing) or textContent (which joins adjacent paragraphs).
+    // Preserve blank lines, indentation, and Unicode; do not flatten whitespace
+    // just to make a changed draft pass the pre-Send safety check.
+    const blockTags = new Set(['P', 'DIV', 'PRE', 'BLOCKQUOTE', 'LI', 'UL', 'OL']);
+    const read = (node) => {
+      if (node.nodeType === 3) return node.nodeValue || '';
+      if (node.nodeType !== 1) return '';
+      if (node.matches('script, style, .ProseMirror-trailingBreak, .ProseMirror-separator')) return '';
+      if (node.tagName === 'BR') {
+        // A terminal BR is the browser's placeholder for an empty/end-of-line
+        // paragraph. An actual trailing hard break has another BR after it.
+        return !node.nextSibling && node.parentElement.matches('p, div') ? '' : '\n';
+      }
+      let text = '';
+      let previousWasBlock = false;
+      let hasPrevious = false;
+      for (const child of node.childNodes) {
+        if (child.nodeType !== 1 && child.nodeType !== 3) continue;
+        const block = child.nodeType === 1 && blockTags.has(child.tagName);
+        if (hasPrevious && (block || previousWasBlock)) text += '\n';
+        text += read(child);
+        previousWasBlock = block;
+        hasPrevious = true;
+      }
+      return text;
+    };
+    return read(composer).replace(/\u00a0/gu, ' ');
   }
 
   function composerTextEquals(composer, value) {
@@ -1572,9 +1599,18 @@
     }
     const insertedTextIsValid = inserted && (typeof verifier === 'function'
       ? verifier(composer, text) === true
-      : getComposerText(composer) === text);
+      : composerTextEquals(composer, text)) &&
+      // Raw text-node newlines can collapse when ProseMirror reparses them.
+      // Real block/break boundaries survive that parse.
+      (!/[\r\n]/u.test(text) || !/[\r\n]/u.test(composer.textContent));
     if (!insertedTextIsValid) {
-      composer.textContent = text;
+      const paragraphs = text.replace(/\r\n?/gu, '\n').split('\n').map((line) => {
+        const paragraph = composer.ownerDocument.createElement('p');
+        if (line) paragraph.textContent = line;
+        else paragraph.append(composer.ownerDocument.createElement('br'));
+        return paragraph;
+      });
+      composer.replaceChildren(...paragraphs);
     }
     dispatchInput(composer, win, text);
     return typeof verifier === 'function' ? verifier(composer, text) === true : composerTextEquals(composer, text);
