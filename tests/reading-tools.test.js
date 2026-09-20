@@ -2,10 +2,13 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
 const { JSDOM } = require('jsdom');
 const toolkit = require('../chatgpt-workflow-toolkit.user.js');
 const storageKey = 'chatgptWorkflowToolkit.bookmarks.v1.https://chatgpt.com.reading-test';
 const originalGlobals = new WeakMap();
+const nativeArrowHTML = readFileSync(join(__dirname, 'fixtures/native-scroll-bottom.html'), 'utf8');
 
 async function settle(win, predicate) {
   const end = Date.now() + 2000;
@@ -229,6 +232,73 @@ test('down icons inside answers and submit/menu controls do not save reading pos
   button.setAttribute('aria-label', 'Scroll to bottom');
   const toggle = doc.querySelector('[data-cgs-setting="returnToReading"]'); toggle.checked = false;
   toggle.dispatchEvent(new win.Event('change', { bubbles: true })); button.click();
+  assert.equal(app.state.readingTools.state.back, null);
+});
+
+for (const [container, target] of [['main', 'button'], ['main', 'path'], ['main', '.e33vkq_waveDot'], ['form', 'button'], ['body', 'button']]) {
+  test(`reported unlabeled native arrow saves and instantly jumps: ${container}, ${target}`, async (t) => {
+    const { doc, win, scroller, click, app } = await setup(t);
+    const template = doc.createElement('template'); template.innerHTML = nativeArrowHTML;
+    const button = template.content.firstElementChild;
+    doc.querySelector(container).append(button);
+    let nativeCalls = 0;
+    button.addEventListener('click', () => { nativeCalls++; });
+    scroller.style.setProperty('scroll-behavior', 'smooth', 'important');
+    const descriptor = Object.getOwnPropertyDescriptor(scroller, 'scrollTop');
+    let jumps = 0;
+    Object.defineProperty(scroller, 'scrollTop', { ...descriptor, set(value) {
+      assert.equal(scroller.style.getPropertyValue('scroll-behavior'), 'auto');
+      assert.equal(scroller.style.getPropertyPriority('scroll-behavior'), 'important');
+      jumps++; descriptor.set(value);
+    } });
+    const event = new win.MouseEvent('click', { bubbles: true, cancelable: true });
+    (target === 'button' ? button : button.querySelector(target)).dispatchEvent(event);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(nativeCalls, 0, 'native animation never starts');
+    assert.equal(jumps, 1);
+    assert.equal(scroller.scrollTop, 2500, 'jump finishes synchronously');
+    assert.equal(app.state.readingTools.state.back.top, 200);
+    assert.equal(doc.querySelector('[data-cgs-action="reading-back"]').hidden, false);
+    assert.equal(scroller.style.getPropertyValue('scroll-behavior'), 'smooth');
+    button.click(); // Clicking while already at the bottom keeps the first spot.
+    click('reading-back');
+    assert.equal(scroller.scrollTop, 200);
+    assert.equal(doc.querySelector('[data-cgs-action="reading-back"]').hidden, true);
+  });
+}
+
+test('reported native arrow pattern does not claim quoted controls, generic dots, or unrelated SVG arrows', async (t) => {
+  const { doc, app } = await setup(t);
+  for (const variant of ['answer', 'sidebar', 'dots-only', 'no-scroll-offset', 'no-scroll-root', 'different-label', 'submit']) {
+    const template = doc.createElement('template'); template.innerHTML = nativeArrowHTML;
+    const button = template.content.firstElementChild;
+    let parent = doc.querySelector('main');
+    if (variant === 'answer') parent = doc.querySelector('[data-message-author-role="assistant"]');
+    if (variant === 'sidebar') { parent = doc.createElement('aside'); doc.body.append(parent); }
+    if (variant === 'dots-only') { button.className = ''; button.querySelector('svg').remove(); }
+    if (variant === 'no-scroll-offset') for (const cls of [...button.classList]) { if (cls.startsWith('bottom-[')) button.classList.remove(cls); }
+    if (variant === 'no-scroll-root') for (const cls of [...button.classList]) { if (cls.startsWith('group-data-stream-active/scroll-root:')) button.classList.remove(cls); }
+    if (variant === 'different-label') button.setAttribute('aria-label', 'Download');
+    if (variant === 'submit') button.type = 'submit';
+    parent.append(button);
+    let nativeCalls = 0; button.addEventListener('click', (event) => { assert.equal(event.defaultPrevented, false); nativeCalls++; });
+    button.click();
+    assert.equal(nativeCalls, 1, variant);
+    assert.equal(app.state.readingTools.state.back, null, variant);
+    button.remove();
+  }
+});
+
+test('reported native arrow remains native with Return to where I was disabled', async (t) => {
+  const { doc, win, app } = await setup(t);
+  const toggle = doc.querySelector('[data-cgs-setting="returnToReading"]'); toggle.checked = false;
+  toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
+  const template = doc.createElement('template'); template.innerHTML = nativeArrowHTML;
+  const button = template.content.firstElementChild; doc.querySelector('main').append(button);
+  let calls = 0;
+  button.addEventListener('click', (event) => { assert.equal(event.defaultPrevented, false); calls++; });
+  button.click();
+  assert.equal(calls, 1);
   assert.equal(app.state.readingTools.state.back, null);
 });
 

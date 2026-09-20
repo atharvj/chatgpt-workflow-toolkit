@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-workflow-toolkit",
-  "version": "1.10.2",
+  "version": "1.10.3",
   "private": true,
   "description": "Bookmarks, reading shortcuts, separate contextual chats, and UI cleanup for ChatGPT.",
   "main": "chatgpt-workflow-toolkit.user.js",

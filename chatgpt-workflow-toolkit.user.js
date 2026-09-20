@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.2
+// @version      1.10.3
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.2';
+  const VERSION = '1.10.3';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -2622,9 +2622,18 @@
       ...(button.getAttribute('aria-labelledby') || '').split(/\s+/u).filter(Boolean).map((id) => doc.getElementById(id)?.textContent)];
     if (labels.some((label) => /^(?:scroll (?:to (?:bottom|latest)|down)|jump to (?:bottom|latest(?: message)?))$/iu.test(normalizeText(label)))) return true;
     if (/^(?:scroll-to-bottom|scroll-to-latest|jump-to-bottom|jump-to-latest)(?:-button)?$/iu.test(button.getAttribute('data-testid') || '')) return true;
-    // Icon-only variants use named SVG symbols. Do not guess from arbitrary
-    // chevrons (model menus/downloads) or SVG paths.
-    if (!button.closest('main') || labels.some((label) => normalizeText(label)) || normalizeText(button.textContent)) return false;
+    if (labels.some((label) => normalizeText(label)) || normalizeText(button.textContent)) return false;
+    // ChatGPT's unlabeled floating arrow is aria-hidden and uses an inline
+    // SVG path, not a named symbol. Its thread-bottom offset and scroll-root
+    // streaming styles identify it even when the icon becomes animated dots.
+    // Do not match waveDot alone: those dots appear on other controls too.
+    const classes = [...button.classList];
+    if (button.matches('button') && button.querySelector('svg') &&
+      classes.some((name) => name.startsWith('bottom-[') && name.includes('var(--thread-scroll-to-bottom-banner-offset,')) &&
+      classes.some((name) => name.startsWith('group-data-stream-active/scroll-root:'))) return true;
+    // Other icon-only variants use named SVG symbols. Do not guess from
+    // arbitrary chevrons (model menus/downloads) or SVG paths.
+    if (!button.closest('main')) return false;
     return [...button.querySelectorAll('svg use')].some((use) =>
       /#(?:arrow-down|arrow-down-long)$/iu.test(use.getAttribute('href') || use.getAttribute('xlink:href') || ''));
   }
