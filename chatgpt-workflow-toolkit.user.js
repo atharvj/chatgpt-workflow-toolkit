@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.9.7
-// @description  Ask about highlighted text in native ChatGPT branches and hide Start writing.
+// @version      1.10.0
+// @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
 // @homepageURL  https://github.com/atharvj/chatgpt-workflow-toolkit
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.9.7';
+  const VERSION = '1.10.0';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -101,6 +101,8 @@
     hideShareHighlighted: true,
     showTurnButtons: true,
     showSelectionButton: true,
+    bookmarks: true,
+    returnToReading: true,
   });
 
   const STYLE_TEXT = `
@@ -156,6 +158,26 @@
       backdrop-filter: blur(12px);
     }
     #cgs-dock[data-cgs-position-suppressed="true"] { visibility: hidden; pointer-events: none; }
+    .cgs-bookmark-action {
+      appearance: none; border: 0; border-radius: 6px; padding: 4px 7px;
+      font: 600 12px/1.4 ui-sans-serif, system-ui, sans-serif; cursor: pointer;
+      color: var(--text-secondary, #777); background: transparent;
+    }
+    .cgs-bookmark-action:hover { color: #10a37f; background: rgba(127,127,127,.12); }
+    #cgs-bookmarks-panel {
+      position: fixed; right: 18px; top: 70px; z-index: 2147483002;
+      width: min(390px, calc(100vw - 24px)); max-height: calc(100dvh - 160px);
+      overflow: auto; padding: 14px; border: 1px solid rgba(127,127,127,.3); border-radius: 14px;
+      background: var(--main-surface-primary, #fff); color: var(--text-primary, #111827);
+      box-shadow: 0 8px 28px rgba(0,0,0,.18);
+    }
+    #cgs-bookmarks-panel h2 { font-size: 16px; margin: 0; }
+    #cgs-bookmarks-panel p { font-size: 12px; }
+    #cgs-bookmark-label { width: 100%; padding: 8px; border: 1px solid #888; border-radius: 6px;
+      color: inherit; background: var(--main-surface-secondary, #f5f5f5); font: inherit; }
+    #cgs-bookmark-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 100px; overflow: auto; }
+    .cgs-bookmark-item { padding: 10px 0; border-top: 1px solid rgba(127,127,127,.2); }
+    .cgs-bookmark-jump { display: block; width: 100%; text-align: left; overflow-wrap: anywhere; }
     .cgs-button, .cgs-icon-button, .cgs-primary, .cgs-secondary, .cgs-link-button {
       appearance: none;
       border: 0;
@@ -513,6 +535,8 @@
       // Older versions used one switch for both response and selection buttons.
       showSelectionButton: typeof source.showSelectionButton === 'boolean'
         ? source.showSelectionButton : source.showTurnButtons !== false,
+      bookmarks: source.bookmarks !== false,
+      returnToReading: source.returnToReading !== false,
     };
   }
 
@@ -2325,13 +2349,15 @@
   const gmAddStyle = legacyGrant('GM_addStyle');
   const gmRegisterMenuCommand = legacyGrant('GM_registerMenuCommand');
 
-  async function storageGet(key, fallback) {
+  async function storageGet(key, fallback, requireSuccess = false) {
     try {
       if (gmGetValue) return await Promise.resolve(gmGetValue(key, fallback));
       if (global.GM && typeof global.GM.getValue === 'function') return await global.GM.getValue(key, fallback);
     } catch (_error) {
+      if (requireSuccess) throw _error;
       return fallback;
     }
+    if (requireSuccess) throw new Error('Userscript storage is unavailable');
     return fallback;
   }
 
@@ -2439,13 +2465,16 @@
     root.id = UI_ROOT_ID;
     root.innerHTML = `
       <div id="cgs-dock" aria-label="ChatGPT Workflow Toolkit controls" hidden>
+        <button class="cgs-icon-button" type="button" data-cgs-action="reading-bookmarks" aria-label="Bookmarks for this chat" title="Bookmarks for this chat">☆</button>
+        <button class="cgs-icon-button" type="button" data-cgs-action="reading-latest" aria-label="Jump to latest and remember my place" title="Jump to latest and remember my place">↓</button>
+        <button class="cgs-icon-button" type="button" data-cgs-action="reading-back" aria-label="Return to where I was" title="Return to where I was" hidden>↩</button>
         <button class="cgs-icon-button" type="button" data-cgs-action="toggle-settings" aria-label="Open Workflow Toolkit settings" title="Workflow Toolkit settings">⚙</button>
       </div>
 
       <div id="cgs-settings-backdrop" hidden>
         <section id="cgs-settings" role="dialog" aria-modal="true" aria-labelledby="cgs-settings-title">
           <div class="cgs-panel-head">
-            <div><h2 id="cgs-settings-title">ChatGPT Workflow Toolkit</h2><p>Separate contextual chats and interface cleanup</p></div>
+            <div><h2 id="cgs-settings-title">ChatGPT Workflow Toolkit</h2><p>Bookmarks, reading shortcuts, and separate contextual chats</p></div>
             <button class="cgs-icon-button" type="button" data-cgs-action="close-settings" aria-label="Close settings">×</button>
           </div>
           <label class="cgs-setting">
@@ -2500,9 +2529,38 @@
       </div>
 
       <button id="cgs-selection-pill" type="button" data-cgs-action="ask-selection" hidden>Ask in new chat</button>
+      <section id="cgs-bookmarks-panel" role="dialog" aria-modal="false" aria-labelledby="cgs-bookmarks-title" hidden>
+        <div class="cgs-panel-head"><h2 id="cgs-bookmarks-title">Bookmarks in this chat</h2>
+          <button class="cgs-icon-button" type="button" data-cgs-action="reading-close" aria-label="Close bookmarks">×</button></div>
+        <p>Saved in this browser’s userscript storage. Nothing is sent to ChatGPT.</p>
+        <div id="cgs-bookmark-editor" hidden>
+          <label for="cgs-bookmark-label">Bookmark label</label>
+          <input id="cgs-bookmark-label" maxlength="80" autocomplete="off">
+          <p id="cgs-bookmark-preview"></p>
+          <button class="cgs-primary" type="button" data-cgs-action="reading-save">Save bookmark</button>
+        </div>
+        <p id="cgs-bookmark-status" role="status"></p>
+        <div id="cgs-bookmark-list"></div>
+      </section>
       <div id="cgs-toast" role="status" aria-live="polite" hidden></div>
     `;
     doc.body.append(root);
+
+    for (const [key, title, description] of [
+      ['bookmarks', 'Bookmarks', 'Save labeled answers or highlighted passages in this browser.'],
+      ['returnToReading', 'Return to where I was', 'Remember your spot when jumping to the latest message.'],
+    ]) {
+      const label = doc.createElement('label');
+      label.className = 'cgs-setting';
+      const span = doc.createElement('span');
+      const strong = doc.createElement('strong'); strong.textContent = title;
+      const small = doc.createElement('small'); small.textContent = description;
+      span.append(strong, small);
+      const input = doc.createElement('input'); input.type = 'checkbox'; input.dataset.cgsSetting = key;
+      input.setAttribute('aria-label', title);
+      label.append(span, input);
+      root.querySelector('.cgs-version').before(label);
+    }
 
     return root;
   }
@@ -2542,6 +2600,296 @@
       if (fallback) fallback.remove();
       else button.remove();
     }
+  }
+
+  function readingAnchor(turn) {
+    const id = [...turnMessageIds(turn)][0] || '';
+    return { messageId: id, fingerprint: assistantTurnFingerprint(turn), role: roleOfTurn(turn) };
+  }
+
+  function locateReadingAnchor(doc, anchor) {
+    if (!anchor) return null;
+    const turns = getTurns(doc).filter((turn) => !anchor.role || roleOfTurn(turn) === anchor.role);
+    if (anchor.messageId) {
+      const matching = turns.filter((turn) => turnMessageIds(turn).has(anchor.messageId));
+      // A known ID is authoritative. Another answer with the same words is
+      // not a safe substitute for an unloaded/deleted message.
+      return matching.length === 1 ? matching[0] : null;
+    }
+    if (!anchor.fingerprint) return null;
+    const matching = turns.filter((turn) => assistantTurnFingerprint(turn) === anchor.fingerprint);
+    return matching.length === 1 ? matching[0] : null;
+  }
+
+  function sanitizeBookmarks(raw) {
+    const seen = new Set();
+    return (Array.isArray(raw) ? raw : []).slice(0, 100).flatMap((item) => {
+      if (!item || !isValidJobId(item.id) || seen.has(item.id) || typeof item.label !== 'string') return [];
+      const messageId = typeof item.messageId === 'string' && /^[\w:-]{1,200}$/u.test(item.messageId) ? item.messageId : '';
+      const fingerprint = String(item.fingerprint || '').slice(0, TARGET_FINGERPRINT_MAX_LENGTH);
+      if (!messageId && !fingerprint) return [];
+      seen.add(item.id);
+      return [{ id: item.id, label: item.label.slice(0, 80), messageId, fingerprint, role: 'assistant',
+        quote: String(item.quote || '').slice(0, 2000), blockText: String(item.blockText || '').slice(0, 240) }];
+    });
+  }
+
+  function chatScrollContainer(doc, win, turn = getTurns(doc)[0]) {
+    for (let node = turn && turn.parentElement; node && node !== doc.body; node = node.parentElement) {
+      const style = win.getComputedStyle(node);
+      if (/(auto|scroll|overlay)/u.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1) return node;
+    }
+    return doc.scrollingElement || doc.documentElement;
+  }
+
+  function createReadingTools(doc, win, { root, getSettings, toast, scheduleDockPosition }) {
+    const el = (selector) => root.querySelector(selector);
+    const panel = el('#cgs-bookmarks-panel');
+    const state = { key: '', bookmarks: [], loading: false, loadError: '', listEpoch: 0, pending: null, back: null, capture: null, focus: null, writes: Promise.resolve() };
+    const keyForPage = () => {
+      const id = conversationIdentity(win.location.href);
+      return id && !isReadOnlyChatPage(win.location.href)
+        ? `chatgptWorkflowToolkit.bookmarks.v1.${win.location.origin}.${id}` : '';
+    };
+    function close() {
+      const wasOpen = !panel.hidden;
+      panel.hidden = true;
+      state.pending = null;
+      if (state.focus && state.focus.isConnected) state.focus.focus({ preventScroll: true });
+      else if (wasOpen && !el('[data-cgs-action="reading-bookmarks"]').hidden) el('[data-cgs-action="reading-bookmarks"]').focus({ preventScroll: true });
+      state.focus = null;
+    }
+    function controls() {
+      const settings = getSettings();
+      el('[data-cgs-action="reading-bookmarks"]').hidden = !settings.bookmarks || !state.key;
+      el('[data-cgs-action="reading-latest"]').hidden = !settings.returnToReading || !state.key;
+      el('[data-cgs-action="reading-back"]').hidden = !settings.returnToReading || !state.back || !state.key;
+      scheduleDockPosition();
+    }
+    function render() {
+      const list = el('#cgs-bookmark-list');
+      list.replaceChildren();
+      el('#cgs-bookmark-status').textContent = state.loadError || (state.loading ? 'Loading bookmarks…'
+        : state.bookmarks.length ? '' : 'No bookmarks yet. Use ☆ Bookmark under an answer.');
+      for (const bookmark of state.bookmarks) {
+        const row = doc.createElement('div'); row.className = 'cgs-bookmark-item';
+        for (const [action, text] of [['jump', bookmark.label || 'Untitled bookmark'], ['rename', 'Rename'], ['delete', 'Remove']]) {
+          const button = doc.createElement('button'); button.type = 'button';
+          button.className = action === 'jump' ? 'cgs-button cgs-bookmark-jump' : 'cgs-link-button';
+          button.dataset.cgsAction = `reading-${action}`; button.dataset.bookmarkId = bookmark.id;
+          button.textContent = text;
+          if (action !== 'jump') button.setAttribute('aria-label', `${text} ${bookmark.label}`);
+          row.append(button);
+        }
+        list.append(row);
+      }
+    }
+    async function syncRoute() {
+      const key = keyForPage();
+      if (key === state.key) return;
+      const epoch = ++state.listEpoch;
+      state.key = key; state.back = null; state.pending = null; state.capture = null;
+      state.bookmarks = []; state.loading = Boolean(key); state.loadError = ''; panel.hidden = true;
+      controls();
+      let bookmarks = [], error = '';
+      try { if (key && getSettings().bookmarks) bookmarks = sanitizeBookmarks(await storageGet(key, [], true)); }
+      catch (_error) { error = 'Could not load bookmarks. Close and reopen this panel to retry.'; }
+      if (state.key !== key || keyForPage() !== key || state.listEpoch !== epoch) return;
+      state.bookmarks = bookmarks; state.loading = false; state.loadError = error; render();
+    }
+    async function reloadList() {
+      const key = state.key;
+      const epoch = ++state.listEpoch;
+      let bookmarks = [], error = '';
+      try { if (key) bookmarks = sanitizeBookmarks(await storageGet(key, [], true)); }
+      catch (_error) { error = 'Could not load bookmarks. Close and reopen this panel to retry.'; }
+      if (key !== state.key || key !== keyForPage() || state.listEpoch !== epoch) return;
+      if (!error) state.bookmarks = bookmarks;
+      state.loading = false; state.loadError = error; render();
+    }
+    function selectedBookmark(turn) {
+      if (!turn || !isAssistantTurn(turn) || isTurnStreaming(turn, doc)) return null;
+      const selection = win.getSelection();
+      let quote = '', blockText = '';
+      if (selection && selection.rangeCount && !selection.isCollapsed) {
+        const range = selection.getRangeAt(0);
+        if (turn.contains(range.startContainer) && turn.contains(range.endContainer)) {
+          quote = extractSelectionQuote(selection, turn).text || '';
+          const start = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+          const block = start.closest('p, li, pre, h1, h2, h3, h4, blockquote');
+          if (block && turn.contains(block)) blockText = normalizeText(block.textContent).slice(0, 240);
+        }
+      }
+      const anchor = readingAnchor(turn);
+      return { id: createJobId(), ...anchor, quote: quote.slice(0, 2000), blockText,
+        label: normalizeText(quote || extractAssistantContent(turn)).slice(0, 80) || 'Saved answer' };
+    }
+    function open(bookmark = null, focus = null) {
+      if (!getSettings().bookmarks || !state.key) return;
+      state.focus = focus || doc.activeElement;
+      state.pending = bookmark ? { ...bookmark } : null;
+      panel.hidden = false;
+      el('#cgs-bookmark-editor').hidden = !bookmark;
+      el('#cgs-bookmark-label').value = bookmark ? bookmark.label : '';
+      el('#cgs-bookmark-preview').textContent = bookmark ? bookmark.quote || 'Bookmark this answer.' : '';
+      render();
+      void reloadList();
+      (bookmark ? el('#cgs-bookmark-label') : el('[data-cgs-action="reading-close"]')).focus({ preventScroll: true });
+    }
+    async function changeBookmarks(change) {
+      const key = state.key;
+      const edit = async () => {
+        if (!key || keyForPage() !== key || !getSettings().bookmarks) return false;
+        const old = sanitizeBookmarks(await storageGet(key, [], true));
+        if (keyForPage() !== key || !getSettings().bookmarks) return false;
+        const next = change(old);
+        if (!next) return false;
+        if (!await storageSet(key, sanitizeBookmarks(next))) { toast('Could not save bookmarks. Check userscript storage permissions.'); return false; }
+        if (key === state.key && keyForPage() === key) {
+          state.listEpoch++; state.bookmarks = next; state.loading = false; state.loadError = ''; render();
+        }
+        return true;
+      };
+      // Serialize edits across tabs where Web Locks are supported, and within
+      // this page in every case. Each write reads the newest saved list.
+      const run = () => typeof win.navigator.locks?.request === 'function'
+        ? win.navigator.locks.request(`${key}.lock`, { mode: 'exclusive' }, edit) : edit();
+      const task = state.writes.then(run).catch(() => { toast('Could not save bookmarks. Nothing was changed here.'); return false; });
+      state.writes = task;
+      return task;
+    }
+    function remember(skipAtBottom = false) {
+      if (!getSettings().returnToReading || !state.key) return;
+      const scroller = chatScrollContainer(doc, win);
+      if (skipAtBottom && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 32) return;
+      const viewportTop = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
+      const viewportBottom = Math.min(win.innerHeight, viewportTop + (scroller.clientHeight || win.innerHeight));
+      const turn = getTurns(doc).find((item) => {
+        const rect = item.getBoundingClientRect();
+        return rect.bottom > viewportTop + 8 && rect.top < viewportBottom && rect.height > 0;
+      });
+      state.back = { key: state.key, anchor: turn ? readingAnchor(turn) : null,
+        offset: turn ? turn.getBoundingClientRect().top - viewportTop : 0, top: scroller.scrollTop, scroller };
+      controls();
+    }
+    function jumpTo(bookmark) {
+      const turn = locateReadingAnchor(doc, bookmark);
+      if (!turn) { toast('That answer is not loaded or has changed. Scroll to load older messages, then try again.'); return; }
+      let target = turn;
+      if (bookmark.blockText) {
+        const blocks = [...turn.querySelectorAll('p, li, pre, h1, h2, h3, h4, blockquote')]
+          .filter((node) => normalizeText(node.textContent).slice(0, 240) === bookmark.blockText);
+        if (blocks.length === 1) target = blocks[0];
+      }
+      remember();
+      const scroller = chatScrollContainer(doc, win, turn);
+      const top = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
+      scroller.scrollTop = Math.max(0, scroller.scrollTop + target.getBoundingClientRect().top - top - 24);
+      close();
+      if (bookmark.blockText && target === turn) toast('Opened the answer; the saved passage has moved or changed.');
+    }
+    function goBack() {
+      const saved = state.back;
+      if (!saved || saved.key !== keyForPage()) return;
+      const turn = saved.anchor && locateReadingAnchor(doc, saved.anchor);
+      if (saved.anchor && !turn) { toast('Your earlier spot is not loaded. Scroll to load older messages, then try Return again.'); return; }
+      const scroller = chatScrollContainer(doc, win, turn || undefined);
+      if (turn) {
+        const top = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
+        scroller.scrollTop = Math.max(0, scroller.scrollTop + turn.getBoundingClientRect().top - top - saved.offset);
+      } else if (scroller === saved.scroller) scroller.scrollTop = saved.top;
+      else { toast('The conversation layout changed. Please return manually.'); return; }
+      state.back = null; controls();
+    }
+    function capture(event) {
+      const button = event.target.closest && event.target.closest('[data-cgs-action="reading-add"]');
+      if (button) state.capture = { button, key: keyForPage(), bookmark: selectedBookmark(closestAssistantTurn(button)) };
+    }
+    async function click(event) {
+      const button = event.target.closest && event.target.closest('button, [role="button"]');
+      if (!button) return;
+      void syncRoute(); // Clears old-page state synchronously, before any action.
+      const action = button.dataset.cgsAction || '';
+      if (!action.startsWith('reading-')) {
+        if (['ask-turn', 'ask-selection', 'toggle-settings'].includes(action) && !panel.hidden) close();
+        if (!button.closest(`#${UI_ROOT_ID}, ${TURN_SELECTOR}, ${ROLE_SELECTOR}, form, nav, aside`) &&
+          /^(?:scroll to (?:bottom|latest)|jump to (?:bottom|latest(?: message)?))$/iu.test(button.getAttribute('aria-label') || button.getAttribute('title') || '')) remember(true);
+        return; // Native controls retain their own handler; never click/replay them.
+      }
+      if (!root.contains(button) && !button.matches('.cgs-bookmark-action[data-cgs-injected="true"]')) return;
+      event.preventDefault(); event.stopPropagation();
+      if (action === 'reading-close') return close();
+      if (action === 'reading-latest' && getSettings().returnToReading && state.key) {
+        remember(true); const scroller = chatScrollContainer(doc, win); scroller.scrollTop = scroller.scrollHeight; return;
+      }
+      if (action === 'reading-back' && getSettings().returnToReading) return goBack();
+      if (!getSettings().bookmarks || !state.key) return;
+      if (action === 'reading-bookmarks') return panel.hidden ? open(null, button) : close();
+      if (action === 'reading-add') {
+        const captured = state.capture;
+        const bookmark = captured && captured.button === button && captured.key === state.key ? captured.bookmark : selectedBookmark(closestAssistantTurn(button));
+        state.capture = null;
+        if (bookmark) open(bookmark, button);
+      } else if (action === 'reading-save' && state.pending) {
+        const editing = state.pending;
+        const pending = { ...state.pending, label: el('#cgs-bookmark-label').value.trim().slice(0, 80) || 'Saved answer' };
+        button.disabled = true;
+        try {
+          const saved = await changeBookmarks((items) => {
+            const index = items.findIndex((item) => item.id === pending.id);
+            if (index >= 0) return items.map((item, i) => i === index ? pending : item);
+            if (items.length >= 100) { toast('This chat already has 100 bookmarks. Remove one before adding another.'); return null; }
+            return [...items, pending];
+          });
+          if (saved && state.pending === editing) { state.pending = null; el('#cgs-bookmark-editor').hidden = true; toast('Bookmark saved.'); }
+        } finally { button.disabled = false; }
+      } else {
+        const bookmark = state.bookmarks.find((item) => item.id === button.dataset.bookmarkId);
+        if (!bookmark) return;
+        if (action === 'reading-jump') jumpTo(bookmark);
+        if (action === 'reading-rename') open(bookmark, button);
+        if (action === 'reading-delete') {
+          const removed = await changeBookmarks((items) => items.filter((item) => item.id !== bookmark.id));
+          if (removed && state.pending?.id === bookmark.id) { state.pending = null; el('#cgs-bookmark-editor').hidden = true; }
+        }
+      }
+    }
+    function process(rootNode, decorationContext = null) {
+      void syncRoute();
+      if (!getSettings().bookmarks || !state.key) return;
+      const streamingTurn = decorationContext ? decorationContext.streamingTurn : inferredStreamingTurn(doc);
+      for (const turn of potentialTurnsFromRoot(rootNode)) {
+        if (!isAssistantTurn(turn) || isTurnStreaming(turn, doc, streamingTurn) || turn.querySelector('.cgs-bookmark-action')) continue;
+        const button = doc.createElement('button'); button.type = 'button'; button.className = 'cgs-bookmark-action';
+        button.dataset.cgsAction = 'reading-add'; button.dataset.cgsInjected = 'true';
+        button.textContent = '☆ Bookmark'; button.title = 'Bookmark this answer, or highlight a passage first';
+        button.setAttribute('aria-label', 'Bookmark this answer or highlighted passage');
+        // A separate row avoids interfering with native menu discovery and the
+        // existing Ask-in-new-chat button's add/remove lifecycle.
+        const row = doc.createElement('div'); row.className = 'cgs-bookmark-row'; row.dataset.cgsInjected = 'true';
+        row.append(button); turn.append(row);
+      }
+    }
+    function settingsChanged() {
+      if (!getSettings().bookmarks) {
+        close(); for (const row of doc.querySelectorAll('.cgs-bookmark-row')) row.remove();
+      }
+      if (!getSettings().returnToReading) state.back = null;
+      controls(); process(doc.body);
+    }
+    const escape = (event) => {
+      if (event.key === 'Escape' && !panel.hidden) close();
+      if (event.key === 'Enter' && event.target === el('#cgs-bookmark-label') && !event.isComposing) {
+        event.preventDefault(); el('[data-cgs-action="reading-save"]').click();
+      }
+    };
+    doc.addEventListener('pointerdown', capture, true);
+    doc.addEventListener('mousedown', capture, true);
+    doc.addEventListener('click', click, true);
+    doc.addEventListener('keydown', escape);
+    win.addEventListener('popstate', syncRoute);
+    void syncRoute(); controls();
+    return { state, process, settingsChanged, syncRoute };
   }
 
   function createApp(doc, win, options = {}) {
@@ -2639,7 +2987,7 @@
         state.scanScheduled = false;
         const roots = [...state.pendingRoots];
         state.pendingRoots.clear();
-        const decorationContext = state.settings.showTurnButtons && !isReadOnlyChatPage(win.location.href)
+        const decorationContext = (state.settings.showTurnButtons || state.settings.bookmarks) && !isReadOnlyChatPage(win.location.href)
           ? { streamingTurn: inferredStreamingTurn(doc) }
           : null;
         for (const scanRoot of roots) processRoot(scanRoot, decorationContext);
@@ -2651,6 +2999,7 @@
 
     function processRoot(root, decorationContext = null) {
       if (!root || (root.closest && root.closest(`#${UI_ROOT_ID}`))) return;
+      if (state.readingTools) state.readingTools.process(root, decorationContext);
       if (state.settings.hideShareHighlighted) cleanShareHighlighted(root);
       if (state.settings.hideStartWriting) cleanStartWriting(root);
       if (state.settings.showTurnButtons && !isReadOnlyChatPage(win.location.href)) {
@@ -3920,6 +4269,7 @@
       next[key] = target.type === 'checkbox' ? target.checked : target.value;
       state.settings = sanitizeSettings(next);
       syncSettingsUI();
+      if (key === 'bookmarks' || key === 'returnToReading') state.readingTools.settingsChanged();
       if (key === 'hideStartWriting') {
         if (state.settings.hideStartWriting) scheduleScan(doc.body);
         else restoreStartWriting(doc);
@@ -4117,6 +4467,7 @@
     async function start() {
       state.settings = sanitizeSettings(await storageGet(SETTINGS_KEY, DEFAULT_SETTINGS));
       state.root = createUI(doc);
+      state.readingTools = createReadingTools(doc, win, { root: state.root, getSettings: () => state.settings, toast, scheduleDockPosition });
       syncSettingsUI();
       doc.addEventListener('click', onAutomationClick, true);
       doc.addEventListener('keydown', onAutomationKeyDown, true);
@@ -4188,6 +4539,10 @@
     chooseDockPosition,
     chooseSelectionPillPosition,
     sanitizeSettings,
+    sanitizeBookmarks,
+    readingAnchor,
+    locateReadingAnchor,
+    chatScrollContainer,
     getTurns,
     roleOfTurn,
     isAssistantTurn,

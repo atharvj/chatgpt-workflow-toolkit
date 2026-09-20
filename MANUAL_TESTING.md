@@ -43,6 +43,16 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Ask a second follow-up in the new branch and confirm it understands the earlier conversation.
 - Add another exchange to the original, click **Ask in new chat** on an older response, and confirm the separate chat still contains everything through the newest completed answer.
 
+## Bookmarks and reading position
+
+- Click ☆ Bookmark under a completed answer, label it, and save. Select a passage first and repeat; its preview should be preserved even when the label field takes focus. Check rendered math highlights too.
+- Open ☆ beside the gear, jump to both bookmarks, rename/remove them, and reload. Saved bookmarks should survive, while the temporary return spot should not. Labels containing HTML must display as text.
+- Scroll up, press the toolkit’s ↓, then ↩. Check both a nested conversation scroll area and whole-page scrolling. Repeat using ChatGPT’s native scroll-to-bottom button when it has a recognized label. Unlabeled/unrecognized native controls are intentionally left alone; the toolkit’s ↓ remains available.
+- Jump twice while already at the bottom; ↩ must retain the original spot. Scroll to a different answer and jump again; ↩ should now return to that new spot. Check after streaming/layout growth above the saved answer.
+- Switch chats with the bookmark panel open or a save/load pending. No bookmark or return position should be applied to the wrong chat. A missing/unloaded answer must show a notice without reloading or guessing another answer.
+- Disable each setting independently. Saved bookmarks remain stored; side questions and normal ChatGPT controls still work. Confirm no new messages, model changes, network requests, or background scroll polling occur.
+- Check narrow screens and light/dark mode: icons must stay clear of the composer, bookmark labels wrap, the panel scrolls, and Escape closes it. Use Tab/Enter to operate the label field and buttons.
+
 ## Selected instruction
 
 - Select part of one instruction in an assistant response.
