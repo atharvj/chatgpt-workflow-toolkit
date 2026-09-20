@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.1
+// @version      1.10.2
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.1';
+  const VERSION = '1.10.2';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -2623,7 +2623,7 @@
     if (labels.some((label) => /^(?:scroll (?:to (?:bottom|latest)|down)|jump to (?:bottom|latest(?: message)?))$/iu.test(normalizeText(label)))) return true;
     if (/^(?:scroll-to-bottom|scroll-to-latest|jump-to-bottom|jump-to-latest)(?:-button)?$/iu.test(button.getAttribute('data-testid') || '')) return true;
     // Icon-only variants use named SVG symbols. Do not guess from arbitrary
-    // chevrons (model menus/downloads) or SVG paths, and never replay the click.
+    // chevrons (model menus/downloads) or SVG paths.
     if (!button.closest('main') || labels.some((label) => normalizeText(label)) || normalizeText(button.textContent)) return false;
     return [...button.querySelectorAll('svg use')].some((use) =>
       /#(?:arrow-down|arrow-down-long)$/iu.test(use.getAttribute('href') || use.getAttribute('xlink:href') || ''));
@@ -2799,6 +2799,23 @@
         offset: turn ? turn.getBoundingClientRect().top - viewportTop : 0, top: scroller.scrollTop, scroller };
       controls();
     }
+    function instantScroll(scroller, top) {
+      // scrollTop can inherit CSS smooth scrolling. Override it only for this
+      // operation, preserving the page's original inline value and priority.
+      const value = scroller.style.getPropertyValue('scroll-behavior');
+      const priority = scroller.style.getPropertyPriority('scroll-behavior');
+      scroller.style.setProperty('scroll-behavior', 'auto', 'important');
+      try { scroller.scrollTop = top; }
+      finally {
+        if (value) scroller.style.setProperty('scroll-behavior', value, priority);
+        else scroller.style.removeProperty('scroll-behavior');
+      }
+    }
+    function jumpLatest() {
+      remember(true);
+      const scroller = chatScrollContainer(doc, win);
+      instantScroll(scroller, scroller.scrollHeight);
+    }
     function jumpTo(bookmark) {
       const turn = locateReadingAnchor(doc, bookmark);
       if (!turn) { toast('That answer is not loaded or has changed. Scroll to load older messages, then try again.'); return; }
@@ -2808,7 +2825,7 @@
       remember();
       const scroller = chatScrollContainer(doc, win, turn);
       const top = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
-      scroller.scrollTop = Math.max(0, scroller.scrollTop + target.getBoundingClientRect().top - top - 24);
+      instantScroll(scroller, Math.max(0, scroller.scrollTop + target.getBoundingClientRect().top - top - 24));
       close();
     }
     function goBack() {
@@ -2819,8 +2836,8 @@
       const scroller = chatScrollContainer(doc, win, turn || undefined);
       if (turn) {
         const top = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
-        scroller.scrollTop = Math.max(0, scroller.scrollTop + turn.getBoundingClientRect().top - top - saved.offset);
-      } else if (scroller === saved.scroller) scroller.scrollTop = saved.top;
+        instantScroll(scroller, Math.max(0, scroller.scrollTop + turn.getBoundingClientRect().top - top - saved.offset));
+      } else if (scroller === saved.scroller) instantScroll(scroller, saved.top);
       else { toast('The conversation layout changed. Please return manually.'); return; }
       state.back = null; controls();
     }
@@ -2835,14 +2852,19 @@
       const action = button.dataset.cgsAction || '';
       if (!action.startsWith('reading-')) {
         if (['ask-turn', 'ask-selection', 'toggle-settings'].includes(action) && !panel.hidden) close();
-        if (getSettings().returnToReading && isNativeReadingJump(button, doc)) remember(true);
-        return; // Native controls retain their own handler; never click/replay them.
+        if (getSettings().returnToReading && state.key && isNativeReadingJump(button, doc)) {
+          // Replace the recognized control's animation, rather than starting a
+          // competing scroll. Other controls keep their native handlers.
+          event.preventDefault(); event.stopPropagation();
+          jumpLatest();
+        }
+        return;
       }
       if (!root.contains(button) && !button.matches('.cgs-bookmark-action[data-cgs-injected="true"]')) return;
       event.preventDefault(); event.stopPropagation();
       if (action === 'reading-close') return close();
       if (action === 'reading-latest' && getSettings().returnToReading && state.key) {
-        remember(true); const scroller = chatScrollContainer(doc, win); scroller.scrollTop = scroller.scrollHeight; return;
+        jumpLatest(); return;
       }
       if (action === 'reading-back' && getSettings().returnToReading) return goBack();
       if (!getSettings().bookmarks || !state.key) return;

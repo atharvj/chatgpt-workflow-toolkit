@@ -40,7 +40,7 @@ async function setup(t, values = new Map(), options = {}) {
   const scroller = doc.querySelector('#history');
   Object.defineProperties(scroller, { scrollHeight: { value: 3000 }, clientHeight: { value: 500 } });
   let scrollTop = 200, growth = 0;
-  Object.defineProperty(scroller, 'scrollTop', { get: () => scrollTop, set: (value) => { scrollTop = Math.max(0, Math.min(2500, value)); } });
+  Object.defineProperty(scroller, 'scrollTop', { configurable: true, get: () => scrollTop, set: (value) => { scrollTop = Math.max(0, Math.min(2500, value)); } });
   const rect = (top, height) => ({ top, bottom: top + height, left: 20, right: 600, width: 580, height });
   scroller.getBoundingClientRect = () => rect(80, 500);
   const turns = [...doc.querySelectorAll('article')].filter((turn) => turn.querySelector('[data-message-author-role="assistant"]'));
@@ -131,14 +131,15 @@ test('jump latest remembers nested scroller position; back compensates for conte
   assert.equal(doc.querySelector('[data-cgs-action="reading-back"]').hidden, true);
 });
 
-test('native jump works once without interception; unrelated controls do not record a place', async (t) => {
+test('recognized native jump is replaced with instant jump; unrelated controls do not record a place', async (t) => {
   const { doc, scroller, app, click } = await setup(t);
   doc.querySelector('[data-testid="copy-turn-action-button"]').click();
   assert.equal(app.state.readingTools.state.back, null);
   let nativeClicks = 0;
   doc.querySelector('#native-latest').addEventListener('click', (event) => { assert.equal(event.defaultPrevented, false); nativeClicks++; scroller.scrollTop = 2500; });
   doc.querySelector('#native-latest').click();
-  assert.equal(nativeClicks, 1);
+  assert.equal(nativeClicks, 0, 'native animation must not run');
+  assert.equal(scroller.scrollTop, 2500);
   click('reading-back');
   assert.equal(scroller.scrollTop, 200);
 });
@@ -189,7 +190,7 @@ test('missing original prompt never substitutes a different earlier user message
 });
 
 for (const variant of ['form', 'testid', 'labelledby', 'svg-symbol']) {
-  test(`native arrow records before its own handler: ${variant}`, async (t) => {
+  test(`native arrow uses the toolkit instant jump instead of its own handler: ${variant}`, async (t) => {
     const { doc, win, scroller, click } = await setup(t);
     const button = doc.querySelector('#native-latest');
     button.type = 'button';
@@ -208,7 +209,8 @@ for (const variant of ['form', 'testid', 'labelledby', 'svg-symbol']) {
       assert.equal(event.defaultPrevented, false); calls++; scroller.scrollTop = 2500;
     });
     (button.querySelector('use') || button).dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
-    assert.equal(calls, 1);
+    assert.equal(calls, 0);
+    assert.equal(scroller.scrollTop, 2500);
     click('reading-back'); assert.equal(scroller.scrollTop, 200);
   });
 }
@@ -227,6 +229,44 @@ test('down icons inside answers and submit/menu controls do not save reading pos
   button.setAttribute('aria-label', 'Scroll to bottom');
   const toggle = doc.querySelector('[data-cgs-setting="returnToReading"]'); toggle.checked = false;
   toggle.dispatchEvent(new win.Event('change', { bubbles: true })); button.click();
+  assert.equal(app.state.readingTools.state.back, null);
+});
+
+test('instant jumps override smooth CSS only during scrolling and restore its value and priority', async (t) => {
+  const { doc, scroller, click, save } = await setup(t);
+  await save();
+  scroller.style.setProperty('scroll-behavior', 'smooth', 'important');
+  const descriptor = Object.getOwnPropertyDescriptor(scroller, 'scrollTop');
+  const writes = [];
+  Object.defineProperty(scroller, 'scrollTop', { ...descriptor, set(value) {
+    writes.push([scroller.style.getPropertyValue('scroll-behavior'), scroller.style.getPropertyPriority('scroll-behavior')]);
+    descriptor.set(value);
+  } });
+  for (const action of ['reading-latest', 'reading-back', 'reading-jump', 'reading-back']) {
+    click(action);
+    assert.equal(scroller.style.getPropertyValue('scroll-behavior'), 'smooth');
+    assert.equal(scroller.style.getPropertyPriority('scroll-behavior'), 'important');
+  }
+  doc.querySelector('#native-latest').click();
+  assert.equal(writes.length, 5);
+  for (const write of writes) assert.deepEqual(write, ['auto', 'important']);
+  assert.equal(scroller.style.getPropertyValue('scroll-behavior'), 'smooth');
+  scroller.style.removeProperty('scroll-behavior');
+  click('reading-back');
+  assert.equal(scroller.style.getPropertyValue('scroll-behavior'), '');
+});
+
+test('turning off return-to-reading restores the recognized native arrow handler', async (t) => {
+  const { doc, win, app, scroller } = await setup(t);
+  const toggle = doc.querySelector('[data-cgs-setting="returnToReading"]'); toggle.checked = false;
+  toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
+  let calls = 0;
+  doc.querySelector('#native-latest').addEventListener('click', (event) => {
+    assert.equal(event.defaultPrevented, false); calls++; scroller.scrollTop = 2500;
+  });
+  doc.querySelector('#native-latest').click();
+  assert.equal(calls, 1);
+  assert.equal(scroller.scrollTop, 2500);
   assert.equal(app.state.readingTools.state.back, null);
 });
 
