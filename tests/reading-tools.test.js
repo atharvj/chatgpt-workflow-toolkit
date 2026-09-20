@@ -16,8 +16,10 @@ async function settle(win, predicate) {
 async function setup(t, values = new Map(), options = {}) {
   const dom = new JSDOM(`<!doctype html><main>
     <div id="history" style="overflow-y:auto">
+      <article data-testid="conversation-turn-0"><div data-message-author-role="user" data-message-id="prompt-one">Help with my lab.</div></article>
       <article data-testid="conversation-turn-1"><div data-message-author-role="assistant" data-message-id="message-one"><p id="passage">First lab instruction.</p><p>More information.</p></div><div><button data-testid="copy-turn-action-button">Copy</button><button aria-label="More actions">...</button></div></article>
-      <article data-testid="conversation-turn-3"><div data-message-author-role="assistant" data-message-id="message-two"><p>Second answer.</p></div><button data-testid="copy-turn-action-button">Copy</button></article>
+      <article data-testid="conversation-turn-2"><div data-message-author-role="user" data-message-id="prompt-two">Explain the next step.</div></article>
+      <article data-testid="conversation-turn-3"><div data-message-author-role="assistant" data-message-id="message-two"><p>Second answer.</p></div><div><button data-testid="copy-turn-action-button">Copy</button></div></article>
     </div>
     <button id="native-latest" aria-label="Scroll to bottom">↓</button>
     <form><textarea id="prompt-textarea">Do not change my draft.</textarea><button type="button" data-testid="send-button">Send</button></form>
@@ -41,8 +43,10 @@ async function setup(t, values = new Map(), options = {}) {
   Object.defineProperty(scroller, 'scrollTop', { get: () => scrollTop, set: (value) => { scrollTop = Math.max(0, Math.min(2500, value)); } });
   const rect = (top, height) => ({ top, bottom: top + height, left: 20, right: 600, width: 580, height });
   scroller.getBoundingClientRect = () => rect(80, 500);
-  const turns = [...doc.querySelectorAll('article')];
+  const turns = [...doc.querySelectorAll('article')].filter((turn) => turn.querySelector('[data-message-author-role="assistant"]'));
   turns.forEach((turn, i) => { turn.getBoundingClientRect = () => rect(80 + i * 1200 + growth - scrollTop, 1000); });
+  const prompts = [...doc.querySelectorAll('article')].filter((turn) => turn.querySelector('[data-message-author-role="user"]'));
+  prompts.forEach((turn, i) => { turn.getBoundingClientRect = () => rect(180 + i * 1000 + growth - scrollTop, 80); });
   doc.querySelector('#passage').getBoundingClientRect = () => rect(380 + growth - scrollTop, 100);
   let sends = 0;
   doc.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sends += 1; });
@@ -98,7 +102,7 @@ test('bookmarks survive a fresh page and do not leak to other chats', async (t) 
   assert.equal(third.doc.querySelector('#cgs-bookmark-list').textContent, '');
 });
 
-test('highlight is captured before the label field takes focus and jumps to the passage', async (t) => {
+test('highlight is captured before focus, but bookmark navigation starts at the original user prompt', async (t) => {
   const { doc, win, click, app, values, scroller } = await setup(t);
   const range = doc.createRange(); range.selectNodeContents(doc.querySelector('#passage'));
   win.getSelection().removeAllRanges(); win.getSelection().addRange(range);
@@ -109,9 +113,10 @@ test('highlight is captured before the label field takes focus and jumps to the 
   assert.equal(doc.querySelector('#cgs-bookmark-preview').textContent, 'First lab instruction.');
   click('reading-save'); await app.state.readingTools.state.writes;
   assert.equal(values.get(storageKey)[0].quote, 'First lab instruction.');
+  assert.equal(values.get(storageKey)[0].prompt.messageId, 'prompt-one');
   scroller.scrollTop = 1800;
   click('reading-jump');
-  assert.equal(scroller.scrollTop, 276, 'align saved paragraph 24px below the scroll viewport top');
+  assert.equal(scroller.scrollTop, 76, 'align original user message 24px below the scroll viewport top');
   assert.equal(doc.querySelector('#cgs-bookmarks-panel').hidden, true);
 });
 
@@ -136,6 +141,93 @@ test('native jump works once without interception; unrelated controls do not rec
   assert.equal(nativeClicks, 1);
   click('reading-back');
   assert.equal(scroller.scrollTop, 200);
+});
+
+test('Bookmark shares the native footer and survives independent Ask toggling', async (t) => {
+  const { doc, win, app, turns } = await setup(t);
+  for (const turn of turns) {
+    const button = turn.querySelector('.cgs-bookmark-action');
+    assert.equal(button.parentElement, turn.querySelector('[data-testid="copy-turn-action-button"]').parentElement);
+    assert.notEqual(button.parentElement, turn);
+  }
+  const toggle = doc.querySelector('[data-cgs-setting="showTurnButtons"]');
+  toggle.checked = false; toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
+  toggle.checked = true; toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
+  app.processRoot(doc.body);
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
+});
+
+test('bookmark waits for a native footer and attaches once when it mounts', async (t) => {
+  const { doc, turns, app } = await setup(t);
+  const footer = turns[0].querySelector('[data-testid="copy-turn-action-button"]').parentElement;
+  footer.remove();
+  app.processRoot(turns[0]);
+  assert.equal(turns[0].querySelector('.cgs-bookmark-action'), null);
+  footer.querySelector('.cgs-bookmark-action').remove();
+  turns[0].append(footer); app.processRoot(footer); app.processRoot(footer);
+  assert.equal(footer.querySelectorAll('.cgs-bookmark-action').length, 1);
+});
+
+test('old bookmarks jump to the preceding user prompt without migration', async (t) => {
+  const values = new Map([[storageKey, [{ id: 'bookmark_old_12345', label: 'Old bookmark', messageId: 'message-two', blockText: 'Second answer.' }]]]);
+  const { click, scroller } = await setup(t, values);
+  click('reading-bookmarks'); click('reading-jump');
+  assert.equal(scroller.scrollTop, 1076, 'second answer uses the second prompt, not the first');
+  click('reading-back'); assert.equal(scroller.scrollTop, 200);
+});
+
+test('missing original prompt never substitutes a different earlier user message', async (t) => {
+  const { doc, click, scroller, save } = await setup(t);
+  await save();
+  doc.querySelector('[data-testid="conversation-turn-0"]').remove();
+  scroller.scrollTop = 1800;
+  click('reading-jump');
+  assert.equal(scroller.scrollTop, 1800);
+  assert.match(doc.querySelector('#cgs-toast').textContent, /original user message is not loaded/u);
+});
+
+for (const variant of ['form', 'testid', 'labelledby', 'svg-symbol']) {
+  test(`native arrow records before its own handler: ${variant}`, async (t) => {
+    const { doc, win, scroller, click } = await setup(t);
+    const button = doc.querySelector('#native-latest');
+    button.type = 'button';
+    if (variant === 'form') doc.querySelector('form').prepend(button);
+    else {
+      button.removeAttribute('aria-label'); button.textContent = '';
+      if (variant === 'testid') button.dataset.testid = 'scroll-to-bottom-button';
+      if (variant === 'labelledby') {
+        const label = doc.createElement('span'); label.id = 'jump-label'; label.textContent = 'Scroll down';
+        doc.body.append(label); button.setAttribute('aria-labelledby', label.id);
+      }
+      if (variant === 'svg-symbol') button.innerHTML = '<svg><use href="/assets/sprite.svg#arrow-down"></use></svg>';
+    }
+    let calls = 0;
+    button.addEventListener('click', (event) => {
+      assert.equal(event.defaultPrevented, false); calls++; scroller.scrollTop = 2500;
+    });
+    (button.querySelector('use') || button).dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
+    assert.equal(calls, 1);
+    click('reading-back'); assert.equal(scroller.scrollTop, 200);
+  });
+}
+
+test('down icons inside answers and submit/menu controls do not save reading positions', async (t) => {
+  const { doc, win, turns, app } = await setup(t);
+  const button = doc.querySelector('#native-latest');
+  button.type = 'submit'; button.click();
+  assert.equal(app.state.readingTools.state.back, null);
+  button.type = 'button'; turns[0].append(button); button.click();
+  assert.equal(app.state.readingTools.state.back, null);
+  doc.querySelector('main').append(button);
+  button.setAttribute('aria-label', 'Choose model');
+  button.innerHTML = '<svg><use href="#arrow-down"></use></svg>'; button.click();
+  assert.equal(app.state.readingTools.state.back, null);
+  button.setAttribute('aria-label', 'Scroll to bottom');
+  const toggle = doc.querySelector('[data-cgs-setting="returnToReading"]'); toggle.checked = false;
+  toggle.dispatchEvent(new win.Event('change', { bubbles: true })); button.click();
+  assert.equal(app.state.readingTools.state.back, null);
 });
 
 test('missing or ambiguous answers never jump to a positional substitute', async (t) => {
@@ -242,6 +334,7 @@ test('window scrolling is supported when no nested scroll container is present',
   Object.defineProperties(root, { scrollHeight: { value: 3000 }, clientHeight: { value: 500 } });
   root.scrollTop = 200;
   turns[0].getBoundingClientRect = () => ({ top: -root.scrollTop, bottom: 1000 - root.scrollTop, height: 1000 });
+  doc.querySelector('[data-testid="conversation-turn-0"]').getBoundingClientRect = () => ({ top: -100 - root.scrollTop, bottom: -root.scrollTop, height: 100 });
   click('reading-latest'); assert.equal(root.scrollTop, 3000);
   click('reading-back'); assert.equal(root.scrollTop, 200);
 });

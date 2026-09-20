@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.0
+// @version      1.10.1
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.0';
+  const VERSION = '1.10.1';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -161,7 +161,7 @@
     .cgs-bookmark-action {
       appearance: none; border: 0; border-radius: 6px; padding: 4px 7px;
       font: 600 12px/1.4 ui-sans-serif, system-ui, sans-serif; cursor: pointer;
-      color: var(--text-secondary, #777); background: transparent;
+      color: var(--text-secondary, #777); background: transparent; flex-shrink: 0;
     }
     .cgs-bookmark-action:hover { color: #10a37f; background: rgba(127,127,127,.12); }
     #cgs-bookmarks-panel {
@@ -2607,6 +2607,28 @@
     return { messageId: id, fingerprint: assistantTurnFingerprint(turn), role: roleOfTurn(turn) };
   }
 
+  function precedingUserTurn(doc, turn) {
+    const turns = getTurns(doc);
+    for (let i = turns.indexOf(turn) - 1; i >= 0; i--) {
+      if (roleOfTurn(turns[i]) === 'user') return turns[i];
+    }
+    return null;
+  }
+
+  function isNativeReadingJump(button, doc) {
+    if (button.closest(`#${UI_ROOT_ID}, ${TURN_SELECTOR}, ${ROLE_SELECTOR}, nav, aside, header, [contenteditable="true"]`) ||
+      button.matches(':disabled, [aria-disabled="true"], [data-testid="send-button"], [type="submit"]')) return false;
+    const labels = [button.getAttribute('aria-label'), button.getAttribute('title'),
+      ...(button.getAttribute('aria-labelledby') || '').split(/\s+/u).filter(Boolean).map((id) => doc.getElementById(id)?.textContent)];
+    if (labels.some((label) => /^(?:scroll (?:to (?:bottom|latest)|down)|jump to (?:bottom|latest(?: message)?))$/iu.test(normalizeText(label)))) return true;
+    if (/^(?:scroll-to-bottom|scroll-to-latest|jump-to-bottom|jump-to-latest)(?:-button)?$/iu.test(button.getAttribute('data-testid') || '')) return true;
+    // Icon-only variants use named SVG symbols. Do not guess from arbitrary
+    // chevrons (model menus/downloads) or SVG paths, and never replay the click.
+    if (!button.closest('main') || labels.some((label) => normalizeText(label)) || normalizeText(button.textContent)) return false;
+    return [...button.querySelectorAll('svg use')].some((use) =>
+      /#(?:arrow-down|arrow-down-long)$/iu.test(use.getAttribute('href') || use.getAttribute('xlink:href') || ''));
+  }
+
   function locateReadingAnchor(doc, anchor) {
     if (!anchor) return null;
     const turns = getTurns(doc).filter((turn) => !anchor.role || roleOfTurn(turn) === anchor.role);
@@ -2629,7 +2651,11 @@
       const fingerprint = String(item.fingerprint || '').slice(0, TARGET_FINGERPRINT_MAX_LENGTH);
       if (!messageId && !fingerprint) return [];
       seen.add(item.id);
-      return [{ id: item.id, label: item.label.slice(0, 80), messageId, fingerprint, role: 'assistant',
+      const prompt = item.prompt && typeof item.prompt === 'object' ? {
+        messageId: typeof item.prompt.messageId === 'string' && /^[\w:-]{1,200}$/u.test(item.prompt.messageId) ? item.prompt.messageId : '',
+        fingerprint: String(item.prompt.fingerprint || '').slice(0, TARGET_FINGERPRINT_MAX_LENGTH), role: 'user',
+      } : null;
+      return [{ id: item.id, label: item.label.slice(0, 80), messageId, fingerprint, role: 'assistant', prompt,
         quote: String(item.quote || '').slice(0, 2000), blockText: String(item.blockText || '').slice(0, 240) }];
     });
   }
@@ -2721,7 +2747,8 @@
         }
       }
       const anchor = readingAnchor(turn);
-      return { id: createJobId(), ...anchor, quote: quote.slice(0, 2000), blockText,
+      const prompt = precedingUserTurn(doc, turn);
+      return { id: createJobId(), ...anchor, prompt: prompt ? readingAnchor(prompt) : null, quote: quote.slice(0, 2000), blockText,
         label: normalizeText(quote || extractAssistantContent(turn)).slice(0, 80) || 'Saved answer' };
     }
     function open(bookmark = null, focus = null) {
@@ -2775,18 +2802,14 @@
     function jumpTo(bookmark) {
       const turn = locateReadingAnchor(doc, bookmark);
       if (!turn) { toast('That answer is not loaded or has changed. Scroll to load older messages, then try again.'); return; }
-      let target = turn;
-      if (bookmark.blockText) {
-        const blocks = [...turn.querySelectorAll('p, li, pre, h1, h2, h3, h4, blockquote')]
-          .filter((node) => normalizeText(node.textContent).slice(0, 240) === bookmark.blockText);
-        if (blocks.length === 1) target = blocks[0];
-      }
+      // Existing bookmarks also start at the prompt, not halfway through its answer.
+      const target = bookmark.prompt ? locateReadingAnchor(doc, bookmark.prompt) : precedingUserTurn(doc, turn);
+      if (!target) { toast('The original user message is not loaded. Scroll to load older messages, then try again.'); return; }
       remember();
       const scroller = chatScrollContainer(doc, win, turn);
       const top = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
       scroller.scrollTop = Math.max(0, scroller.scrollTop + target.getBoundingClientRect().top - top - 24);
       close();
-      if (bookmark.blockText && target === turn) toast('Opened the answer; the saved passage has moved or changed.');
     }
     function goBack() {
       const saved = state.back;
@@ -2812,8 +2835,7 @@
       const action = button.dataset.cgsAction || '';
       if (!action.startsWith('reading-')) {
         if (['ask-turn', 'ask-selection', 'toggle-settings'].includes(action) && !panel.hidden) close();
-        if (!button.closest(`#${UI_ROOT_ID}, ${TURN_SELECTOR}, ${ROLE_SELECTOR}, form, nav, aside`) &&
-          /^(?:scroll to (?:bottom|latest)|jump to (?:bottom|latest(?: message)?))$/iu.test(button.getAttribute('aria-label') || button.getAttribute('title') || '')) remember(true);
+        if (getSettings().returnToReading && isNativeReadingJump(button, doc)) remember(true);
         return; // Native controls retain their own handler; never click/replay them.
       }
       if (!root.contains(button) && !button.matches('.cgs-bookmark-action[data-cgs-injected="true"]')) return;
@@ -2859,20 +2881,25 @@
       if (!getSettings().bookmarks || !state.key) return;
       const streamingTurn = decorationContext ? decorationContext.streamingTurn : inferredStreamingTurn(doc);
       for (const turn of potentialTurnsFromRoot(rootNode)) {
-        if (!isAssistantTurn(turn) || isTurnStreaming(turn, doc, streamingTurn) || turn.querySelector('.cgs-bookmark-action')) continue;
+        if (!isAssistantTurn(turn) || isTurnStreaming(turn, doc, streamingTurn)) continue;
+        // Match the native answer footer, not the full-width article wrapper.
+        // Wait for its Copy action if the footer has not mounted yet.
+        const copy = [...turn.querySelectorAll('button[data-testid*="copy-turn"], button[aria-label^="Copy"]')]
+          .find((node) => !node.closest('pre, code, .markdown, .prose'));
+        const row = copy && (responseActionRow(copy) || copy.parentElement);
+        if (!row || row === turn || row.matches(ROLE_SELECTOR) || row.querySelector(ROLE_SELECTOR)) continue;
+        const existing = turn.querySelector('.cgs-bookmark-action');
+        if (existing) { if (existing.parentElement !== row) row.append(existing); continue; }
         const button = doc.createElement('button'); button.type = 'button'; button.className = 'cgs-bookmark-action';
         button.dataset.cgsAction = 'reading-add'; button.dataset.cgsInjected = 'true';
         button.textContent = '☆ Bookmark'; button.title = 'Bookmark this answer, or highlight a passage first';
         button.setAttribute('aria-label', 'Bookmark this answer or highlighted passage');
-        // A separate row avoids interfering with native menu discovery and the
-        // existing Ask-in-new-chat button's add/remove lifecycle.
-        const row = doc.createElement('div'); row.className = 'cgs-bookmark-row'; row.dataset.cgsInjected = 'true';
-        row.append(button); turn.append(row);
+        row.append(button);
       }
     }
     function settingsChanged() {
       if (!getSettings().bookmarks) {
-        close(); for (const row of doc.querySelectorAll('.cgs-bookmark-row')) row.remove();
+        close(); for (const button of doc.querySelectorAll('.cgs-bookmark-action')) button.remove();
       }
       if (!getSettings().returnToReading) state.back = null;
       controls(); process(doc.body);
