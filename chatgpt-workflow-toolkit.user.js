@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.3
+// @version      1.10.4
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.3';
+  const VERSION = '1.10.4';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -2466,7 +2466,6 @@
     root.innerHTML = `
       <div id="cgs-dock" aria-label="ChatGPT Workflow Toolkit controls" hidden>
         <button class="cgs-icon-button" type="button" data-cgs-action="reading-bookmarks" aria-label="Bookmarks for this chat" title="Bookmarks for this chat">☆</button>
-        <button class="cgs-icon-button" type="button" data-cgs-action="reading-latest" aria-label="Jump to latest and remember my place" title="Jump to latest and remember my place">↓</button>
         <button class="cgs-icon-button" type="button" data-cgs-action="reading-back" aria-label="Return to where I was" title="Return to where I was" hidden>↩</button>
         <button class="cgs-icon-button" type="button" data-cgs-action="toggle-settings" aria-label="Open Workflow Toolkit settings" title="Workflow Toolkit settings">⚙</button>
       </div>
@@ -2697,7 +2696,6 @@
     function controls() {
       const settings = getSettings();
       el('[data-cgs-action="reading-bookmarks"]').hidden = !settings.bookmarks || !state.key;
-      el('[data-cgs-action="reading-latest"]').hidden = !settings.returnToReading || !state.key;
       el('[data-cgs-action="reading-back"]').hidden = !settings.returnToReading || !state.back || !state.key;
       scheduleDockPosition();
     }
@@ -2872,9 +2870,6 @@
       if (!root.contains(button) && !button.matches('.cgs-bookmark-action[data-cgs-injected="true"]')) return;
       event.preventDefault(); event.stopPropagation();
       if (action === 'reading-close') return close();
-      if (action === 'reading-latest' && getSettings().returnToReading && state.key) {
-        jumpLatest(); return;
-      }
       if (action === 'reading-back' && getSettings().returnToReading) return goBack();
       if (!getSettings().bookmarks || !state.key) return;
       if (action === 'reading-bookmarks') return panel.hidden ? open(null, button) : close();

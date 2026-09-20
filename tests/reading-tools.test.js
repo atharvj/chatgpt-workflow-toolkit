@@ -59,7 +59,7 @@ async function setup(t, values = new Map(), options = {}) {
   app.processRoot(doc.body);
   await settle(win, () => !app.state.readingTools.state.loading);
   const click = (action) => {
-    const target = doc.querySelector(`[data-cgs-action="${action}"]`);
+    const target = action === 'native-latest' ? doc.querySelector('#native-latest') : doc.querySelector(`[data-cgs-action="${action}"]`);
     assert.ok(target, action); target.click(); return target;
   };
   async function save(label = 'Lab instructions') {
@@ -125,13 +125,32 @@ test('highlight is captured before focus, but bookmark navigation starts at the 
 
 test('jump latest remembers nested scroller position; back compensates for content growth', async (t) => {
   const { doc, scroller, click, grow } = await setup(t);
-  click('reading-latest');
+  click('native-latest');
   assert.equal(scroller.scrollTop, 2500);
-  click('reading-latest'); // Repeated click at bottom must not overwrite the saved spot.
+  click('native-latest'); // Repeated click at bottom must not overwrite the saved spot.
   grow(150);
   click('reading-back');
   assert.equal(scroller.scrollTop, 350);
   assert.equal(doc.querySelector('[data-cgs-action="reading-back"]').hidden, true);
+});
+
+test('dock has no duplicate down arrow after install, native navigation, or setting changes', async (t) => {
+  const { doc, win, click, app } = await setup(t);
+  const verifyDock = () => {
+    const dock = doc.querySelector('#cgs-dock');
+    assert.equal(dock.querySelector('[data-cgs-action="reading-latest"]'), null);
+    assert.ok(dock.querySelector('[data-cgs-action="reading-bookmarks"]'));
+    assert.ok(dock.querySelector('[data-cgs-action="reading-back"]'));
+    assert.ok(dock.querySelector('[data-cgs-action="toggle-settings"]'));
+    assert.ok(doc.querySelector('#native-latest'), 'native down arrow remains in place');
+  };
+  verifyDock();
+  click('native-latest'); verifyDock(); click('reading-back');
+  const toggle = doc.querySelector('[data-cgs-setting="returnToReading"]');
+  for (const enabled of [false, true]) {
+    toggle.checked = enabled; toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
+    app.processRoot(doc.body); verifyDock();
+  }
 });
 
 test('recognized native jump is replaced with instant jump; unrelated controls do not record a place', async (t) => {
@@ -312,7 +331,7 @@ test('instant jumps override smooth CSS only during scrolling and restore its va
     writes.push([scroller.style.getPropertyValue('scroll-behavior'), scroller.style.getPropertyPriority('scroll-behavior')]);
     descriptor.set(value);
   } });
-  for (const action of ['reading-latest', 'reading-back', 'reading-jump', 'reading-back']) {
+  for (const action of ['native-latest', 'reading-back', 'reading-jump', 'reading-back']) {
     click(action);
     assert.equal(scroller.style.getPropertyValue('scroll-behavior'), 'smooth');
     assert.equal(scroller.style.getPropertyPriority('scroll-behavior'), 'important');
@@ -354,7 +373,7 @@ test('missing or ambiguous answers never jump to a positional substitute', async
 
 test('switching chats discards pending editor and return spot before a stale action can run', async (t) => {
   const { doc, win, app, values, click, scroller } = await setup(t);
-  click('reading-latest'); click('reading-add');
+  click('native-latest'); click('reading-add');
   win.history.pushState({}, '', '/c/new-chat');
   click('reading-save');
   await app.state.readingTools.syncRoute();
@@ -367,7 +386,7 @@ test('switching chats discards pending editor and return spot before a stale act
 
 test('both settings turn off independently without deleting saved bookmarks or existing side-chat controls', async (t) => {
   const { doc, win, app, values, click, save } = await setup(t);
-  await save(); click('reading-latest');
+  await save(); click('native-latest');
   for (const key of ['bookmarks', 'returnToReading']) {
     const input = doc.querySelector(`[data-cgs-setting="${key}"]`); input.checked = false;
     input.dispatchEvent(new win.Event('change', { bubbles: true }));
@@ -424,7 +443,7 @@ test('a different message with identical text cannot impersonate a missing bookm
 
 test('return fails safely if its saved answer is no longer mounted', async (t) => {
   const { doc, turns, scroller, click } = await setup(t);
-  click('reading-latest'); turns[0].remove();
+  click('native-latest'); turns[0].remove();
   click('reading-back');
   assert.equal(scroller.scrollTop, 2500);
   assert.match(doc.querySelector('#cgs-toast').textContent, /earlier spot is not loaded/u);
@@ -432,8 +451,8 @@ test('return fails safely if its saved answer is no longer mounted', async (t) =
 
 test('a later jump records the new reading position instead of keeping an obsolete one', async (t) => {
   const { scroller, click } = await setup(t);
-  click('reading-latest'); scroller.scrollTop = 1400;
-  click('reading-latest'); click('reading-back');
+  click('native-latest'); scroller.scrollTop = 1400;
+  click('native-latest'); click('reading-back');
   assert.equal(scroller.scrollTop, 1400);
 });
 
@@ -445,7 +464,7 @@ test('window scrolling is supported when no nested scroll container is present',
   root.scrollTop = 200;
   turns[0].getBoundingClientRect = () => ({ top: -root.scrollTop, bottom: 1000 - root.scrollTop, height: 1000 });
   doc.querySelector('[data-testid="conversation-turn-0"]').getBoundingClientRect = () => ({ top: -100 - root.scrollTop, bottom: -root.scrollTop, height: 100 });
-  click('reading-latest'); assert.equal(root.scrollTop, 3000);
+  click('native-latest'); assert.equal(root.scrollTop, 3000);
   click('reading-back'); assert.equal(root.scrollTop, 200);
 });
 
