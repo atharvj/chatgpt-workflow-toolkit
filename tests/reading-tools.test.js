@@ -364,15 +364,124 @@ test('Bookmark shares the native footer and survives independent Ask toggling', 
   assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
 });
 
-test('bookmark waits for a native footer and attaches once when it mounts', async (t) => {
+test('both controls use a temporary row and migrate when the native footer mounts', async (t) => {
   const { doc, turns, app } = await setup(t);
   const footer = turns[0].querySelector('[data-testid="copy-turn-action-button"]').parentElement;
   footer.remove();
   app.processRoot(turns[0]);
-  assert.equal(turns[0].querySelector('.cgs-bookmark-action'), null);
-  footer.querySelector('.cgs-bookmark-action').remove();
+  assert.ok(turns[0].querySelector('.cgs-turn-fallback-row .cgs-bookmark-action'));
+  assert.ok(turns[0].querySelector('.cgs-turn-fallback-row .cgs-turn-action'));
   turns[0].append(footer); app.processRoot(footer); app.processRoot(footer);
   assert.equal(footer.querySelectorAll('.cgs-bookmark-action').length, 1);
+  assert.equal(footer.querySelectorAll('.cgs-turn-action').length, 1);
+  assert.equal(turns[0].querySelector('.cgs-turn-fallback-row'), null);
+});
+
+test('response Ask uses the entire response even with a live highlight; selection Ask stays scoped to the highlight', async (t) => {
+  const fixture = await setup(t);
+  const { doc, app, click } = fixture;
+  await highlightForBookmark(fixture);
+  click('ask-turn');
+  assert.equal(app.state.questionScope, 'response');
+  assert.match(doc.querySelector('#cgs-selected-context').textContent, /First lab instruction\.[\s\S]*More information\./u);
+  assert.doesNotMatch(doc.querySelector('#cgs-selected-context').textContent, /Second answer|Bookmark|Ask in new chat/u);
+  assert.equal(doc.querySelector('#cgs-selected-context').getAttribute('aria-label'), 'Entire response');
+  click('cancel-question');
+  await highlightForBookmark(fixture); click('ask-selection');
+  assert.equal(app.state.questionScope, 'highlight');
+  assert.equal(doc.querySelector('#cgs-selected-context').textContent, 'First lab instruction.');
+});
+
+test('whole-response preview preserves math source and code without action labels', async (t) => {
+  const { doc, turns, click } = await setup(t);
+  turns[0].querySelector('[data-message-author-role]').innerHTML = '<p>Use <span class="katex"><span class="katex-mathml"><math><semantics><annotation encoding="application/x-tex">x^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">x2</span></span>.</p><pre><code>a*b</code></pre><p>Final step.</p>';
+  click('ask-turn');
+  const text = doc.querySelector('#cgs-selected-context').textContent;
+  assert.ok(text.includes('\\(x^2\\)'));
+  assert.ok(text.includes('```\na*b\n```'));
+  assert.ok(text.includes('Final step.'));
+  assert.doesNotMatch(text, /Bookmark|Ask in new chat/u);
+});
+
+for (const layout of ['more-only', 'sibling', 'linked', 'rerender', 'tooltip-wrappers']) {
+  test(`both footer controls stay next to More and target the correct response: ${layout}`, async (t) => {
+    const { doc, turns, app, values, click } = await setup(t);
+    const turn = turns[0];
+    let footer = turn.querySelector('[aria-label="More actions"]').parentElement;
+    if (layout === 'more-only') footer.querySelector('[data-testid="copy-turn-action-button"]').remove();
+    if (layout === 'sibling') {
+      const wrapper = doc.createElement('div'); turn.before(wrapper); wrapper.append(turn, footer);
+    }
+    if (layout === 'linked') {
+      footer.dataset.messageId = 'message-one'; doc.querySelector('main').append(footer);
+    }
+    if (layout === 'rerender') {
+      const clone = footer.cloneNode(true); footer.replaceWith(clone); footer = clone;
+    }
+    if (layout === 'tooltip-wrappers') {
+      for (const control of [...footer.querySelectorAll('button:not([data-cgs-injected])')]) {
+        const wrapper = doc.createElement('span'); control.before(wrapper); wrapper.append(control);
+      }
+    }
+    const decoy = doc.createElement('div'); decoy.className = 'prose';
+    decoy.innerHTML = '<button aria-label="More actions">example menu</button>';
+    turn.querySelector('[data-message-author-role]').append(decoy);
+    app.processRoot(footer); app.processRoot(footer);
+    assert.equal(footer.querySelectorAll('.cgs-turn-action').length, 1);
+    assert.equal(footer.querySelectorAll('.cgs-bookmark-action').length, 1);
+    assert.equal(decoy.querySelector('.cgs-turn-action, .cgs-bookmark-action'), null);
+    const more = footer.querySelector('[aria-label="More actions"]');
+    const anchor = layout === 'tooltip-wrappers' ? more.parentElement : more;
+    assert.equal(anchor.nextElementSibling.dataset.cgsAction, 'ask-turn');
+    assert.equal(anchor.nextElementSibling.nextElementSibling.dataset.cgsAction, 'reading-add');
+    footer.querySelector('.cgs-turn-action').click();
+    assert.equal(app.state.activeTurn, turn);
+    assert.match(doc.querySelector('#cgs-selected-context').textContent, /First lab instruction/u);
+    click('cancel-question');
+    footer.querySelector('.cgs-bookmark-action').click(); click('reading-save');
+    await app.state.readingTools.state.writes;
+    assert.equal(values.get(storageKey)[0].messageId, 'message-one');
+  });
+}
+
+test('completed responses get both controls after streaming stops, without duplicates', async (t) => {
+  const { doc, app } = await setup(t);
+  const turn = doc.createElement('article'); turn.dataset.testid = 'conversation-turn-5'; turn.dataset.isStreaming = 'true';
+  turn.innerHTML = '<div data-message-author-role="assistant">New response</div><div><button aria-label="More actions">...</button></div>';
+  doc.querySelector('#history').append(turn); app.processRoot(turn);
+  assert.equal(turn.querySelector('.cgs-turn-action, .cgs-bookmark-action'), null);
+  turn.removeAttribute('data-is-streaming');
+  await settle(doc.defaultView, () => turn.querySelector('.cgs-turn-action') && turn.querySelector('.cgs-bookmark-action'));
+  app.processRoot(turn);
+  assert.equal(turn.querySelectorAll('.cgs-turn-action').length, 1);
+  assert.equal(turn.querySelectorAll('.cgs-bookmark-action').length, 1);
+});
+
+test('normal scrolling setting preserves the native click and still records the reading position', async (t) => {
+  const { doc, win, app, scroller, click, values } = await setup(t);
+  const input = doc.querySelector('[data-cgs-setting="instantScrollToBottom"]');
+  assert.equal(input.checked, true);
+  input.checked = false; input.dispatchEvent(new win.Event('change', { bubbles: true }));
+  await settle(win, () => values.get('chatgptSidecar.settings.v1')?.instantScrollToBottom === false);
+  const restored = await setup(t, values);
+  assert.equal(restored.doc.querySelector('[data-cgs-setting="instantScrollToBottom"]').checked, false);
+  const template = doc.createElement('template'); template.innerHTML = nativeArrowHTML;
+  const button = template.content.firstElementChild; doc.querySelector('main').append(button);
+  let calls = 0;
+  button.addEventListener('click', (event) => {
+    assert.equal(event.defaultPrevented, false); calls++;
+    assert.equal(scroller.scrollTop, 200, 'toolkit did not force an instant jump');
+    assert.equal(app.state.readingTools.state.back.top, 200, 'place captured before native animation');
+    scroller.scrollTop = 2500;
+  });
+  button.click(); assert.equal(calls, 1);
+  click('reading-back'); assert.equal(scroller.scrollTop, 200);
+  input.checked = true; input.dispatchEvent(new win.Event('change', { bubbles: true }));
+  button.click(); assert.equal(calls, 1, 'instant mode replaces native animation again');
+  assert.equal(scroller.scrollTop, 2500);
+  click('reading-back'); assert.equal(scroller.scrollTop, 200);
+  const fresh = await setup(t, values);
+  assert.equal(fresh.doc.querySelector('[data-cgs-setting="instantScrollToBottom"]').checked, true);
 });
 
 test('old bookmarks jump to the preceding user prompt without migration', async (t) => {

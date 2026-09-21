@@ -253,6 +253,12 @@ test('HTML-only screenshot equations reach the full preview and outgoing questio
   assert.equal(doc.querySelector('#prompt-textarea').value, '');
   app.processRoot(doc.body);
   doc.querySelector('.cgs-turn-action').click();
-  assert.equal(app.state.questionUsesVisualMath, false, 'new ordinary question does not inherit the math caveat');
-  assert.equal(toggle.hidden, true);
+  assert.equal(app.state.questionScope, 'response');
+  assert.equal(app.state.questionUsesVisualMath, true, 'whole response includes its own visual-only equations');
+  assert.equal(toggle.hidden, false);
+  const plain = doc.createElement('article'); plain.dataset.testid = 'conversation-turn-99';
+  plain.innerHTML = '<div data-message-author-role="assistant">A plain answer.</div>';
+  doc.querySelector('main').append(plain); app.processRoot(plain);
+  plain.querySelector('.cgs-turn-action').click();
+  assert.equal(app.state.questionUsesVisualMath, false, 'a different plain response does not inherit the math caveat');
 });

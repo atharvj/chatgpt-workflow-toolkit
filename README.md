@@ -5,8 +5,9 @@ A lightweight userscript for ChatGPT bookmarks, reading shortcuts, and separate 
 ## Features
 
 - **Bookmarks:** highlight a sentence and click ☆ Bookmark to return to that sentence later. Bookmark a whole answer from its action row to return to your preceding message instead. Manage saved bookmarks using ☆ beside Settings.
-- **Return to where I was:** click ChatGPT’s floating down arrow to jump instantly to the latest message, then ↩ beside Settings to return. Supports the arrow’s animated-dot state too; unrecognized variants are left alone.
+- **Return to where I was:** click ChatGPT’s down arrow, then ↩ beside Settings to return. Turn off **Jump to bottom instantly** for normal animated scrolling while still saving your place.
 - Highlight a passage and **Ask in new chat**: automatically branch the whole chat, then send a question focused on that passage. Previous files and images stay in ChatGPT’s native history—not a text-only copy.
+- Click **Ask in new chat** under an answer to ask about that entire answer instead. Ask and Bookmark sit beside its response actions.
 - Remove “Start writing.”
 - Hide the “Share highlighted” selection button.
 - Math highlights use source notation when available, otherwise compact display text with an instruction to check the original equations. Partial equations are included whole. **Show full highlight** expands the preview. This improves context, not a guarantee of correct answers.

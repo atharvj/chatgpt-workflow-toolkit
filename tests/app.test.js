@@ -298,7 +298,7 @@ test('side question from an older answer targets the latest answer and always au
     assert.equal(job.locator.testId, 'conversation-turn-3');
     assert.equal(job.sourceConversation, 'whole-chat-test');
     assert.match(job.targetFingerprint, /Newest answer/u);
-    assert.equal(job.question, 'Explain the newest answer in another way.');
+    assert.equal(job.question, toolkit.buildResponseQuestion('Older answer', 'Explain the newest answer in another way.'));
     assert.equal(job.autoSend, true);
     assert.equal(openCalls.length, 1, 'a double submit reserves only one child window');
     assert.equal(openCalls[0].url, 'about:blank', 'the popup is reserved synchronously from the submit click');
