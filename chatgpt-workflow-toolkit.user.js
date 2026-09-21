@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.5
+// @version      1.10.6
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.5';
+  const VERSION = '1.10.6';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -2676,9 +2676,95 @@
         messageId: typeof item.prompt.messageId === 'string' && /^[\w:-]{1,200}$/u.test(item.prompt.messageId) ? item.prompt.messageId : '',
         fingerprint: String(item.prompt.fingerprint || '').slice(0, TARGET_FINGERPRINT_MAX_LENGTH), role: 'user',
       } : null;
-      return [{ id: item.id, label: item.label.slice(0, 80), messageId, fingerprint, role: 'assistant', prompt,
+      const passage = item.passage && typeof item.passage.exact === 'string' && item.passage.exact ? {
+        exact: item.passage.exact.slice(0, 2000), prefix: String(item.passage.prefix || '').slice(-64), suffix: String(item.passage.suffix || '').slice(0, 64),
+      } : null;
+      return [{ id: item.id, label: item.label.slice(0, 80), messageId, fingerprint, role: 'assistant', prompt, passage,
         quote: String(item.quote || '').slice(0, 2000), blockText: String(item.blockText || '').slice(0, 240) }];
     });
+  }
+
+  // A text quote plus nearby text survives reloads without depending on DOM
+  // child indexes. Build this index only when bookmarking or following a quote.
+  function bookmarkTextIndex(turn) {
+    const root = turn.matches('[data-message-author-role="assistant"]') ? turn
+      : turn.querySelector('[data-message-author-role="assistant"]') || turn;
+    const walker = turn.ownerDocument.createTreeWalker(root, 4);
+    const nodes = [], starts = [], ends = [], chars = [];
+    let rawLength = 0, node;
+    while ((node = walker.nextNode())) {
+      if (node.parentElement.closest('[data-cgs-injected], .cgs-turn-action, button, script, style, svg, annotation, .katex-mathml, mjx-assistive-mml, [hidden]')) continue;
+      nodes.push({ node, start: rawLength, end: rawLength + node.data.length });
+      for (let i = 0; i < node.data.length; i++) {
+        const char = /\s/u.test(node.data[i]) ? ' ' : node.data[i];
+        if (char === ' ' && chars[chars.length - 1] === ' ') ends[ends.length - 1] = rawLength + i + 1;
+        else { chars.push(char); starts.push(rawLength + i); ends.push(rawLength + i + 1); }
+      }
+      rawLength += node.data.length;
+    }
+    return { text: chars.join(''), nodes, starts, ends };
+  }
+
+  function captureBookmarkPassage(turn, range) {
+    const index = bookmarkTextIndex(turn);
+    let start = Infinity, end = -1;
+    for (const entry of index.nodes) {
+      if (!range.intersectsNode(entry.node)) continue;
+      const from = range.startContainer === entry.node ? range.startOffset : 0;
+      const to = range.endContainer === entry.node ? range.endOffset : entry.node.data.length;
+      if (to <= from) continue;
+      start = Math.min(start, entry.start + from); end = Math.max(end, entry.start + to);
+    }
+    let first = index.ends.findIndex((offset) => offset > start);
+    let last = first;
+    while (last >= 0 && last < index.starts.length && index.starts[last] < end) last++;
+    while (first >= 0 && first < last && index.text[first] === ' ') first++;
+    while (last > first && index.text[last - 1] === ' ') last--;
+    if (first < 0 || last <= first) return null;
+    last = Math.min(last, first + 2000);
+    return { exact: index.text.slice(first, last), prefix: index.text.slice(Math.max(0, first - 64), first), suffix: index.text.slice(last, last + 64) };
+  }
+
+  function locateBookmarkPassage(turn, bookmark) {
+    const index = bookmarkTextIndex(turn);
+    const exact = bookmark.passage?.exact || normalizeText(bookmark.quote);
+    const candidates = [];
+    if (exact) for (let at = index.text.indexOf(exact); at >= 0; at = index.text.indexOf(exact, at + 1)) candidates.push(at);
+    let matches = candidates;
+    if (bookmark.passage) {
+      const { prefix, suffix } = bookmark.passage;
+      const contextual = matches.filter((at) => index.text.slice(Math.max(0, at - prefix.length), at) === prefix &&
+        index.text.slice(at + exact.length, at + exact.length + suffix.length) === suffix);
+      if (contextual.length) matches = contextual;
+    } else if (bookmark.blockText && matches.length > 1) {
+      matches = matches.filter((at) => {
+        const entry = index.nodes.find((item) => item.end > index.starts[at]);
+        const block = entry?.node.parentElement.closest('p, li, pre, h1, h2, h3, h4, blockquote');
+        return block && normalizeText(block.textContent).slice(0, 240) === bookmark.blockText;
+      });
+    }
+    if (matches.length === 1) {
+      const start = index.starts[matches[0]], end = index.ends[matches[0] + exact.length - 1];
+      const first = index.nodes.find((entry) => entry.end > start);
+      const last = index.nodes.find((entry) => entry.end >= end);
+      if (first && last) {
+        const range = turn.ownerDocument.createRange();
+        range.setStart(first.node, start - first.start); range.setEnd(last.node, end - last.start);
+        const rects = typeof range.getClientRects === 'function' ? [...range.getClientRects()] : [];
+        const rect = rects.find((item) => item.width > 0 && item.height > 0);
+        if (rect) return { rect, approximate: false };
+        const block = first.node.parentElement.closest('p, li, pre, h1, h2, h3, h4, blockquote') || first.node.parentElement;
+        return { rect: block.getBoundingClientRect(), approximate: true };
+      }
+    }
+    // Older math bookmarks may have canonical LaTeX instead of rendered text.
+    // A unique saved paragraph is a safe, explicitly reported fallback.
+    if (bookmark.blockText) {
+      const blocks = [...turn.querySelectorAll('p, li, pre, h1, h2, h3, h4, blockquote')]
+        .filter((node) => normalizeText(node.textContent).slice(0, 240) === bookmark.blockText);
+      if (blocks.length === 1) return { rect: blocks[0].getBoundingClientRect(), approximate: true };
+    }
+    return null;
   }
 
   function chatScrollContainer(doc, win, turn = getTurns(doc)[0]) {
@@ -2756,11 +2842,12 @@
     function selectedBookmark(turn) {
       if (!turn || !isAssistantTurn(turn) || isTurnStreaming(turn, doc)) return null;
       const selection = win.getSelection();
-      let quote = '', blockText = '';
+      let quote = '', blockText = '', passage = null;
       if (selection && selection.rangeCount && !selection.isCollapsed) {
         const range = selection.getRangeAt(0);
         if (turn.contains(range.startContainer) && turn.contains(range.endContainer)) {
           quote = extractSelectionQuote(selection, turn).text || '';
+          passage = captureBookmarkPassage(turn, range);
           const start = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
           const block = start.closest('p, li, pre, h1, h2, h3, h4, blockquote');
           if (block && turn.contains(block)) blockText = normalizeText(block.textContent).slice(0, 240);
@@ -2768,7 +2855,7 @@
       }
       const anchor = readingAnchor(turn);
       const prompt = precedingUserTurn(doc, turn);
-      return { id: createJobId(), ...anchor, prompt: prompt ? readingAnchor(prompt) : null, quote: quote.slice(0, 2000), blockText,
+      return { id: createJobId(), ...anchor, prompt: prompt ? readingAnchor(prompt) : null, quote: quote.slice(0, 2000), blockText, passage,
         label: normalizeText(quote || extractAssistantContent(turn)).slice(0, 80) || 'Saved answer' };
     }
     function open(bookmark = null, focus = null) {
@@ -2852,14 +2939,17 @@
     function jumpTo(bookmark) {
       const turn = locateReadingAnchor(doc, bookmark);
       if (!turn) { toast('That answer is not loaded or has changed. Scroll to load older messages, then try again.'); return; }
-      // Existing bookmarks also start at the prompt, not halfway through its answer.
-      const target = bookmark.prompt ? locateReadingAnchor(doc, bookmark.prompt) : precedingUserTurn(doc, turn);
-      if (!target) { toast('The original user message is not loaded. Scroll to load older messages, then try again.'); return; }
+      const highlight = bookmark.quote ? locateBookmarkPassage(turn, bookmark) : null;
+      const prompt = bookmark.quote ? null : bookmark.prompt ? locateReadingAnchor(doc, bookmark.prompt) : precedingUserTurn(doc, turn);
+      if (bookmark.quote && !highlight) { toast('The saved highlight could not be located. The answer may have changed.'); return; }
+      if (!bookmark.quote && !prompt) { toast('The original user message is not loaded. Scroll to load older messages, then try again.'); return; }
+      const targetRect = highlight ? highlight.rect : prompt.getBoundingClientRect();
       remember();
       const scroller = chatScrollContainer(doc, win, turn);
       const top = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
-      instantScroll(scroller, Math.max(0, scroller.scrollTop + target.getBoundingClientRect().top - top - 24));
+      instantScroll(scroller, Math.max(0, scroller.scrollTop + targetRect.top - top - 24));
       close();
+      if (highlight?.approximate) toast('Opened the saved paragraph; the exact highlighted line could not be located.');
     }
     function goBack() {
       const saved = state.back;

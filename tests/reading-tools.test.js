@@ -201,7 +201,7 @@ test('bookmarks survive a fresh page and do not leak to other chats', async (t) 
   assert.equal(third.doc.querySelector('#cgs-bookmark-list').textContent, '');
 });
 
-test('highlight is captured before focus, but bookmark navigation starts at the original user prompt', async (t) => {
+test('highlight is captured before focus and falls back to its paragraph when line geometry is unavailable', async (t) => {
   const { doc, win, click, app, values, scroller } = await setup(t);
   const range = doc.createRange(); range.selectNodeContents(doc.querySelector('#passage'));
   win.getSelection().removeAllRanges(); win.getSelection().addRange(range);
@@ -215,8 +215,94 @@ test('highlight is captured before focus, but bookmark navigation starts at the 
   assert.equal(values.get(storageKey)[0].prompt.messageId, 'prompt-one');
   scroller.scrollTop = 1800;
   click('reading-jump');
-  assert.equal(scroller.scrollTop, 76, 'align original user message 24px below the scroll viewport top');
+  assert.equal(scroller.scrollTop, 276, 'align saved paragraph rather than the original user message');
+  assert.match(doc.querySelector('#cgs-toast').textContent, /Opened the saved paragraph/u);
   assert.equal(doc.querySelector('#cgs-bookmarks-panel').hidden, true);
+});
+
+test('sentence bookmark survives reload and jumps to its line across changed inline markup', async (t) => {
+  const first = await setup(t);
+  const passage = first.doc.querySelector('#passage'); passage.textContent = 'Intro. Saved sentence. Ending.';
+  const range = first.doc.createRange(); range.setStart(passage.firstChild, 7); range.setEnd(passage.firstChild, 22);
+  range.getBoundingClientRect = () => ({ left: 50, right: 220, top: 100, bottom: 130, width: 170, height: 30 });
+  first.win.getSelection().removeAllRanges(); first.win.getSelection().addRange(range);
+  passage.dispatchEvent(new first.win.MouseEvent('mouseup', { bubbles: true }));
+  await new Promise((resolve) => first.win.requestAnimationFrame(resolve));
+  first.click('bookmark-selection');
+  first.doc.querySelector('#cgs-bookmark-label').value = 'Sentence';
+  first.click('reading-save'); await first.app.state.readingTools.state.writes;
+  assert.equal(first.values.get(storageKey)[0].passage.exact, 'Saved sentence.');
+  const second = await setup(t, first.values);
+  second.doc.querySelector('#passage').innerHTML = 'Intro. <strong>Saved</strong>   sentence. Ending.';
+  let restoredText = '';
+  second.win.Range.prototype.getClientRects = function () {
+    restoredText = this.toString();
+    return [{ top: 780 - second.scroller.scrollTop, width: 170, height: 20 }];
+  };
+  second.scroller.scrollTop = 1800;
+  second.click('reading-bookmarks'); second.click('reading-jump');
+  assert.equal(restoredText, 'Saved   sentence.');
+  assert.equal(second.scroller.scrollTop, 676, 'scroll to the highlighted line, not the paragraph or user prompt');
+  assert.equal(second.doc.querySelector('#cgs-bookmarks-panel').hidden, true);
+  second.click('reading-back'); assert.equal(second.scroller.scrollTop, 1800);
+});
+
+test('whole-response bookmark still jumps to its preceding user message after reload', async (t) => {
+  const first = await setup(t); await first.save('Whole answer');
+  assert.equal(first.values.get(storageKey)[0].quote, '');
+  const second = await setup(t, first.values);
+  second.scroller.scrollTop = 1800;
+  second.click('reading-bookmarks'); second.click('reading-jump');
+  assert.equal(second.scroller.scrollTop, 76);
+});
+
+test('pre-update highlighted bookmarks use their saved quote instead of the prompt', async (t) => {
+  const values = new Map([[storageKey, [{ id: 'legacy_highlight_1234', label: 'Highlight', messageId: 'message-one',
+    quote: 'lab instruction.', blockText: 'First lab instruction.' }]]]);
+  const { doc, win, scroller, click } = await setup(t, values);
+  let text = '';
+  win.Range.prototype.getClientRects = function () { text = this.toString(); return [{ top: 680 - scroller.scrollTop, width: 100, height: 20 }]; };
+  click('reading-bookmarks'); click('reading-jump');
+  assert.equal(text, 'lab instruction.'); assert.equal(scroller.scrollTop, 576);
+});
+
+test('surrounding text disambiguates repeated sentences after reload', async (t) => {
+  const first = await setup(t);
+  const content = 'First step: Repeat this. Second step: Repeat this. Then finish.';
+  const passage = first.doc.querySelector('#passage'); passage.textContent = content;
+  const start = content.lastIndexOf('Repeat this.');
+  const range = first.doc.createRange(); range.setStart(passage.firstChild, start); range.setEnd(passage.firstChild, start + 12);
+  first.win.getSelection().removeAllRanges(); first.win.getSelection().addRange(range);
+  await first.save('Second repeat');
+  const second = await setup(t, first.values); second.doc.querySelector('#passage').textContent = content;
+  let restoredOffset = -1;
+  second.win.Range.prototype.getClientRects = function () {
+    restoredOffset = this.startOffset;
+    return [{ top: 900 - second.scroller.scrollTop, width: 120, height: 20 }];
+  };
+  second.click('reading-bookmarks'); second.click('reading-jump');
+  assert.equal(restoredOffset, start); assert.equal(second.scroller.scrollTop, 796);
+});
+
+test('missing highlighted text does not silently jump to the user prompt', async (t) => {
+  const first = await setup(t);
+  first.click('reading-close');
+  (await highlightForBookmark(first)).click();
+  first.click('reading-save'); await first.app.state.readingTools.state.writes;
+  const second = await setup(t, first.values); second.doc.querySelector('#passage').textContent = 'Revised response.';
+  second.scroller.scrollTop = 1800;
+  second.click('reading-bookmarks'); second.click('reading-jump');
+  assert.equal(second.scroller.scrollTop, 1800);
+  assert.match(second.doc.querySelector('#cgs-toast').textContent, /saved highlight could not be located/u);
+});
+
+test('ambiguous legacy highlights never guess which matching sentence to visit', async (t) => {
+  const values = new Map([[storageKey, [{ id: 'legacy_ambiguous_1234', label: 'Repeated', messageId: 'message-one', quote: 'Repeat.' }]]]);
+  const { doc, scroller, click } = await setup(t, values);
+  doc.querySelector('#passage').textContent = 'Repeat. Repeat.';
+  scroller.scrollTop = 1800; click('reading-bookmarks'); click('reading-jump');
+  assert.equal(scroller.scrollTop, 1800);
+  assert.match(doc.querySelector('#cgs-toast').textContent, /saved highlight could not be located/u);
 });
 
 test('jump latest remembers nested scroller position; back compensates for content growth', async (t) => {

@@ -4,7 +4,7 @@ A lightweight userscript for ChatGPT bookmarks, reading shortcuts, and separate 
 
 ## Features
 
-- **Bookmarks:** highlight a sentence and click ☆ Bookmark beside “Ask in new chat,” or bookmark a whole answer from its action row. Give it a label, then use ☆ beside Settings to jump back to the original user message, rename, or remove it.
+- **Bookmarks:** highlight a sentence and click ☆ Bookmark to return to that sentence later. Bookmark a whole answer from its action row to return to your preceding message instead. Manage saved bookmarks using ☆ beside Settings.
 - **Return to where I was:** click ChatGPT’s floating down arrow to jump instantly to the latest message, then ↩ beside Settings to return. Supports the arrow’s animated-dot state too; unrecognized variants are left alone.
 - Highlight a passage and **Ask in new chat**: automatically branch the whole chat, then send a question focused on that passage. Previous files and images stay in ChatGPT’s native history—not a text-only copy.
 - Remove “Start writing.”
