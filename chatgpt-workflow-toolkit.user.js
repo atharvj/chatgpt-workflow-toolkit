@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.4
+// @version      1.10.5
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.4';
+  const VERSION = '1.10.5';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -302,21 +302,31 @@
     .cgs-primary { color: #fff; background: #10a37f; }
     .cgs-primary:hover { background: #0d8c6d; }
     .cgs-secondary { color: var(--text-primary, #111827); background: var(--main-surface-secondary, rgba(127, 127, 127, .13)); }
-    #cgs-selection-pill {
+    #cgs-selection-tools {
       position: fixed;
       z-index: 2147483001;
       transform: none;
+      display: flex;
+      flex-wrap: wrap;
+      width: max-content;
+      max-width: calc(100vw - 20px);
+      gap: 2px;
+      padding: 3px;
+      border-radius: 9px;
+      background: #111827;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .22);
+    }
+    #cgs-selection-tools button {
       white-space: nowrap;
       padding: 7px 10px;
       border: 0;
       border-radius: 9px;
       color: #fff;
       background: #111827;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, .22);
       font: 700 12px/1 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       cursor: pointer;
     }
-    #cgs-selection-pill:hover { background: #10a37f; }
+    #cgs-selection-tools button:hover, #cgs-selection-tools button:focus-visible { background: #10a37f; }
     #cgs-toast {
       position: fixed;
       top: 18px;
@@ -2527,7 +2537,10 @@
         </section>
       </div>
 
-      <button id="cgs-selection-pill" type="button" data-cgs-action="ask-selection" hidden>Ask in new chat</button>
+      <div id="cgs-selection-tools" role="group" aria-label="Highlighted text actions" hidden>
+        <button id="cgs-selection-pill" type="button" data-cgs-action="ask-selection" hidden>Ask in new chat</button>
+        <button id="cgs-selection-bookmark" type="button" data-cgs-action="bookmark-selection" hidden>☆ Bookmark</button>
+      </div>
       <section id="cgs-bookmarks-panel" role="dialog" aria-modal="false" aria-labelledby="cgs-bookmarks-title" hidden>
         <div class="cgs-panel-head"><h2 id="cgs-bookmarks-title">Bookmarks in this chat</h2>
           <button class="cgs-icon-button" type="button" data-cgs-action="reading-close" aria-label="Close bookmarks">×</button></div>
@@ -2770,6 +2783,19 @@
       void reloadList();
       (bookmark ? el('#cgs-bookmark-label') : el('[data-cgs-action="reading-close"]')).focus({ preventScroll: true });
     }
+    function captureSelection(turn) {
+      if (!getSettings().bookmarks || !keyForPage()) return null;
+      const bookmark = selectedBookmark(turn);
+      return bookmark?.quote ? { key: keyForPage(), turn, bookmark } : null;
+    }
+    function openSelection(captured) {
+      void syncRoute();
+      if (!getSettings().bookmarks || !captured || captured.key !== keyForPage() ||
+        !captured.turn.isConnected || isTurnStreaming(captured.turn, doc) ||
+        locateReadingAnchor(doc, captured.bookmark) !== captured.turn) return false;
+      open(captured.bookmark, el('[data-cgs-action="reading-bookmarks"]'));
+      return true;
+    }
     async function changeBookmarks(change) {
       const key = state.key;
       const edit = async () => {
@@ -2942,7 +2968,7 @@
     doc.addEventListener('keydown', escape);
     win.addEventListener('popstate', syncRoute);
     void syncRoute(); controls();
-    return { state, process, settingsChanged, syncRoute };
+    return { state, process, settingsChanged, syncRoute, captureSelection, openSelection };
   }
 
   function createApp(doc, win, options = {}) {
@@ -2978,6 +3004,7 @@
       selectedTurn: null,
       selectedQuote: '',
       selectedUsesVisualMath: false,
+      selectedBookmark: null,
       focusReturn: null,
       recoveryJob: null,
       recoveryTurn: null,
@@ -3376,15 +3403,18 @@
     }
 
     function hideSelectionPill() {
-      const pill = element('#cgs-selection-pill');
-      if (pill) pill.hidden = true;
+      for (const id of ['#cgs-selection-tools', '#cgs-selection-pill', '#cgs-selection-bookmark']) {
+        const node = element(id);
+        if (node) node.hidden = true;
+      }
       state.selectedTurn = null;
       state.selectedQuote = '';
       state.selectedUsesVisualMath = false;
+      state.selectedBookmark = null;
     }
 
     function updateSelectionPill() {
-      if (!state.settings.showSelectionButton) return hideSelectionPill();
+      if (!state.settings.showSelectionButton && !state.settings.bookmarks) return hideSelectionPill();
       const selection = win.getSelection && win.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) return hideSelectionPill();
       const turn = closestAssistantTurn(selection.anchorNode);
@@ -3396,14 +3426,20 @@
       state.selectedTurn = turn;
       state.selectedQuote = quote;
       state.selectedUsesVisualMath = usesVisualMath;
-      const pill = element('#cgs-selection-pill');
+      state.selectedBookmark = state.readingTools.captureSelection(turn);
+      const ask = element('#cgs-selection-pill');
+      const bookmark = element('#cgs-selection-bookmark');
+      ask.hidden = !state.settings.showSelectionButton;
+      bookmark.hidden = !state.selectedBookmark;
+      if (ask.hidden && bookmark.hidden) return hideSelectionPill();
+      const pill = element('#cgs-selection-tools');
       pill.style.visibility = 'hidden';
       pill.hidden = false;
       const pillRect = pill.getBoundingClientRect();
       const position = chooseSelectionPillPosition(
         rect,
         {
-          width: pillRect.width || pill.offsetWidth || SELECTION_PILL_FALLBACK_WIDTH,
+          width: pillRect.width || pill.offsetWidth || (ask.hidden ? 0 : SELECTION_PILL_FALLBACK_WIDTH) + (bookmark.hidden ? 0 : 96) + 8,
           height: pillRect.height || pill.offsetHeight || SELECTION_PILL_FALLBACK_HEIGHT,
         },
         {
@@ -4331,7 +4367,7 @@
         if (state.settings.showTurnButtons) scheduleScan(doc.body);
         else removeTurnButtons(doc);
       }
-      if (key === 'showSelectionButton') {
+      if (key === 'showSelectionButton' || key === 'bookmarks') {
         // Discard any stale pill so its next click uses the updated preference.
         hideSelectionPill();
       }
@@ -4389,6 +4425,12 @@
         const usesVisualMath = state.selectedUsesVisualMath;
         hideSelectionPill();
         openQuestion(turn, quote, usesVisualMath);
+      } else if (action === 'bookmark-selection') {
+        event.preventDefault();
+        event.stopPropagation();
+        const captured = state.selectedBookmark;
+        hideSelectionPill();
+        if (!state.readingTools.openSelection(captured)) toast('That highlight is no longer available. Select it again.');
       } else if (action === 'toggle-selection-preview') {
         const preview = element('#cgs-selected-context');
         const expanded = preview.dataset.expanded !== 'true';

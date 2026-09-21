@@ -77,6 +77,102 @@ async function setup(t, values = new Map(), options = {}) {
   return { doc, win, app, values, turns, scroller, click, save, fingerprint, grow: (amount) => { growth += amount; } };
 }
 
+async function highlightForBookmark(fixture, node = fixture.doc.querySelector('#passage'), end = null) {
+  const { doc, win } = fixture;
+  const range = doc.createRange(); range.selectNodeContents(node);
+  if (end !== null) range.setEnd(node.firstChild, end);
+  range.getBoundingClientRect = () => ({ left: 50, right: 220, top: 100, bottom: 130, width: 170, height: 30 });
+  win.getSelection().removeAllRanges(); win.getSelection().addRange(range);
+  node.dispatchEvent(new win.MouseEvent('mouseup', { bubbles: true }));
+  await new Promise((resolve) => win.requestAnimationFrame(resolve));
+  return doc.querySelector('#cgs-selection-bookmark');
+}
+
+test('highlight toolbar offers Bookmark beside Ask and saves only the highlighted sentence after selection collapses', async (t) => {
+  const fixture = await setup(t);
+  const { doc, win, app, values, click } = fixture;
+  const native = doc.createElement('button'); native.textContent = 'Ask ChatGPT'; doc.querySelector('main').append(native);
+  const passage = doc.querySelector('#passage'); passage.textContent = 'First sentence. Another sentence.';
+  const button = await highlightForBookmark(fixture, passage, 'First sentence.'.length);
+  assert.equal(button.hidden, false);
+  assert.equal(doc.querySelector('#cgs-selection-pill').hidden, false);
+  assert.equal(button.parentElement, doc.querySelector('#cgs-selection-pill').parentElement);
+  assert.equal(native.hidden, false, 'native Ask ChatGPT is left untouched');
+  win.getSelection().removeAllRanges(); // Focusing a button/label must not lose the captured quote.
+  button.click();
+  assert.equal(doc.querySelector('#cgs-selection-tools').hidden, true);
+  assert.equal(doc.querySelector('#cgs-bookmarks-panel').hidden, false);
+  assert.equal(doc.querySelector('#cgs-bookmark-preview').textContent, 'First sentence.');
+  assert.equal(doc.querySelector('#cgs-bookmark-label').value, 'First sentence.');
+  click('reading-save'); await app.state.readingTools.state.writes;
+  assert.equal(values.get(storageKey)[0].quote, 'First sentence.');
+  assert.equal(values.get(storageKey)[0].messageId, 'message-one');
+  assert.equal(values.get(storageKey)[0].prompt.messageId, 'prompt-one');
+  assert.equal(doc.querySelector('#cgs-dialog-backdrop').hidden, true, 'bookmarking never starts a side question');
+});
+
+test('highlight Bookmark and Ask settings are independent and toolbar stays within a narrow viewport', async (t) => {
+  const fixture = await setup(t);
+  const { doc, win } = fixture;
+  Object.defineProperty(win, 'innerWidth', { value: 320, configurable: true });
+  const toggle = (key, checked) => {
+    const input = doc.querySelector(`[data-cgs-setting="${key}"]`); input.checked = checked;
+    input.dispatchEvent(new win.Event('change', { bubbles: true }));
+  };
+  await highlightForBookmark(fixture);
+  const toolbar = doc.querySelector('#cgs-selection-tools');
+  assert.ok(Number.parseFloat(toolbar.style.left) >= 10);
+  assert.ok(Number.parseFloat(toolbar.style.left) + 216 <= 310);
+  assert.equal(Number.parseFloat(toolbar.style.top), 137);
+  toggle('showSelectionButton', false);
+  assert.equal(toolbar.hidden, true, 'setting changes discard stale highlights');
+  assert.equal((await highlightForBookmark(fixture)).hidden, false);
+  assert.equal(doc.querySelector('#cgs-selection-pill').hidden, true);
+  toggle('bookmarks', false);
+  await highlightForBookmark(fixture); assert.equal(toolbar.hidden, true);
+  toggle('showSelectionButton', true);
+  assert.equal((await highlightForBookmark(fixture)).hidden, true);
+  assert.equal(doc.querySelector('#cgs-selection-pill').hidden, false);
+});
+
+test('highlight Bookmark refuses a captured sentence after changing chat or removing its message', async (t) => {
+  const fixture = await setup(t);
+  const { doc, win, values, turns } = fixture;
+  const button = await highlightForBookmark(fixture);
+  win.history.pushState({}, '', '/c/different-chat'); button.click();
+  assert.equal(doc.querySelector('#cgs-bookmarks-panel').hidden, true);
+  assert.match(doc.querySelector('#cgs-toast').textContent, /Select it again/u);
+  win.history.pushState({}, '', '/c/reading-test');
+  await highlightForBookmark(fixture);
+  turns[0].remove(); button.click();
+  assert.equal(doc.querySelector('#cgs-bookmarks-panel').hidden, true);
+  assert.equal(values.has(storageKey), false);
+});
+
+test('highlight Bookmark excludes user messages and shared or unsaved chats', async (t) => {
+  const fixture = await setup(t);
+  const user = fixture.doc.querySelector('[data-message-author-role="user"]');
+  assert.equal((await highlightForBookmark(fixture, user)).hidden, true);
+  for (const url of ['https://chatgpt.com/', 'https://chatgpt.com/share/example']) {
+    const other = await setup(t, new Map(), { url });
+    assert.equal((await highlightForBookmark(other)).hidden, true);
+  }
+});
+
+test('highlight Bookmark preserves math source notation and hides for a streaming answer', async (t) => {
+  const fixture = await setup(t);
+  const { doc, win, turns } = fixture;
+  const passage = doc.querySelector('#passage');
+  passage.innerHTML = '<span class="katex"><span class="katex-mathml"><math><semantics><annotation encoding="application/x-tex">x^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">x2</span></span>';
+  const button = await highlightForBookmark(fixture, passage.querySelector('.katex-html'));
+  button.click();
+  assert.match(doc.querySelector('#cgs-bookmark-preview').textContent, /x\^2/u);
+  fixture.click('reading-close');
+  turns[0].dataset.isStreaming = 'true';
+  assert.equal((await highlightForBookmark(fixture)).hidden, true);
+  assert.equal(doc.querySelector('#cgs-selection-pill').hidden, false, 'Ask highlighting keeps its existing behavior');
+});
+
 test('bookmarks save, rename, render labels as text, and remove without changing chat content', async (t) => {
   const { doc, app, values, click, save, fingerprint } = await setup(t);
   await save('<img src=x onerror=alert(1)>');

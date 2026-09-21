@@ -227,13 +227,13 @@ test('selected-response pill stays below the highlight instead of under native A
   const positioned = await waitFor(() => !document.querySelector('#cgs-selection-pill').hidden, dom.window);
   assert.equal(positioned, true);
 
-  const pill = document.querySelector('#cgs-selection-pill');
+  const pill = document.querySelector('#cgs-selection-tools');
   assert.equal(Number.parseFloat(pill.style.top), selectionRect.bottom + 7);
   assert.ok(Number.parseFloat(pill.style.top) > nativeRect.bottom, 'the toolkit pill sits below the native bubble');
   assert.equal(pill.dataset.cgsPlacement, 'below');
-  assert.match(document.querySelector('#cgs-style').textContent, /#cgs-selection-pill\s*\{[^}]*transform:\s*none/su);
+  assert.match(document.querySelector('#cgs-style').textContent, /#cgs-selection-tools\s*\{[^}]*transform:\s*none/su);
 
-  pill.click();
+  document.querySelector('#cgs-selection-pill').click();
   assert.equal(document.querySelector('#cgs-dialog-backdrop').hidden, false);
   assert.match(document.querySelector('#cgs-selected-context').textContent, /generator voltage is twelve volts/iu);
   assert.equal(document.querySelector('#cgs-question').value, '', 'typing a question cannot erase the saved highlight');
