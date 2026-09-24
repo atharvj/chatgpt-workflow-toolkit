@@ -29,6 +29,7 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Click **Ask in new chat** under the response and confirm the question form opens as a side panel without dimming or blocking the original chat.
 - Confirm a footer click previews and targets the entire clicked answer, even when text is highlighted elsewhere. A selection-button click must still target only the highlight. Try an older response, rendered math/code, and a very long response: long responses should be explicitly identified in native branch history by opening/closing excerpts, without treating the excerpts as the whole answer.
 - Check Ask and Bookmark beside the native three-dot menu on every completed response: no Copy button, nested tooltip wrappers, a toolbar beside the article, and native action-row replacement. If native actions mount late, both controls should move from their shared temporary row into the native row, with no duplicates. Disabling one feature must leave the other intact.
+- On answers with Sources, expand/collapse sources and leave the page idle. Ask and Bookmark must stay beside the three dots, without a flashing duplicate row above Sources. Sources must remain usable and unchanged.
 - Scroll and read the original answer while typing a question about step 3 in the panel.
 - Confirm the panel has no context or send checkbox: the whole conversation is always used and sending is automatic.
 - Confirm a separate popup/tab is created, its URL changes to a different conversation ID, and the question sends automatically.

@@ -377,6 +377,49 @@ test('both controls use a temporary row and migrate when the native footer mount
   assert.equal(turns[0].querySelector('.cgs-turn-fallback-row'), null);
 });
 
+for (const layout of ['div-turn', 'div-turn-inside-article']) {
+  test(`Sources and nested response scans keep one stable pair beside More: ${layout}`, async (t) => {
+    const { doc, win, app, turns } = await setup(t);
+    const original = turns[0];
+    const turn = doc.createElement('div');
+    turn.dataset.testid = original.dataset.testid;
+    original.replaceWith(turn); turn.append(...original.childNodes);
+    if (layout === 'div-turn-inside-article') {
+      const article = doc.createElement('article'); turn.before(article); article.append(turn);
+    }
+    const content = turn.querySelector('[data-message-author-role]');
+    const sources = doc.createElement('button'); sources.textContent = 'Sources';
+    content.after(sources);
+    const footer = turn.querySelector('[aria-label="More actions"]').parentElement;
+    app.processRoot(turn);
+    const ask = footer.querySelector('.cgs-turn-action');
+    const bookmark = footer.querySelector('.cgs-bookmark-action');
+    for (const root of [content, sources, content.firstElementChild, turn, footer]) {
+      app.processRoot(root);
+      assert.equal(turn.querySelector('.cgs-turn-fallback-row'), null);
+      assert.equal(ask.parentElement, footer);
+      assert.equal(bookmark.parentElement, footer);
+    }
+    assert.equal(turn.querySelector('.cgs-turn-fallback-row'), null);
+    assert.equal(ask.parentElement, footer);
+    assert.equal(bookmark.parentElement, footer);
+    await new Promise((resolve) => win.setTimeout(resolve, 300));
+    const changes = [];
+    const observer = new win.MutationObserver((records) => changes.push(...records));
+    observer.observe(turn, { childList: true, subtree: true });
+    t.after(() => observer.disconnect());
+    for (let i = 0; i < 3; i++) {
+      content.classList.toggle('sources-expanded');
+      await new Promise((resolve) => win.setTimeout(resolve, 100));
+    }
+    assert.equal(changes.length, 0, 'no repeated button moves or fallback rows');
+    assert.equal(turn.querySelectorAll('.cgs-turn-action').length, 1);
+    assert.equal(turn.querySelectorAll('.cgs-bookmark-action').length, 1);
+    assert.equal(sources.textContent, 'Sources');
+    ask.click(); assert.equal(app.state.activeTurn, turn);
+  });
+}
+
 test('response Ask uses the entire response even with a live highlight; selection Ask stays scoped to the highlight', async (t) => {
   const fixture = await setup(t);
   const { doc, app, click } = fixture;

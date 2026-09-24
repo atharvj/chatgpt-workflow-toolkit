@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.7
+// @version      1.10.8
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.7';
+  const VERSION = '1.10.8';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -577,7 +577,9 @@
     if (primary.length) return uniqueElements(primary);
 
     const roleNodes = collectMatches(root, ROLE_SELECTOR);
-    return uniqueElements(roleNodes.map((node) => node.closest('article') || node));
+    // A scan can start inside a response (for example when Sources updates).
+    // Always use the same owner as a full-page scan, not the inner role node.
+    return uniqueElements(roleNodes.map((node) => node.closest(TURN_SELECTOR) || node.closest('article') || node));
   }
 
   function roleOfTurn(turn) {
@@ -661,8 +663,10 @@
     if (!root) return [];
     const turns = getTurns(root);
     if (root.nodeType === 1 && typeof root.closest === 'function') {
-      const closest = root.closest(TURN_SELECTOR) || root.closest(ROLE_SELECTOR);
-      if (closest) turns.unshift(closest.closest('article') || closest);
+      const primary = root.closest(TURN_SELECTOR);
+      const role = root.closest(ROLE_SELECTOR);
+      const closest = primary || (role && (role.closest('article') || role));
+      if (closest) turns.unshift(closest);
       else if (!turns.length) {
         // A footer may mount beside the article, rather than inside it.
         for (let parent = root.parentElement, depth = 0; parent && depth < 4; parent = parent.parentElement, depth++) {
@@ -3274,7 +3278,7 @@
     }
 
     function processRoot(root, decorationContext = null) {
-      if (!root || (root.closest && root.closest(`#${UI_ROOT_ID}`))) return;
+      if (!root || !root.isConnected || (root.closest && root.closest(`#${UI_ROOT_ID}`))) return;
       const context = decorationContext || { streamingTurn: inferredStreamingTurn(doc) };
       if (state.readingTools) state.readingTools.process(root, context);
       if (state.settings.hideShareHighlighted) cleanShareHighlighted(root);
