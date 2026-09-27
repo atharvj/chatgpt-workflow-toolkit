@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { JSDOM } = require('jsdom');
 const toolkit = require('../chatgpt-workflow-toolkit.user.js');
+const userscriptWindow = require('./helpers/userscript-window');
 
 const history = `<!doctype html><html><body><main>
   <article data-testid="conversation-turn-0"><div data-message-author-role="user">Use my lab notes <a href="/files/lab.pdf">lab.pdf</a><img src="/files/diagram.png" alt="Circuit diagram"></div></article>
@@ -16,7 +17,8 @@ const history = `<!doctype html><html><body><main>
 async function fixture(t, url = 'https://chatgpt.com/c/source-chat', options = {}) {
   const dom = new JSDOM(history, { url, pretendToBeVisual: true });
   for (const turn of dom.window.document.querySelectorAll('article')) turn.scrollIntoView = () => {};
-  const app = toolkit.createApp(dom.window.document, dom.window, options);
+  const app = toolkit.createApp(dom.window.document, options.sandbox ? userscriptWindow(dom.window) : dom.window,
+    { pageWindow: dom.window, ...options });
   t.after(() => {
     if (app.state.observer) app.state.observer.disconnect();
     dom.window.close();
@@ -54,7 +56,7 @@ function openHighlight({ dom, doc, app }, text = 'Compare both groups.') {
 }
 
 for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((typedQuestion) =>
-  ['direct', 'pointer', 'popup', 'blank-href', 'blank-location'].map((mode) => ({ typedQuestion, mode })))) {
+  ['direct', 'pointer', 'sandbox-pointer', 'popup', 'blank-href', 'blank-location'].map((mode) => ({ typedQuestion, mode })))) {
   test(`highlight from an older answer survives typing and branches all history (${typedQuestion ? 'custom question' : 'default explanation'}, ${mode})`, async (t) => {
     const values = storage(t);
     const source = await fixture(t);
@@ -91,6 +93,7 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
     const originalOpen = pageWindow.open;
     const copy = await fixture(t, 'https://chatgpt.com/c/source-chat', {
       pageInstanceId: 'source_copy_page_1234',
+      sandbox: mode === 'sandbox-pointer',
       reloadPage: () => { reloads += 1; return true; },
       pageWindow,
       branchNavigationTimeout: 600,
@@ -170,7 +173,9 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
     const saved = values.get(`chatgptSidecar.job.v1.${jobId}`);
     assert.equal(saved.branchConversation, 'native-branch');
     // This simulates ChatGPT's native inherited history, not server-side file access.
-    const branch = await fixture(t, 'https://chatgpt.com/c/native-branch', { pageInstanceId: 'reloaded_branch_1234' });
+    const branch = await fixture(t, 'https://chatgpt.com/c/native-branch', {
+      pageInstanceId: 'reloaded_branch_1234', sandbox: mode === 'sandbox-pointer',
+    });
     branch.app.state.incomingJobId = jobId;
     let sends = 0;
     let outgoing = '';

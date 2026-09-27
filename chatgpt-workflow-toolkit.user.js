@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.13
+// @version      1.10.14
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.13';
+  const VERSION = '1.10.14';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -2253,7 +2253,9 @@
     if (!turn) return;
     for (const type of ['pointerover', 'pointerenter', 'pointermove', 'mouseover', 'mouseenter', 'mousemove']) {
       try {
-        turn.dispatchEvent(new win.MouseEvent(type, { bubbles: true, cancelable: true, view: win }));
+        // The userscript global is not necessarily a native Window. Supplying
+        // it as UIEvent.view can throw before the page receives the event.
+        turn.dispatchEvent(new win.MouseEvent(type, { bubbles: true, cancelable: true }));
       } catch (_error) {
         // Pointer event support differs across browser/userscript combinations.
       }
@@ -2429,20 +2431,32 @@
       if (!moreButton.isConnected || !actionControlIsUsable(moreButton) || !isMountedAndNotHidden(moreButton, true)) {
         return { ok: false, attempted: false, unavailable: true, reason: 'The response menu button changed before it could be opened.' };
       }
+      let eventStep = 'constructing pointer events';
       try {
         // Pointer-driven menus (including Radix) ignore HTMLElement.click().
         // Only use this fallback if still closed; don't click again and toggle it shut.
+        // Omit UIEvent.view: a userscript sandbox global fails its Window type
+        // check. No view is needed for the native trigger's pointer handler.
         const Pointer = win.PointerEvent || win.MouseEvent;
-        moreButton.dispatchEvent(new Pointer('pointerdown', {
-          bubbles: true, cancelable: true, view: win, button: 0, buttons: 1,
+        const pointerDown = new Pointer('pointerdown', {
+          bubbles: true, cancelable: true, button: 0, buttons: 1,
           pointerId: 1, pointerType: 'mouse', isPrimary: true, ctrlKey: false,
-        }));
-        moreButton.dispatchEvent(new Pointer('pointerup', {
-          bubbles: true, cancelable: true, view: win, button: 0, buttons: 0,
+        });
+        const pointerUp = new Pointer('pointerup', {
+          bubbles: true, cancelable: true, button: 0, buttons: 0,
           pointerId: 1, pointerType: 'mouse', isPrimary: true, ctrlKey: false,
-        }));
-      } catch (_error) {
-        return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not open the response’s three-dot menu.' };
+        });
+        eventStep = 'dispatching pointerdown';
+        moreButton.dispatchEvent(pointerDown);
+        eventStep = 'dispatching pointerup';
+        moreButton.dispatchEvent(pointerUp);
+      } catch (error) {
+        // Keep diagnostic categories only, never arbitrary exception messages
+        // which may contain page content or conversation identifiers.
+        const errorType = ['TypeError', 'SecurityError', 'NotSupportedError', 'InvalidStateError'].includes(error?.name)
+          ? error.name : 'event error';
+        return { ok: false, attempted: false, unavailable: true,
+          reason: `Workflow Toolkit could not open the response’s three-dot menu. Details (v${VERSION}): ${eventStep}; ${errorType}.` };
       }
     }
     const branchAction = await waitForCondition(() => {

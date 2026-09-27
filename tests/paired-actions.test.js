@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { JSDOM } = require('jsdom');
 const toolkit = require('../chatgpt-workflow-toolkit.user.js');
+const userscriptWindow = require('./helpers/userscript-window');
 
 // Structure and action labels from the user's September 27 inspection.
 // Conversation content and identifiers are synthetic; generated style names
@@ -50,7 +51,8 @@ async function fixture(t, options = {}) {
     const sources = doc.createElement('button'); sources.setAttribute('aria-label', 'Sources'); sources.dataset.state = 'closed';
     doc.querySelector('#more-2').after(sources);
   }
-  const app = toolkit.createApp(doc, win, { branchActionTimeout: 150, branchNavigationTimeout: 400, ...options });
+  const app = toolkit.createApp(doc, options.sandbox ? userscriptWindow(win) : win,
+    { pageWindow: win, branchActionTimeout: 150, branchNavigationTimeout: 400, ...options });
   await app.start(); app.processRoot(doc.body);
   t.after(() => { app.state.observer.disconnect(); win.close(); });
   const turns = toolkit.getAssistantTurns(doc);
@@ -87,11 +89,11 @@ test('paired prompt/answer footer: find More, put both controls beside it, and k
 });
 
 for (const duplicatePrompt of ['', 'nested', 'sibling'])
-for (const eventType of ['click', 'pointerdown']) test(`paired footer opens the native menu and branches exactly once: ${eventType}, ${duplicatePrompt || 'single'} prompt`, async (t) => {
-  const { doc, win, app, turns } = await fixture(t, { duplicatePrompt });
+for (const eventType of ['click', 'pointerdown', 'sandbox-pointer']) test(`paired footer opens the native menu and branches exactly once: ${eventType}, ${duplicatePrompt || 'single'} prompt`, async (t) => {
+  const { doc, win, app, turns } = await fixture(t, { duplicatePrompt, sandbox: eventType === 'sandbox-pointer' });
   let opens = 0, branches = 0, wrong = 0, sends = 0;
   const more = doc.querySelector('#more-2');
-  more.addEventListener(eventType, () => {
+  more.addEventListener(eventType === 'sandbox-pointer' ? 'pointerdown' : eventType, () => {
     opens++; more.dataset.state = 'open'; more.setAttribute('aria-expanded', 'true');
     doc.querySelector('#menu').dataset.state = 'open';
   });

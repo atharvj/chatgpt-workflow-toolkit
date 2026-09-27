@@ -4,8 +4,12 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { JSDOM } = require('jsdom');
 const toolkit = require('../chatgpt-workflow-toolkit.user.js');
+const userscriptWindow = require('./helpers/userscript-window');
 
-for (const mode of ['pointer', 'click', 'remount', 'closed', 'missing-branch', 'route-change', 'history-change']) {
+for (const mode of [
+  'pointer', 'click', 'remount', 'closed', 'missing-branch', 'route-change', 'history-change',
+  'sandbox-pointer', 'sandbox-mouse', 'constructor-error', 'dispatch-error', 'pointerup-error',
+]) {
   test(`native response menu: ${mode}`, async (t) => {
     const dom = new JSDOM(`<!doctype html><html><body><main>
       <article data-testid="conversation-turn-0"><div data-message-author-role="user">Original question</div></article>
@@ -58,7 +62,33 @@ for (const mode of ['pointer', 'click', 'remount', 'closed', 'missing-branch', '
       win.history.pushState({}, '', '/c/new-branch');
     });
     doc.querySelector('[data-testid="send-button"]').addEventListener('click', () => { sends += 1; });
-    const app = toolkit.createApp(doc, win, { branchActionTimeout: 100, branchNavigationTimeout: 600 });
+    const scriptWindow = mode.startsWith('sandbox-') ? userscriptWindow(win) : win;
+    if (mode === 'sandbox-mouse') scriptWindow.PointerEvent = undefined;
+    if (mode === 'constructor-error') {
+      const Pointer = win.PointerEvent;
+      scriptWindow.PointerEvent = function (type, init) {
+        if (type === 'pointerup') throw new TypeError('Private conversation details');
+        return new Pointer(type, init);
+      };
+    }
+    if (mode === 'dispatch-error' || mode === 'pointerup-error') {
+      const dispatch = more.dispatchEvent.bind(more);
+      more.dispatchEvent = (event) => {
+        if (event.type === (mode === 'dispatch-error' ? 'pointerdown' : 'pointerup')) {
+          throw new Error('Private conversation details');
+        }
+        return dispatch(event);
+      };
+    }
+    if (mode.startsWith('sandbox-')) {
+      const Pointer = scriptWindow.PointerEvent || scriptWindow.MouseEvent;
+      assert.throws(() => new Pointer('pointerdown', { view: scriptWindow }), /Window/u,
+        'fixture reproduces the old sandbox view type error without a mocked constructor');
+    }
+    let hovers = 0;
+    turn.addEventListener('pointerover', () => { hovers++; });
+    const scriptOpen = scriptWindow.open;
+    const app = toolkit.createApp(doc, scriptWindow, { pageWindow: win, branchActionTimeout: 100, branchNavigationTimeout: 600 });
     t.after(() => { app.state.observer?.disconnect(); win.close(); });
     await app.start();
     const job = toolkit.sanitizeJob({
@@ -71,19 +101,28 @@ for (const mode of ['pointer', 'click', 'remount', 'closed', 'missing-branch', '
     // No transfer ID: stop after the branch route, before destination reload/send.
     assert.equal(await app.runIncomingJob(job), false);
     assert.equal(win.open, originalOpen, 'restore popup behavior on success, timeout, and source changes');
+    assert.equal(scriptWindow.open, scriptOpen, 'restore userscript window as well as page window');
     assert.equal(clicks, 1);
     assert.equal(sends, 0, 'never send into the source page or unverified destination');
     assert.equal(doc.querySelector('#prompt-textarea').value, 'My existing draft');
-    const succeeds = ['pointer', 'click', 'remount'].includes(mode);
-    assert.equal(branches, succeeds ? 1 : 0);
-    assert.equal(pointers, ['pointer', 'remount', 'closed'].includes(mode) ? 1 : 0);
     const reason = doc.querySelector('#cgs-recovery-reason').textContent;
+    const succeeds = ['pointer', 'click', 'remount', 'sandbox-pointer', 'sandbox-mouse'].includes(mode);
+    assert.equal(branches, succeeds ? 1 : 0, reason);
+    assert.equal(pointers, ['pointer', 'remount', 'closed', 'sandbox-pointer', 'sandbox-mouse', 'pointerup-error'].includes(mode) ? 1 : 0);
+    assert.ok(hovers > 0, 'hover events must also work through the userscript global');
     if (succeeds) assert.equal(win.location.pathname, '/c/new-branch');
     else {
       assert.equal(app.state.branchClickAttempted, false, 'safe retry remains available when Branch was never clicked');
       if (mode === 'closed') assert.match(reason, /three-dot menu did not open/u);
       if (mode === 'missing-branch') assert.match(reason, /menu opened, but .* could not identify/u);
       if (mode.endsWith('-change')) assert.match(reason, /source chat changed/u);
+      if (mode.endsWith('-error')) {
+        assert.ok(reason.includes(`Details (v${toolkit.VERSION}):`));
+        assert.doesNotMatch(reason, /Private conversation details/u);
+        if (mode === 'constructor-error') assert.match(reason, /constructing pointer events; TypeError/u);
+        if (mode === 'dispatch-error') assert.match(reason, /dispatching pointerdown; event error/u);
+        if (mode === 'pointerup-error') assert.match(reason, /dispatching pointerup; event error/u);
+      }
     }
   });
 }
