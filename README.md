@@ -10,6 +10,7 @@ A lightweight userscript for ChatGPT bookmarks, reading shortcuts, and separate 
 - Click **Ask in new chat** under an answer to ask about that entire answer instead. Ask and Bookmark sit beside its response actions.
 - Remove “Start writing.”
 - Hide the “Share highlighted” selection button.
+- Remove the bottom Cookie preferences gap; Cookie preferences stays available in the toolkit’s settings.
 - Math highlights use source notation when available, otherwise compact display text with an instruction to check the original equations. Partial equations are included whole. **Show full highlight** expands the preview. This improves context, not a guarantee of correct answers.
 
 Requires ChatGPT’s Branch action. Attachment availability and conversation limits still depend on ChatGPT.

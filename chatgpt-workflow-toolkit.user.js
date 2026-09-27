@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.9
+// @version      1.10.10
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.9';
+  const VERSION = '1.10.10';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -103,10 +103,13 @@
   const SUBMISSION_CONTROL_SELECTOR = 'button, input[type="submit"], [role="button"]';
   const SHARE_HIGHLIGHTED_CONTROL_SELECTOR = 'button, [role="button"], [role="menuitem"]';
   const HIDDEN_SHARE_HIGHLIGHTED_CLASS = 'cgs-hidden-share-highlighted';
+  const COOKIE_FOOTER_SELECTOR = '[data-app-shell-frame="true"] > div.flex.w-full.shrink-0.justify-center.p-4';
+  const HIDDEN_COOKIE_FOOTER_CLASS = 'cgs-hidden-cookie-footer';
   const DEFAULT_SETTINGS = Object.freeze({
     openMode: 'popup',
     hideStartWriting: true,
     hideShareHighlighted: true,
+    hideCookieFooter: true,
     showTurnButtons: true,
     showSelectionButton: true,
     bookmarks: true,
@@ -116,6 +119,7 @@
 
   const STYLE_TEXT = `
     .${HIDDEN_SHARE_HIGHLIGHTED_CLASS} { display: none !important; }
+    .${HIDDEN_COOKIE_FOOTER_CLASS} { display: none !important; }
     #${UI_ROOT_ID}, #${UI_ROOT_ID} * { box-sizing: border-box; }
     #${UI_ROOT_ID} {
       color-scheme: light dark;
@@ -125,29 +129,36 @@
     }
     #${UI_ROOT_ID} [hidden] { display: none !important; }
     .${HIDDEN_START_WRITING_CLASS} { display: none !important; }
-    .${TURN_BUTTON_CLASS} {
+    .${TURN_BUTTON_CLASS}, .cgs-bookmark-action {
       all: unset;
       box-sizing: border-box;
       display: inline-flex;
+      flex-shrink: 0;
       align-items: center;
       gap: 4px;
       min-height: 28px;
       margin-inline-start: 2px;
       padding: 3px 7px;
       border-radius: 7px;
-      color: var(--text-secondary, #6b7280);
+      color: inherit;
+      background: transparent;
       cursor: pointer;
       font: 500 12px/1.2 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       opacity: .78;
     }
     .${TURN_BUTTON_CLASS}:hover,
-    .${TURN_BUTTON_CLASS}:focus-visible {
-      color: var(--text-primary, #111827);
+    .cgs-bookmark-action:hover,
+    .${TURN_BUTTON_CLASS}:focus-visible,
+    .cgs-bookmark-action:focus-visible {
+      color: inherit;
       background: var(--main-surface-secondary, rgba(127, 127, 127, .13));
       opacity: 1;
       outline: none;
     }
-    .${TURN_BUTTON_CLASS}:focus-visible { box-shadow: 0 0 0 2px #10a37f; }
+    .${TURN_BUTTON_CLASS}:active, .cgs-bookmark-action:active {
+      color: inherit; background: rgba(127, 127, 127, .24); opacity: 1;
+    }
+    .${TURN_BUTTON_CLASS}:focus-visible, .cgs-bookmark-action:focus-visible { box-shadow: 0 0 0 2px #10a37f; }
     .cgs-turn-fallback-row { display: flex; flex-wrap: wrap; justify-content: flex-start; margin: 6px auto 0; width: 100%; max-width: var(--thread-content-max-width, 48rem); }
     .cgs-branch-target { outline: 2px solid #10a37f !important; outline-offset: 5px; border-radius: 8px; }
     #cgs-dock {
@@ -167,12 +178,6 @@
       backdrop-filter: blur(12px);
     }
     #cgs-dock[data-cgs-position-suppressed="true"] { visibility: hidden; pointer-events: none; }
-    .cgs-bookmark-action {
-      appearance: none; border: 0; border-radius: 6px; padding: 4px 7px;
-      font: 600 12px/1.4 ui-sans-serif, system-ui, sans-serif; cursor: pointer;
-      color: var(--text-secondary, #777); background: transparent; flex-shrink: 0;
-    }
-    .cgs-bookmark-action:hover { color: #10a37f; background: rgba(127,127,127,.12); }
     #cgs-bookmarks-panel {
       position: fixed; right: 18px; top: 70px; z-index: 2147483002;
       width: min(390px, calc(100vw - 24px)); max-height: calc(100dvh - 160px);
@@ -329,6 +334,7 @@
       box-shadow: 0 8px 24px rgba(0, 0, 0, .22);
     }
     #cgs-selection-tools button {
+      appearance: none;
       white-space: nowrap;
       padding: 7px 10px;
       border: 0;
@@ -339,6 +345,8 @@
       cursor: pointer;
     }
     #cgs-selection-tools button:hover, #cgs-selection-tools button:focus-visible { background: #10a37f; }
+    #cgs-selection-tools button:active { background: #0d8c6d; }
+    #cgs-selection-tools button:focus-visible { outline: 2px solid #fff; outline-offset: -3px; }
     #cgs-toast {
       position: fixed;
       top: 18px;
@@ -553,6 +561,7 @@
       openMode: source.openMode === 'tab' ? 'tab' : 'popup',
       hideStartWriting: source.hideStartWriting !== false,
       hideShareHighlighted: source.hideShareHighlighted !== false,
+      hideCookieFooter: source.hideCookieFooter !== false,
       showTurnButtons: source.showTurnButtons !== false,
       // Older versions used one switch for both response and selection buttons.
       showSelectionButton: typeof source.showSelectionButton === 'boolean'
@@ -2578,6 +2587,11 @@
             <span><strong>Hide “Share highlighted”</strong><small>Turn off to restore ChatGPT’s selection-sharing button.</small></span>
             <input type="checkbox" data-cgs-setting="hideShareHighlighted" aria-label="Hide Share highlighted">
           </label>
+          <label class="cgs-setting">
+            <span><strong>Remove bottom gap</strong><small>Hide the Cookie preferences footer. Cookie preferences remains accessible here.</small></span>
+            <input type="checkbox" data-cgs-setting="hideCookieFooter" aria-label="Remove bottom gap">
+          </label>
+          <button class="cgs-link-button" type="button" data-cgs-action="cookie-preferences" hidden>Cookie preferences</button>
           <div class="cgs-version">v${VERSION}</div>
         </section>
       </div>
@@ -3226,6 +3240,7 @@
       root: null,
       observer: null,
       pendingRoots: new Set(),
+      cookieFooters: new Set(),
       scanScheduled: false,
       toastTimer: null,
       activeTurn: null,
@@ -3310,6 +3325,7 @@
 
     function processRoot(root, decorationContext = null) {
       if (!root || !root.isConnected || (root.closest && root.closest(`#${UI_ROOT_ID}`))) return;
+      syncCookieFooter(root);
       const context = decorationContext || { streamingTurn: inferredStreamingTurn(doc) };
       if (state.readingTools) state.readingTools.process(root, context);
       if (state.settings.hideShareHighlighted) cleanShareHighlighted(root);
@@ -3317,6 +3333,33 @@
       if (state.settings.showTurnButtons && !isReadOnlyChatPage(win.location.href)) {
         for (const turn of potentialTurnsFromRoot(root)) decorateTurn(doc, turn, context);
       }
+    }
+
+    function cookieFooterControl(footer) {
+      if (!footer.isConnected || !footer.matches(COOKIE_FOOTER_SELECTOR) || footer.children.length !== 1 ||
+          footer.closest(`#${UI_ROOT_ID}, ${TURN_SELECTOR}, ${ROLE_SELECTOR}, nav, aside, [role="dialog"]`)) return null;
+      const button = footer.firstElementChild;
+      // Match only the supplied single-button shell footer, never consent
+      // dialogs, message text, the composer, or a footer with other content.
+      return button.matches('button[type="button"]:not(:disabled):not([aria-disabled="true"])') &&
+        normalizeText(button.textContent) === 'Cookie preferences' &&
+        normalizeText(footer.textContent) === 'Cookie preferences' ? button : null;
+    }
+
+    function syncCookieFooter(root) {
+      const candidates = new Set([...state.cookieFooters, ...collectMatches(root, COOKIE_FOOTER_SELECTOR)]);
+      const nearby = root.nodeType === 1 ? root.closest(COOKIE_FOOTER_SELECTOR) : root.parentElement?.closest(COOKIE_FOOTER_SELECTOR);
+      if (nearby) candidates.add(nearby);
+      for (const footer of candidates) {
+        const valid = Boolean(cookieFooterControl(footer));
+        if (valid) state.cookieFooters.add(footer); else state.cookieFooters.delete(footer);
+        // Keep the original entry point on pages without the chat composer,
+        // where the toolkit's floating settings controls may be unavailable.
+        const hidden = valid && state.settings.hideCookieFooter && Boolean(findComposer(doc));
+        if (footer.classList.contains(HIDDEN_COOKIE_FOOTER_CLASS) !== hidden) footer.classList.toggle(HIDDEN_COOKIE_FOOTER_CLASS, hidden);
+      }
+      const shortcut = element('[data-cgs-action="cookie-preferences"]');
+      if (shortcut) shortcut.hidden = state.cookieFooters.size === 0;
     }
 
     function scheduleDockAvailability() {
@@ -4611,6 +4654,7 @@
         if (state.settings.hideShareHighlighted) scheduleScan(doc.body);
         else restoreShareHighlighted(doc);
       }
+      if (key === 'hideCookieFooter') syncCookieFooter(doc);
       await saveSettings();
     }
 
@@ -4682,6 +4726,12 @@
         openSettings();
       } else if (action === 'close-settings') {
         closeSettings();
+      } else if (action === 'cookie-preferences' && state.root.contains(actionNode)) {
+        syncCookieFooter(doc);
+        const button = [...state.cookieFooters].map(cookieFooterControl).find(Boolean);
+        if (!button) return toast('Cookie preferences is not available on this page.');
+        closeSettings(false);
+        button.click();
       } else if (action === 'cancel-question') {
         closeQuestion();
       } else if (action === 'submit-question') {
@@ -4792,6 +4842,7 @@
           'data-message-author-role', 'data-turn', 'data-testid', 'data-is-streaming', 'data-streaming',
           'data-chatgpt-search-unit-key', 'data-content-search-unit-key', 'data-markdown-text-style',
           'data-chatgpt-selection-message-id',
+          'data-app-shell-frame', 'disabled', 'aria-disabled',
         ],
       });
     }

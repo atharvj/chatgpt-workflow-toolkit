@@ -140,6 +140,33 @@ test('checkbox appearance survives the page reset without changing native inputs
   assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
 });
 
+test('Bookmark and Ask share appearance and interaction styles in both action locations', async (t) => {
+  const { doc, win, footers } = await fixture(t);
+  const properties = ['color', 'backgroundColor', 'opacity', 'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'padding', 'borderRadius', 'minHeight', 'display', 'cursor'];
+  const rules = [...doc.querySelector('#cgs-style').sheet.cssRules].filter((rule) => rule.selectorText);
+  for (const color of ['rgb(235, 235, 235)', 'rgb(20, 20, 20)']) {
+    footers[0].style.color = color;
+    const pairs = [
+      [footers[0].querySelector('.cgs-turn-action'), footers[0].querySelector('.cgs-bookmark-action')],
+      [doc.querySelector('#cgs-selection-pill'), doc.querySelector('#cgs-selection-bookmark')],
+    ];
+    for (const [ask, bookmark] of pairs) {
+      ask.hidden = false; bookmark.hidden = false;
+      const a = win.getComputedStyle(ask), b = win.getComputedStyle(bookmark);
+      for (const property of properties) assert.equal(a[property], b[property], property);
+      // JSDOM does not render pointer states. Check that each state applies
+      // exactly the same CSS declarations to both buttons, not just at rest.
+      for (const state of [':hover', ':active', ':focus-visible']) {
+        const declarations = (button) => rules.filter((rule) => rule.selectorText.split(',').some((selector) =>
+          selector.includes(state) && button.matches(selector.replaceAll(state, '').trim())))
+          .map((rule) => rule.style.cssText);
+        assert.ok(declarations(ask).length, `explicit ${state} styling`);
+        assert.deepEqual(declarations(ask), declarations(bookmark), state);
+      }
+    }
+  }
+});
+
 test('native provenance in new answer markup stays untrusted, outside separator stays usable', async (t) => {
   const { doc, turns } = await fixture(t);
   const marker = doc.createElement('p'); marker.innerHTML = 'Branched from <a href="/c/original">Original</a>';
@@ -185,4 +212,82 @@ test('new-layout controls mount after streaming ends and after identity attribut
   await new Promise((resolve) => win.setTimeout(resolve, 150));
   assert.equal(late.querySelectorAll('.cgs-turn-action').length, 1);
   assert.equal(late.querySelectorAll('.cgs-bookmark-action').length, 1);
+});
+
+function cookieFooter(doc) {
+  const shell = doc.createElement('div'); shell.dataset.appShellFrame = 'true';
+  const footer = doc.createElement('div'); footer.className = 'flex w-full shrink-0 justify-center p-4';
+  footer.style.padding = '16px'; footer.style.display = 'flex';
+  const button = doc.createElement('button'); button.type = 'button'; button.textContent = 'Cookie preferences'; button.style.height = '24px';
+  footer.append(button); shell.append(footer); doc.body.append(shell);
+  return { shell, footer, button };
+}
+
+test('only the exact Cookie preferences footer loses its layout space; settings keeps native access', async (t) => {
+  const { doc, win, app, click, values } = await fixture(t);
+  const { footer, button } = cookieFooter(doc);
+  let opened = 0; button.onclick = () => { opened++; };
+  app.processRoot(doc.body);
+  assert.equal(win.getComputedStyle(footer).display, 'none');
+  assert.equal(footer.style.padding, '16px', 'original spacing is not destroyed');
+  assert.equal(opened, 0, 'never automatically opens or changes cookie consent');
+  assert.equal(doc.querySelector('[data-cgs-action="cookie-preferences"]').hidden, false);
+  click('toggle-settings'); click('cookie-preferences');
+  assert.equal(doc.querySelector('#cgs-settings-backdrop').hidden, true);
+  assert.equal(opened, 1, 'only the explicit shortcut opens the native preferences');
+  const toggle = doc.querySelector('[data-cgs-setting="hideCookieFooter"]');
+  toggle.click(); await new Promise((resolve) => win.setTimeout(resolve, 50));
+  assert.equal(win.getComputedStyle(footer).display, 'flex');
+  assert.equal(values.get('chatgptSidecar.settings.v1').hideCookieFooter, false);
+  toggle.click(); await new Promise((resolve) => win.setTimeout(resolve, 50));
+  assert.equal(win.getComputedStyle(footer).display, 'none');
+  assert.equal(values.get('chatgptSidecar.settings.v1').hideCookieFooter, true);
+});
+
+test('footer cleanup handles late mounts, label changes, rerenders and native dialogs without mutation loops', async (t) => {
+  const { doc, win } = await fixture(t);
+  const { footer, button } = cookieFooter(doc);
+  await new Promise((resolve) => win.setTimeout(resolve, 150));
+  assert.equal(win.getComputedStyle(footer).display, 'none');
+  // Character-data mutations must be rechecked, too.
+  button.firstChild.data = 'Accept cookies';
+  await new Promise((resolve) => win.setTimeout(resolve, 150));
+  assert.equal(win.getComputedStyle(footer).display, 'flex');
+  button.firstChild.data = 'Cookie preferences';
+  await new Promise((resolve) => win.setTimeout(resolve, 150));
+  assert.equal(win.getComputedStyle(footer).display, 'none');
+  const dialog = doc.createElement('div'); dialog.setAttribute('role', 'dialog'); dialog.textContent = 'Privacy options';
+  footer.append(dialog);
+  await new Promise((resolve) => win.setTimeout(resolve, 150));
+  assert.equal(win.getComputedStyle(footer).display, 'flex', 'never conceal a native dialog inside the footer');
+  dialog.remove();
+  await new Promise((resolve) => win.setTimeout(resolve, 150));
+  const changes = [];
+  const observer = new win.MutationObserver((records) => changes.push(...records));
+  observer.observe(footer, { attributes: true, childList: true, subtree: true });
+  t.after(() => observer.disconnect());
+  await new Promise((resolve) => win.setTimeout(resolve, 150));
+  assert.equal(changes.length, 0, 'the cleanup settles without flashing');
+  footer.remove();
+  await new Promise((resolve) => win.setTimeout(resolve, 150));
+  assert.equal(doc.querySelector('[data-cgs-action="cookie-preferences"]').hidden, true);
+  const replacement = cookieFooter(doc);
+  await new Promise((resolve) => win.setTimeout(resolve, 150));
+  assert.equal(win.getComputedStyle(replacement.footer).display, 'none');
+});
+
+test('cookie cleanup leaves consent choices, conversation examples, mixed footers and composer-free pages alone', async (t) => {
+  const { doc, win, app, turns } = await fixture(t);
+  const examples = [cookieFooter(doc), cookieFooter(doc), cookieFooter(doc), cookieFooter(doc)];
+  examples[0].button.textContent = 'Accept all cookies';
+  examples[1].footer.append(doc.createElement('input'));
+  turns[1].querySelector('[data-markdown-text-style]').append(examples[2].shell);
+  examples[3].shell.setAttribute('role', 'dialog');
+  app.processRoot(doc.body);
+  for (const { footer } of examples) assert.equal(win.getComputedStyle(footer).display, 'flex');
+  const { footer } = cookieFooter(doc);
+  const form = doc.querySelector('form'); form.remove(); app.processRoot(doc.body);
+  assert.equal(win.getComputedStyle(footer).display, 'flex');
+  // The shared fixture verifies the draft at teardown; restore its untouched form.
+  doc.querySelector('main').append(form);
 });
