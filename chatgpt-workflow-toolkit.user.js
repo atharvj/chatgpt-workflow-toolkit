@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.8
+// @version      1.10.9
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.8';
+  const VERSION = '1.10.9';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -73,8 +73,14 @@
   const responseControlOwners = new WeakMap();
   const responseControls = new WeakMap();
   const HIDDEN_START_WRITING_CLASS = 'cgs-hidden-start-writing';
-  const TURN_SELECTOR = '[data-testid^="conversation-turn-"]';
-  const ROLE_SELECTOR = '[data-message-author-role]';
+  const LEGACY_TURN_SELECTOR = '[data-testid^="conversation-turn-"]';
+  const SEARCH_TURN_SELECTOR = ['data-chatgpt-search-unit-key', 'data-content-search-unit-key']
+    .flatMap((attribute) => ['assistant', 'user'].map((role) => `[${attribute}$=":${role}"]`)).join(', ');
+  const TURN_SELECTOR = `${LEGACY_TURN_SELECTOR}, ${SEARCH_TURN_SELECTOR}`;
+  const ASSISTANT_CONTENT_SELECTOR = '[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"]';
+  const USER_CONTENT_SELECTOR = '[data-message-author-role="user"], [data-markdown-text-style="user-message"]';
+  const ROLE_SELECTOR = `[data-message-author-role], ${ASSISTANT_CONTENT_SELECTOR}, ${USER_CONTENT_SELECTOR}`;
+  const MESSAGE_ID_SELECTOR = '[data-message-id], [data-chatgpt-selection-message-id]';
   const COMPOSER_SELECTORS = [
     'textarea#prompt-textarea',
     '#prompt-textarea[contenteditable="true"]',
@@ -233,7 +239,10 @@
     .cgs-setting:first-of-type { border-top: 0; }
     .cgs-setting strong { display: block; margin-bottom: 3px; font-size: 13px; }
     .cgs-setting small { display: block; max-width: 270px; color: var(--text-secondary, #6b7280); font-size: 11px; line-height: 1.45; }
-    .cgs-setting input[type="checkbox"] { width: 18px; height: 18px; accent-color: #10a37f; }
+    #cgs-settings .cgs-setting input[type="checkbox"] {
+      appearance: auto !important; -webkit-appearance: checkbox !important;
+      width: 18px; min-width: 18px; height: 18px; margin: 0; accent-color: #10a37f;
+    }
     .cgs-setting select {
       min-width: 112px;
       padding: 6px 8px;
@@ -574,25 +583,43 @@
     if (!root || typeof root.querySelectorAll !== 'function') return [];
     const primary = [...root.querySelectorAll(TURN_SELECTOR)];
     if (root.nodeType === 1 && root.matches && root.matches(TURN_SELECTOR)) primary.unshift(root);
-    if (primary.length) return uniqueElements(primary);
+    if (primary.length) return uniqueElements(primary.map(canonicalTurn));
 
     const roleNodes = collectMatches(root, ROLE_SELECTOR);
     // A scan can start inside a response (for example when Sources updates).
     // Always use the same owner as a full-page scan, not the inner role node.
-    return uniqueElements(roleNodes.map((node) => node.closest(TURN_SELECTOR) || node.closest('article') || node));
+    return uniqueElements(roleNodes.map(canonicalTurn));
+  }
+
+  function canonicalTurn(node) {
+    return node.closest(LEGACY_TURN_SELECTOR) || node.closest(SEARCH_TURN_SELECTOR) || node.closest('article') || node;
+  }
+
+  function explicitMessageRole(node) {
+    if (!node) return '';
+    const role = lowerText(node.getAttribute('data-message-author-role') || node.getAttribute('data-turn'));
+    if (role === 'assistant' || role === 'user') return role;
+    const style = node.getAttribute('data-markdown-text-style');
+    if (style === 'assistant-message') return 'assistant';
+    if (style === 'user-message') return 'user';
+    for (const attribute of ['data-chatgpt-search-unit-key', 'data-content-search-unit-key']) {
+      const match = /:(assistant|user)$/u.exec(node.getAttribute(attribute) || '');
+      if (match) return match[1];
+    }
+    return '';
   }
 
   function roleOfTurn(turn) {
     if (!turn || turn.nodeType !== 1) return '';
-    const direct = lowerText(turn.getAttribute('data-message-author-role') || turn.getAttribute('data-turn'));
+    const direct = explicitMessageRole(turn);
     if (direct === 'assistant' || direct === 'user') return direct;
     const roleNode = turn.querySelector(ROLE_SELECTOR);
-    const nested = lowerText(roleNode && roleNode.getAttribute('data-message-author-role'));
+    const nested = explicitMessageRole(roleNode);
     if (nested === 'assistant' || nested === 'user') return nested;
     if (turn.querySelector('[data-testid*="good-response"], [data-testid*="bad-response"], [data-testid*="regenerate-response"]')) {
       return 'assistant';
     }
-    if (turn.querySelector('.markdown, [class~="prose"]') && !turn.querySelector('[data-message-author-role="user"]')) {
+    if (turn.querySelector('.markdown, [class~="prose"]') && !turn.querySelector(USER_CONTENT_SELECTOR)) {
       return 'assistant';
     }
     return '';
@@ -665,8 +692,8 @@
     if (root.nodeType === 1 && typeof root.closest === 'function') {
       const primary = root.closest(TURN_SELECTOR);
       const role = root.closest(ROLE_SELECTOR);
-      const closest = primary || (role && (role.closest('article') || role));
-      if (closest) turns.unshift(closest);
+      const closest = primary || role;
+      if (closest) turns.unshift(canonicalTurn(closest));
       else if (!turns.length) {
         // A footer may mount beside the article, rather than inside it.
         for (let parent = root.parentElement, depth = 0; parent && depth < 4; parent = parent.parentElement, depth++) {
@@ -675,10 +702,10 @@
           if (siblings.length === 1) { turns.push(siblings[0]); break; }
           if (siblings.length > 1) break;
         }
-        const owner = root.closest('[data-message-id]');
+        const owner = root.closest(MESSAGE_ID_SELECTOR);
         if (!turns.length && owner) {
-          for (const node of root.ownerDocument.querySelectorAll('[data-message-id]')) {
-            if (node.dataset.messageId === owner.dataset.messageId) {
+          for (const node of root.ownerDocument.querySelectorAll(MESSAGE_ID_SELECTOR)) {
+            if (messageIdOf(node) === messageIdOf(owner)) {
               const turn = closestAssistantTurn(node);
               if (turn) turns.push(turn);
             }
@@ -729,9 +756,9 @@
     const element = node && (node.nodeType === 1 ? node : node.parentElement);
     if (!element || typeof element.closest !== 'function') return null;
     const primary = element.closest(TURN_SELECTOR);
-    if (primary) return isAssistantTurn(primary) ? primary : null;
-    const roleNode = element.closest('[data-message-author-role="assistant"]');
-    return roleNode ? roleNode.closest('article') || roleNode : null;
+    if (primary) return isAssistantTurn(canonicalTurn(primary)) ? canonicalTurn(primary) : null;
+    const roleNode = element.closest(ASSISTANT_CONTENT_SELECTOR);
+    return roleNode ? canonicalTurn(roleNode) : null;
   }
 
   function quoteForPrompt(value, maximumLength = SELECTED_QUOTE_MAX_LENGTH) {
@@ -756,7 +783,7 @@
   }
 
   function responseQuote(turn) {
-    const content = turn.querySelector('[data-message-author-role="assistant"]') || turn;
+    const content = turn.matches(ASSISTANT_CONTENT_SELECTOR) ? turn : turn.querySelector(ASSISTANT_CONTENT_SELECTOR) || turn;
     const range = turn.ownerDocument.createRange(); range.selectNodeContents(content);
     return extractSelectionQuote({ rangeCount: 1, getRangeAt: () => range, toString: () => readableNodeText(content) }, turn);
   }
@@ -1124,9 +1151,9 @@
 
   function extractAssistantContent(turn, options = {}) {
     if (!turn) return '';
-    const roleNode = turn.matches && turn.matches('[data-message-author-role="assistant"]')
+    const roleNode = turn.matches && turn.matches(ASSISTANT_CONTENT_SELECTOR)
       ? turn
-      : turn.querySelector && turn.querySelector('[data-message-author-role="assistant"]');
+      : turn.querySelector && turn.querySelector(ASSISTANT_CONTENT_SELECTOR);
     if (!roleNode) return '';
     const preferred = [...roleNode.querySelectorAll('[data-message-content], .markdown, [class~="prose"]')]
       .filter((node) => !node.parentElement || !node.parentElement.closest('[data-message-content], .markdown, [class~="prose"]'));
@@ -1255,7 +1282,7 @@
     let changes = 0;
     for (const control of controls) {
       // Never hide quoted examples, editable drafts, or our own controls.
-      const protectedContent = control.closest(`#${UI_ROOT_ID}, [data-message-author-role], .markdown, .prose, pre, code, textarea, input, [contenteditable]:not([contenteditable="false"])`);
+      const protectedContent = control.closest(`#${UI_ROOT_ID}, ${ROLE_SELECTOR}, .markdown, .prose, pre, code, textarea, input, [contenteditable]:not([contenteditable="false"])`);
       const matches = !protectedContent && [control.textContent, control.getAttribute('aria-label'), control.getAttribute('title')]
         .some((label) => lowerText(label) === 'share highlighted');
       if (control.classList.contains(HIDDEN_SHARE_HIGHLIGHTED_CLASS) !== matches) {
@@ -1529,9 +1556,9 @@
     const element = node && (node.nodeType === 1 ? node : node.parentElement);
     if (!element || typeof element.closest !== 'function') return null;
     const primary = element.closest(TURN_SELECTOR);
-    if (primary) return roleOfTurn(primary) === 'user' ? primary : null;
-    const roleNode = element.closest('[data-message-author-role="user"]');
-    return roleNode ? roleNode.closest('article') || roleNode : null;
+    if (primary) return roleOfTurn(canonicalTurn(primary)) === 'user' ? canonicalTurn(primary) : null;
+    const roleNode = element.closest(USER_CONTENT_SELECTOR);
+    return roleNode ? canonicalTurn(roleNode) : null;
   }
 
   function isEditableComposer(element) {
@@ -1746,10 +1773,14 @@
       !control.matches(':disabled, [aria-disabled="true"], [data-disabled], [inert]'));
   }
 
+  function messageIdOf(node) {
+    return normalizeText(node.getAttribute('data-message-id') || node.getAttribute('data-chatgpt-selection-message-id'));
+  }
+
   function turnMessageIds(turn) {
     if (!turn) return new Set();
-    return new Set(collectMatches(turn, '[data-message-id]')
-      .map((node) => normalizeText(node.getAttribute('data-message-id')))
+    return new Set(collectMatches(turn, MESSAGE_ID_SELECTOR)
+      .map(messageIdOf)
       .filter(Boolean));
   }
 
@@ -1760,8 +1791,8 @@
     const messageIds = turnMessageIds(turn);
 
     if (messageIds.size) {
-      for (const node of doc.querySelectorAll('[data-message-id]')) {
-        if (messageIds.has(normalizeText(node.getAttribute('data-message-id')))) scopes.push(node);
+      for (const node of doc.querySelectorAll(MESSAGE_ID_SELECTOR)) {
+        if (messageIds.has(messageIdOf(node))) scopes.push(node);
       }
     }
 
@@ -1771,7 +1802,7 @@
     let ancestor = turn.parentElement;
     for (let depth = 0; ancestor && depth < 4; depth += 1, ancestor = ancestor.parentElement) {
       if (ancestor.matches('main, body, html, nav, aside, header, form')) break;
-      const containedTurns = ancestor.querySelectorAll(TURN_SELECTOR);
+      const containedTurns = getTurns(ancestor);
       if (containedTurns.length !== 1 || containedTurns[0] !== turn) break;
       scopes.push(ancestor);
     }
@@ -1793,7 +1824,7 @@
     // bounded row with Copy plus feedback/retry controls, outside answer content.
     for (let row = control.parentElement, depth = 0; row && depth < 3; row = row.parentElement, depth += 1) {
       if (row.matches('article, main, body, nav, aside, header, form') ||
-        row.closest('[data-message-author-role], .markdown, .prose, pre, code')) break;
+        row.closest(`${ROLE_SELECTOR}, .markdown, .prose, pre, code`)) break;
       if (row.querySelector(TURN_SELECTOR)) break;
       const copy = row.querySelector('[data-testid="copy-turn-action-button"], button[aria-label="Copy" i], button[aria-label="Copy response" i]');
       const feedback = row.querySelector('[data-testid="good-response-turn-action-button"], [data-testid="bad-response-turn-action-button"], [data-testid="regenerate-response-button"], button[aria-label="Good response" i], button[aria-label="Bad response" i], button[aria-label="Try again" i]');
@@ -1811,7 +1842,7 @@
     const iconTestIds = [...control.querySelectorAll('[data-testid]')]
       .map((node) => lowerText(node.getAttribute('data-testid')))
       .join(' ');
-    const ownerId = normalizeText((control.closest('[data-message-id]') || control).getAttribute('data-message-id'));
+    const ownerId = messageIdOf(control.closest(MESSAGE_ID_SELECTOR) || control);
     const scoped = scopes.some((scope) => scope === control || scope.contains(control));
     const linked = Boolean(ownerId && messageIds.has(ownerId));
     const exactPattern = /^(?:more|more actions|more options|message actions|response actions)$/u;
@@ -2637,7 +2668,7 @@
     const find = () => {
       const controls = uniqueElements(scopes.flatMap((scope) => [...scope.querySelectorAll('button, [role="button"]')]))
         .filter((node) => !node.closest('[data-cgs-injected], .cgs-turn-action, pre, code, .markdown, .prose, nav, aside, header, form') &&
-          (!node.closest('[data-message-author-role]') || node.closest('[data-message-author-role]') === turn));
+          (!node.closest(ROLE_SELECTOR) || node.closest(ROLE_SELECTOR) === turn));
       const foundMore = findMoreButton(turn, scopes, turnMessageIds(turn));
       const more = (controls.includes(foundMore) ? foundMore : null) || controls.find((node) =>
         /^(?:more|more actions|more options)$/iu.test(node.getAttribute('aria-label') || node.getAttribute('title') || '') ||
@@ -2666,8 +2697,8 @@
       const ids = turnMessageIds(turn);
       if (!context.linkedFooters) {
         context.linkedFooters = new Map();
-        for (const node of turn.ownerDocument.querySelectorAll('[data-message-id]')) {
-          const id = node.dataset.messageId;
+        for (const node of turn.ownerDocument.querySelectorAll(MESSAGE_ID_SELECTOR)) {
+          const id = messageIdOf(node);
           if (!context.linkedFooters.has(id)) context.linkedFooters.set(id, []);
           context.linkedFooters.get(id).push(node);
         }
@@ -2701,7 +2732,7 @@
       row = turn.querySelector('.cgs-turn-fallback-row');
       if (!row) {
         row = doc.createElement('div'); row.className = 'cgs-turn-fallback-row'; row.dataset.cgsInjected = 'true';
-        const content = turn.querySelector('[data-message-author-role="assistant"]');
+        const content = turn.querySelector(ASSISTANT_CONTENT_SELECTOR);
         if (content && content.parentElement !== turn) content.after(row); else turn.append(row);
       }
     }
@@ -2803,8 +2834,8 @@
   // A text quote plus nearby text survives reloads without depending on DOM
   // child indexes. Build this index only when bookmarking or following a quote.
   function bookmarkTextIndex(turn) {
-    const root = turn.matches('[data-message-author-role="assistant"]') ? turn
-      : turn.querySelector('[data-message-author-role="assistant"]') || turn;
+    const root = turn.matches(ASSISTANT_CONTENT_SELECTOR) ? turn
+      : turn.querySelector(ASSISTANT_CONTENT_SELECTOR) || turn;
     const walker = turn.ownerDocument.createTreeWalker(root, 4);
     const nodes = [], starts = [], ends = [], chars = [];
     let rawLength = 0, node;
@@ -4759,6 +4790,8 @@
           'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label', 'title', 'role',
           'hidden', 'inert', 'aria-hidden', 'data-state', 'style', 'class',
           'data-message-author-role', 'data-turn', 'data-testid', 'data-is-streaming', 'data-streaming',
+          'data-chatgpt-search-unit-key', 'data-content-search-unit-key', 'data-markdown-text-style',
+          'data-chatgpt-selection-message-id',
         ],
       });
     }

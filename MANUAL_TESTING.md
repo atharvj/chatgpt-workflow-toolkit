@@ -18,6 +18,7 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Confirm the close button and Escape each close the modal.
 - Open the userscript menu and confirm **Open Workflow Toolkit settings…** is its only toolkit action and opens the same modal.
 - Repeat at a narrow mobile viewport and confirm the modal remains centered and scrolls internally.
+- Confirm every checkbox is visible and toggles normally in light/dark mode, including pages that reset input `appearance` to `none`. Native page inputs must be unchanged.
 - Toggle **Hide Share highlighted** off/on: the native button should return/disappear immediately, including after changing the selection. Repeat for **Remove Start writing**.
 - Toggle response buttons and highlight buttons separately; each should work independently of the other.
 - Math copying improvements should always run, with no math-copy notices or math settings shown. Upgrading from saved preferences that disabled improvements or enabled notices must not restore those behaviors.
@@ -30,6 +31,7 @@ Sign in first. The native branch workflow is a logged-in ChatGPT web feature; lo
 - Confirm a footer click previews and targets the entire clicked answer, even when text is highlighted elsewhere. A selection-button click must still target only the highlight. Try an older response, rendered math/code, and a very long response: long responses should be explicitly identified in native branch history by opening/closing excerpts, without treating the excerpts as the whole answer.
 - Check Ask and Bookmark beside the native three-dot menu on every completed response: no Copy button, nested tooltip wrappers, a toolbar beside the article, and native action-row replacement. If native actions mount late, both controls should move from their shared temporary row into the native row, with no duplicates. Disabling one feature must leave the other intact.
 - On answers with Sources, expand/collapse sources and leave the page idle. Ask and Bookmark must stay beside the three dots, without a flashing duplicate row above Sources. Sources must remain usable and unchanged.
+- Repeat footer/highlight actions on the search-unit layout (`data-chatgpt-search-unit-key`, `data-markdown-text-style="assistant-message"`) as well as legacy conversation turns. Verify selected-passage bookmarks survive reload via the message ID, whole-answer bookmarks return to the preceding prompt, and native branching still targets the correct answer. The supplied new-layout sample covers answer ancestors, not a full live branch/composer capture.
 - Scroll and read the original answer while typing a question about step 3 in the panel.
 - Confirm the panel has no context or send checkbox: the whole conversation is always used and sending is automatic.
 - Confirm a separate popup/tab is created, its URL changes to a different conversation ID, and the question sends automatically.
