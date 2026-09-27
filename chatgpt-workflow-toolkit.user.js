@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.10
+// @version      1.10.11
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.10';
+  const VERSION = '1.10.11';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -592,12 +592,19 @@
     if (!root || typeof root.querySelectorAll !== 'function') return [];
     const primary = [...root.querySelectorAll(TURN_SELECTOR)];
     if (root.nodeType === 1 && root.matches && root.matches(TURN_SELECTOR)) primary.unshift(root);
-    if (primary.length) return uniqueElements(primary.map(canonicalTurn));
+    if (primary.length) return orderedTurns(primary);
 
     const roleNodes = collectMatches(root, ROLE_SELECTOR);
     // A scan can start inside a response (for example when Sources updates).
     // Always use the same owner as a full-page scan, not the inner role node.
-    return uniqueElements(roleNodes.map(canonicalTurn));
+    return orderedTurns(roleNodes);
+  }
+
+  function orderedTurns(nodes) {
+    return uniqueElements(nodes.map(canonicalTurn)).sort((a, b) => {
+      const position = a.compareDocumentPosition(b);
+      return position & 2 ? 1 : position & 4 ? -1 : 0;
+    });
   }
 
   function canonicalTurn(node) {
@@ -709,6 +716,10 @@
           if (parent.matches('main, body, html, nav, aside, header, form')) break;
           const siblings = getTurns(parent);
           if (siblings.length === 1) { turns.push(siblings[0]); break; }
+          const assistants = siblings.filter(isAssistantTurn);
+          if (assistants.length === 1 && isResponseActionScope(parent, assistants[0], siblings)) {
+            turns.push(assistants[0]); break;
+          }
           if (siblings.length > 1) break;
         }
         const owner = root.closest(MESSAGE_ID_SELECTOR);
@@ -1805,22 +1816,36 @@
       }
     }
 
-    // ChatGPT sometimes renders the response toolbar beside the turn rather
-    // than inside it. A wrapper containing only this turn is still a safe
-    // search boundary; main/body and multi-turn containers are not.
+    scopes.push(...localResponseActionScopes(turn));
+    return uniqueElements(scopes).filter((scope) => scope.isConnected && !scope.closest(`#${UI_ROOT_ID}`));
+  }
+
+  function isResponseActionScope(scope, turn, turns = getTurns(scope)) {
+    if (turns.length === 1 && turns[0] === turn) return true;
+    // The new native exchange wraps one prompt AND one answer, then its
+    // toolbar. Never extend to the conversation list or another answer.
+    const exchange = turn.closest('[data-content-search-turn-key]');
+    return Boolean(exchange && exchange.contains(scope) && turns.length === 2 &&
+      roleOfTurn(turns[0]) === 'user' && turns[1] === turn && isAssistantTurn(turn));
+  }
+
+  function localResponseActionScopes(turn) {
+    const scopes = [turn];
     let ancestor = turn.parentElement;
     for (let depth = 0; ancestor && depth < 4; depth += 1, ancestor = ancestor.parentElement) {
       if (ancestor.matches('main, body, html, nav, aside, header, form')) break;
-      const containedTurns = getTurns(ancestor);
-      if (containedTurns.length !== 1 || containedTurns[0] !== turn) break;
+      if (!isResponseActionScope(ancestor, turn)) break;
+      // A partial inner scope must not bypass ambiguity in its exchange.
+      const exchange = turn.closest('[data-content-search-turn-key]');
+      if (exchange && !isResponseActionScope(exchange, turn)) break;
       scopes.push(ancestor);
     }
-
-    return uniqueElements(scopes).filter((scope) => scope.isConnected && !scope.closest(`#${UI_ROOT_ID}`));
+    return scopes;
   }
 
   function responseActionRow(control) {
     if (!control || !control.closest) return null;
+    if (control.closest(`${ROLE_SELECTOR}, .markdown, .prose, pre, code, [data-cgs-injected], #${UI_ROOT_ID}`)) return null;
     const explicit = control.closest(
       '[data-testid*="message-actions" i], [data-testid*="turn-actions" i], [data-testid*="response-actions" i], [data-testid*="response-toolbar" i]',
     );
@@ -1836,7 +1861,7 @@
         row.closest(`${ROLE_SELECTOR}, .markdown, .prose, pre, code`)) break;
       if (row.querySelector(TURN_SELECTOR)) break;
       const copy = row.querySelector('[data-testid="copy-turn-action-button"], button[aria-label="Copy" i], button[aria-label="Copy response" i]');
-      const feedback = row.querySelector('[data-testid="good-response-turn-action-button"], [data-testid="bad-response-turn-action-button"], [data-testid="regenerate-response-button"], button[aria-label="Good response" i], button[aria-label="Bad response" i], button[aria-label="Try again" i]');
+      const feedback = row.querySelector('[data-testid="good-response-turn-action-button"], [data-testid="bad-response-turn-action-button"], [data-testid="regenerate-response-button"], button[aria-label="Good response" i], button[aria-label="Bad response" i], button[aria-label="Try again" i], button[aria-label="Rate response" i], button[aria-label="Regenerate response" i]');
       if (copy && feedback) return row;
     }
     return null;
@@ -1844,6 +1869,7 @@
 
   function moreControlScore(control, scopes, messageIds) {
     if (!actionControlIsUsable(control)) return -1;
+    if (control.closest(`${ROLE_SELECTOR}, .markdown, .prose, pre, code, [data-cgs-injected]`)) return -1;
     const testId = lowerText(control.getAttribute('data-testid'));
     const label = lowerText(control.getAttribute('aria-label'));
     const title = lowerText(control.getAttribute('title'));
@@ -1867,7 +1893,7 @@
     if (!strongTestId && !actionRow) return -1;
     if (!exactLabel && !strongTestId && !(actionRow && (genericOverflowTestId || ellipsisIcon || ellipsisText || menuTrigger))) return -1;
     if (/(?:copy|share|feedback|good-response|bad-response|read-aloud|regenerate|edit|send)/u.test(testId) ||
-      /^(?:copy|share|good response|bad response|read aloud|regenerate|edit|send)$/u.test(label)) return -1;
+      /^(?:copy|share|good response|bad response|rate response|read aloud|regenerate(?: response)?|edit|send)$/u.test(label)) return -1;
 
     let score = 0;
     if (linked) score += 100;
@@ -2672,13 +2698,7 @@
   function responseFooter(turn, context = {}) {
     if (!context.footerCache) context.footerCache = new Map();
     if (context.footerCache.has(turn)) return context.footerCache.get(turn);
-    const scopes = [turn];
-    for (let parent = turn.parentElement, depth = 0; parent && depth < 4; parent = parent.parentElement, depth++) {
-      if (parent.matches('main, body, html, nav, aside, header, form')) break;
-      const turns = getTurns(parent);
-      if (turns.length !== 1 || turns[0] !== turn) break;
-      scopes.push(parent);
-    }
+    const scopes = localResponseActionScopes(turn);
     const find = () => {
       const controls = uniqueElements(scopes.flatMap((scope) => [...scope.querySelectorAll('button, [role="button"]')]))
         .filter((node) => !node.closest('[data-cgs-injected], .cgs-turn-action, pre, code, .markdown, .prose, nav, aside, header, form') &&
