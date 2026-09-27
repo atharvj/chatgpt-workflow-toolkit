@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.12
+// @version      1.10.13
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.12';
+  const VERSION = '1.10.13';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1823,8 +1823,29 @@
     // The new native exchange wraps one prompt AND one answer, then its
     // toolbar. Never extend to the conversation list or another answer.
     const exchange = turn.closest('[data-content-search-turn-key]');
-    return Boolean(exchange && exchange.contains(scope) && turns.length === 2 &&
-      roleOfTurn(turns[0]) === 'user' && turns[1] === turn && isAssistantTurn(turn));
+    if (!exchange || !exchange.contains(scope) || turns.length < 2 ||
+        turns.at(-1) !== turn || !isAssistantTurn(turn)) return false;
+    const prompts = turns.slice(0, -1);
+    if (!prompts.every((node) => roleOfTurn(node) === 'user')) return false;
+    if (prompts.length === 1) return true;
+    // ChatGPT may render nested or sibling copies of the prompt with the
+    // same search-unit key. Count these as one prompt ONLY for toolbar
+    // ownership; do not collapse transcript/answer nodes or weaken Send checks.
+    const prefix = `${exchange.getAttribute('data-content-search-turn-key')}:`;
+    let key = '';
+    const ids = new Set();
+    for (const prompt of prompts) {
+      if (prompt.closest('[data-content-search-turn-key]') !== exchange) return false;
+      const keys = ['data-chatgpt-search-unit-key', 'data-content-search-unit-key']
+        .map((attribute) => prompt.getAttribute(attribute)).filter(Boolean);
+      const candidate = keys[0];
+      if (!candidate || keys.some((value) => value !== candidate) ||
+          !candidate.startsWith(prefix) || !/^\d+:user$/u.test(candidate.slice(prefix.length)) ||
+          (key && key !== candidate)) return false;
+      key = candidate;
+      for (const id of turnMessageIds(prompt)) ids.add(id);
+    }
+    return ids.size <= 1;
   }
 
   function localResponseActionScopes(turn) {

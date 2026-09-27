@@ -36,6 +36,20 @@ async function fixture(t, options = {}) {
     <form><textarea id="prompt-textarea">Existing draft</textarea><button type="button" data-testid="send-button">Send</button></form></main>`,
   { url: 'https://chatgpt.com/c/source-chat', pretendToBeVisual: true });
   const win = dom.window, doc = win.document;
+  if (options.duplicatePrompt) {
+    const prompt = doc.querySelector('[data-chatgpt-search-unit-key="fallback-turn-2:0:user"]');
+    const duplicate = prompt.cloneNode(true);
+    if (options.duplicatePrompt === 'nested') {
+      duplicate.removeAttribute('data-chatgpt-search-unit-key');
+      duplicate.setAttribute('data-content-search-unit-key', 'fallback-turn-2:0:user');
+      prompt.replaceChildren(duplicate);
+    } else prompt.after(duplicate);
+    const answer = doc.querySelector('[data-chatgpt-search-unit-key="fallback-turn-2:1:assistant"]');
+    answer.setAttribute('data-chatgpt-search-unit-key', 'fallback-turn-2:2:assistant');
+    answer.setAttribute('data-content-search-unit-key', 'fallback-turn-2:2:assistant');
+    const sources = doc.createElement('button'); sources.setAttribute('aria-label', 'Sources'); sources.dataset.state = 'closed';
+    doc.querySelector('#more-2').after(sources);
+  }
   const app = toolkit.createApp(doc, win, { branchActionTimeout: 150, branchNavigationTimeout: 400, ...options });
   await app.start(); app.processRoot(doc.body);
   t.after(() => { app.state.observer.disconnect(); win.close(); });
@@ -72,8 +86,9 @@ test('paired prompt/answer footer: find More, put both controls beside it, and k
   observer.disconnect(); assert.equal(changes.length, 0);
 });
 
-for (const eventType of ['click', 'pointerdown']) test(`paired footer opens the native menu and branches exactly once: ${eventType}`, async (t) => {
-  const { doc, win, app, turns } = await fixture(t);
+for (const duplicatePrompt of ['', 'nested', 'sibling'])
+for (const eventType of ['click', 'pointerdown']) test(`paired footer opens the native menu and branches exactly once: ${eventType}, ${duplicatePrompt || 'single'} prompt`, async (t) => {
+  const { doc, win, app, turns } = await fixture(t, { duplicatePrompt });
   let opens = 0, branches = 0, wrong = 0, sends = 0;
   const more = doc.querySelector('#more-2');
   more.addEventListener(eventType, () => {
@@ -94,6 +109,34 @@ for (const eventType of ['click', 'pointerdown']) test(`paired footer opens the 
   assert.equal(opens, 1); assert.equal(branches, 1); assert.equal(wrong, 0); assert.equal(sends, 0);
   assert.equal(win.location.pathname, '/c/new-branch');
   assert.equal(doc.querySelector('#prompt-textarea').value, 'Existing draft');
+});
+
+for (const duplicatePrompt of ['nested', 'sibling']) test(`duplicate ${duplicatePrompt} prompt key keeps stable footer controls owned by the answer`, async (t) => {
+  const { doc, win, app, turns } = await fixture(t, { duplicatePrompt });
+  const answer = turns[1], more = doc.querySelector('#more-2');
+  assert.equal(toolkit.findMoreButton(answer), more);
+  assert.equal(more.nextElementSibling?.dataset.cgsAction, 'ask-turn');
+  assert.equal(more.nextElementSibling.nextElementSibling?.dataset.cgsAction, 'reading-add');
+  more.nextElementSibling.click();
+  assert.equal(app.state.activeTurn, answer);
+  assert.equal(doc.querySelector('#cgs-selected-context').textContent, 'Answer 2');
+  doc.querySelector('[data-cgs-action="cancel-question"]').click();
+  app.processRoot(answer.closest('[data-content-search-turn-key]'));
+  await new Promise((resolve) => win.setTimeout(resolve, 150));
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
+  assert.equal(doc.querySelector('.cgs-turn-fallback-row'), null);
+});
+
+for (const conflict of ['different-key', 'different-message-id', 'conflicting-attributes', 'after-answer'])
+test(`duplicate-prompt scope still refuses ${conflict}`, async (t) => {
+  const { doc, turns } = await fixture(t, { duplicatePrompt: 'sibling' });
+  const copies = doc.querySelectorAll('[data-chatgpt-search-unit-key="fallback-turn-2:0:user"]');
+  if (conflict === 'different-key') copies[1].setAttribute('data-chatgpt-search-unit-key', 'fallback-turn-2:1:user');
+  if (conflict === 'different-message-id') copies[1].querySelector('[data-chatgpt-selection-message-id]').setAttribute('data-chatgpt-selection-message-id', 'different-user');
+  if (conflict === 'conflicting-attributes') copies[1].setAttribute('data-content-search-unit-key', 'fallback-turn-2:1:user');
+  if (conflict === 'after-answer') turns[1].after(copies[1]);
+  assert.equal(toolkit.findMoreButton(turns[1]), null);
 });
 
 test('paired footer never substitutes Regenerate or an older answer menu for missing More', async (t) => {
@@ -127,4 +170,35 @@ test('Rate response alone identifies the action row; hidden, disabled and ambigu
   more.hidden = false;
   row.append(more.cloneNode(true));
   assert.equal(toolkit.findMoreButton(turns[1]), null, 'do not guess between duplicate menus');
+});
+
+for (const duplicatePrompt of ['nested', 'sibling']) test(`verified separate chat auto-sends once with ${duplicatePrompt} prompt markup`, async (t) => {
+  const values = new Map(), previous = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return structuredClone(values.get(key) ?? fallback); },
+    async setValue(key, value) { values.set(key, structuredClone(value)); },
+    async deleteValue(key) { values.delete(key); },
+  };
+  t.after(() => { if (previous === undefined) delete globalThis.GM; else globalThis.GM = previous; });
+  const { doc, win, app, turns } = await fixture(t, { duplicatePrompt, pageInstanceId: 'destination_page_12345', branchComposerTimeout: 1000, sideSendAckTimeout: 1000 });
+  const jobId = 'duplicate_prompt_send_12345', key = `chatgptSidecar.job.v1.${jobId}`;
+  const job = toolkit.sanitizeJob({ createdAt: Date.now(), sourceUrl: win.location.href, kind: 'ask',
+    locator: toolkit.getTurnLocator(turns[1], doc), targetFingerprint: toolkit.assistantTurnFingerprint(turns[1]),
+    contextFingerprint: toolkit.conversationContextFingerprint(doc, turns[1]),
+    question: toolkit.buildSelectedQuestion('Answer 1', 'Explain this part.'),
+    branchClickAttempted: true, branchConversation: 'separate-branch', branchReloadFrom: 'source_page_12345' });
+  values.set(key, job); app.state.incomingJobId = jobId;
+  win.history.replaceState({}, '', '/c/separate-branch');
+  const composer = doc.querySelector('#prompt-textarea'); composer.value = '';
+  const sent = [];
+  doc.querySelector('[data-testid="send-button"]').onclick = () => {
+    assert.equal(values.get(key).sendAttempted, true);
+    sent.push(composer.value);
+    const user = doc.createElement('div'); user.setAttribute('data-chatgpt-search-unit-key', 'fallback-turn-3:0:user');
+    user.textContent = composer.value; doc.querySelector('form').before(user); composer.value = '';
+  };
+  assert.equal(await app.runIncomingJob(job), true);
+  assert.deepEqual(sent, [toolkit.buildAccuracyGuardedPrompt(job.question)]);
+  assert.equal(values.has(key), false);
+  assert.equal(doc.querySelector('#cgs-recovery-backdrop').hidden, true);
 });
