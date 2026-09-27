@@ -235,13 +235,14 @@ test('only the exact Cookie preferences footer loses its layout space; settings 
   click('toggle-settings'); click('cookie-preferences');
   assert.equal(doc.querySelector('#cgs-settings-backdrop').hidden, true);
   assert.equal(opened, 1, 'only the explicit shortcut opens the native preferences');
-  const toggle = doc.querySelector('[data-cgs-setting="hideCookieFooter"]');
-  toggle.click(); await new Promise((resolve) => win.setTimeout(resolve, 50));
-  assert.equal(win.getComputedStyle(footer).display, 'flex');
-  assert.equal(values.get('chatgptSidecar.settings.v1').hideCookieFooter, false);
-  toggle.click(); await new Promise((resolve) => win.setTimeout(resolve, 50));
-  assert.equal(win.getComputedStyle(footer).display, 'none');
-  assert.equal(values.get('chatgptSidecar.settings.v1').hideCookieFooter, true);
+  assert.equal(doc.querySelector('[data-cgs-setting="hideCookieFooter"]'), null);
+  assert.equal('hideCookieFooter' in toolkit.DEFAULT_SETTINGS, false);
+  assert.equal('hideCookieFooter' in toolkit.sanitizeSettings({ hideCookieFooter: false }), false);
+  values.set('chatgptSidecar.settings.v1', { hideCookieFooter: false });
+  const reloaded = await fixture(t, values);
+  const restoredFooter = cookieFooter(reloaded.doc).footer;
+  reloaded.app.processRoot(reloaded.doc.body);
+  assert.equal(reloaded.win.getComputedStyle(restoredFooter).display, 'none', 'old preference cannot restore the removed setting');
 });
 
 test('footer cleanup handles late mounts, label changes, rerenders and native dialogs without mutation loops', async (t) => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.11
+// @version      1.10.12
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.11';
+  const VERSION = '1.10.12';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -109,7 +109,6 @@
     openMode: 'popup',
     hideStartWriting: true,
     hideShareHighlighted: true,
-    hideCookieFooter: true,
     showTurnButtons: true,
     showSelectionButton: true,
     bookmarks: true,
@@ -561,7 +560,6 @@
       openMode: source.openMode === 'tab' ? 'tab' : 'popup',
       hideStartWriting: source.hideStartWriting !== false,
       hideShareHighlighted: source.hideShareHighlighted !== false,
-      hideCookieFooter: source.hideCookieFooter !== false,
       showTurnButtons: source.showTurnButtons !== false,
       // Older versions used one switch for both response and selection buttons.
       showSelectionButton: typeof source.showSelectionButton === 'boolean'
@@ -2613,10 +2611,6 @@
             <span><strong>Hide “Share highlighted”</strong><small>Turn off to restore ChatGPT’s selection-sharing button.</small></span>
             <input type="checkbox" data-cgs-setting="hideShareHighlighted" aria-label="Hide Share highlighted">
           </label>
-          <label class="cgs-setting">
-            <span><strong>Remove bottom gap</strong><small>Hide the Cookie preferences footer. Cookie preferences remains accessible here.</small></span>
-            <input type="checkbox" data-cgs-setting="hideCookieFooter" aria-label="Remove bottom gap">
-          </label>
           <button class="cgs-link-button" type="button" data-cgs-action="cookie-preferences" hidden>Cookie preferences</button>
           <div class="cgs-version">v${VERSION}</div>
         </section>
@@ -3375,7 +3369,7 @@
         if (valid) state.cookieFooters.add(footer); else state.cookieFooters.delete(footer);
         // Keep the original entry point on pages without the chat composer,
         // where the toolkit's floating settings controls may be unavailable.
-        const hidden = valid && state.settings.hideCookieFooter && Boolean(findComposer(doc));
+        const hidden = valid && Boolean(findComposer(doc));
         if (footer.classList.contains(HIDDEN_COOKIE_FOOTER_CLASS) !== hidden) footer.classList.toggle(HIDDEN_COOKIE_FOOTER_CLASS, hidden);
       }
       const shortcut = element('[data-cgs-action="cookie-preferences"]');
@@ -4674,7 +4668,6 @@
         if (state.settings.hideShareHighlighted) scheduleScan(doc.body);
         else restoreShareHighlighted(doc);
       }
-      if (key === 'hideCookieFooter') syncCookieFooter(doc);
       await saveSettings();
     }
 
