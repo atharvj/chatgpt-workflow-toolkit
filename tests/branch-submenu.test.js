@@ -10,6 +10,9 @@ for (const mode of [
   'click', 'keyboard', 'rtl-keyboard', 'hover', 'delayed', 'unlinked', 'inline', 'remount',
   'already-open', 'missing-chat', 'disabled-chat', 'closed-submenu', 'ambiguous-chat',
   'unrelated-menu', 'ambiguous-unlinked', 'route-change', 'history-change',
+  'aria-mask', 'inert-mask', 'aria-mask-edited', 'aria-mask-user-edited', 'aria-mask-stream',
+  'aria-mask-root', 'aria-mask-prehidden', 'aria-mask-new-turn',
+  'already-open-mask',
 ]) test(`Open new branch submenu: ${mode}`, async (t) => {
   // Labels from the supplied screenshot; synthetic ARIA menu/portal variants.
   const dom = new JSDOM(`<!doctype html><main>
@@ -33,6 +36,9 @@ for (const mode of [
   const turn = doc.querySelector('#turn'), more = doc.querySelector('#more');
   const menu = doc.querySelector('#menu'), submenu = doc.querySelector('#submenu');
   let trigger = doc.querySelector('#subtrigger');
+  if (mode === 'aria-mask-prehidden') turn.querySelector('[data-message-author-role]').insertAdjacentHTML('beforeend',
+    '<span aria-hidden="true">Hidden duplicate notation</span><span inert>Hidden panel text</span>');
+  if (mode === 'aria-mask-root') doc.body.append(menu, submenu);
   const foreign = doc.querySelector('#foreign');
   foreign.hidden = true;
   turn.scrollIntoView = () => {};
@@ -73,12 +79,35 @@ for (const mode of [
   if (mode === 'missing-chat') doc.querySelector('#chat').remove();
   if (mode === 'disabled-chat') doc.querySelector('#chat').setAttribute('aria-disabled', 'true');
   if (mode === 'ambiguous-chat') submenu.append(doc.querySelector('#chat').cloneNode(true));
-  more.addEventListener('click', () => { setOpen(more); setOpen(menu); });
-  if (mode === 'already-open') {
+  more.addEventListener('click', () => {
     setOpen(more); setOpen(menu);
+    if (mode.includes('mask')) {
+      for (const node of doc.querySelectorAll('[data-message-author-role]')) {
+        node.setAttribute(mode === 'inert-mask' ? 'inert' : 'aria-hidden', mode === 'inert-mask' ? '' : 'true');
+      }
+      if (mode === 'aria-mask-edited') turn.querySelector('[data-message-author-role]').textContent = 'Actually edited answer';
+      if (mode === 'aria-mask-user-edited') doc.querySelector('[data-message-author-role="user"]').textContent = 'Actually edited prompt';
+      if (mode === 'aria-mask-stream') {
+        doc.querySelector('form').setAttribute('aria-hidden', 'true');
+        const stop = doc.createElement('button'); stop.dataset.testid = 'stop-button';
+        doc.querySelector('form').append(stop);
+      }
+      if (mode === 'aria-mask-root') doc.querySelector('main').setAttribute('aria-hidden', 'true');
+      if (mode === 'aria-mask-new-turn') turn.insertAdjacentHTML('afterend',
+        '<article data-testid="conversation-turn-2"><div data-message-author-role="user">A genuinely new question</div></article>');
+    }
+  });
+  if (mode === 'already-open' || mode === 'already-open-mask') {
+    setOpen(more); setOpen(menu);
+    if (mode === 'already-open-mask') {
+      for (const node of doc.querySelectorAll('[data-message-author-role]')) node.setAttribute('aria-hidden', 'true');
+    }
     doc.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
         for (const node of [more, menu, trigger, submenu]) { node.dataset.state = 'closed'; node.setAttribute('aria-expanded', 'false'); }
+        if (mode === 'already-open-mask') {
+          for (const node of doc.querySelectorAll('[data-message-author-role]')) node.removeAttribute('aria-hidden');
+        }
       }
     });
   }
@@ -95,18 +124,24 @@ for (const mode of [
     locator: toolkit.getTurnLocator(turn, doc), targetFingerprint: toolkit.assistantTurnFingerprint(turn),
     contextFingerprint: toolkit.conversationContextFingerprint(doc, turn), question: 'Explain this part.' });
   await app.runIncomingJob(job); // Stop before the verified-destination reload/send.
-  const succeeds = ['click', 'keyboard', 'rtl-keyboard', 'hover', 'delayed', 'unlinked', 'inline', 'remount', 'already-open'].includes(mode);
+  const succeeds = ['click', 'keyboard', 'rtl-keyboard', 'hover', 'delayed', 'unlinked', 'inline', 'remount', 'already-open',
+    'aria-mask', 'inert-mask', 'aria-mask-root', 'aria-mask-prehidden', 'already-open-mask'].includes(mode);
   const reason = doc.querySelector('#cgs-recovery-reason').textContent;
   assert.equal(branches, succeeds ? 1 : 0, reason);
   assert.equal(work, 0, 'normal Chat is the explicit fallback; never infer mode from message text');
   assert.equal(wrong, 0, 'never use another menu’s branch option');
   assert.equal(sends, 0);
   assert.equal(doc.querySelector('#prompt-textarea').value, 'Existing draft');
-  assert.equal(clicks, 1, 'open the branch submenu only once');
+  assert.equal(clicks, ['aria-mask-edited', 'aria-mask-user-edited', 'aria-mask-stream', 'aria-mask-new-turn'].includes(mode) ? 0 : 1, 'open the branch submenu only once, after verifying the source');
   if (succeeds) { assert.equal(opens, 1); assert.equal(win.location.pathname, '/c/new-branch'); }
   else {
     assert.equal(app.state.branchClickAttempted, false, 'opening a submenu is not a branch attempt');
-    assert.match(reason, mode.endsWith('-change') ? /source chat changed/iu : /submenu/iu);
+    assert.match(reason, mode.endsWith('-change') ? /could not re-verify the source chat/iu : /submenu/iu);
   }
   if (mode.includes('keyboard') || mode === 'remount') assert.equal(keys, 1);
+  if (mode.includes('mask')) {
+    assert.equal(turn.querySelector('[data-message-author-role]').hasAttribute(mode === 'inert-mask' ? 'inert' : 'aria-hidden'), true,
+      'do not remove native accessibility attributes from the page');
+    if (!succeeds) assert.match(reason, new RegExp(`Details \\(v${toolkit.VERSION.replaceAll('.', '\\.')}\\):`));
+  }
 });

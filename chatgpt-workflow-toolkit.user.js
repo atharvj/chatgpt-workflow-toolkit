@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.18
+// @version      1.10.19
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.18';
+  const VERSION = '1.10.19';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -709,11 +709,11 @@
     return turns[turns.length - 1] || fallback;
   }
 
-  function hasActiveGeneration(doc) {
+  function hasActiveGeneration(doc, accessibilitySnapshot = null) {
     if (!doc) return false;
     const stopButton = [...doc.querySelectorAll(
       'button[data-testid="stop-button"], button[data-testid*="stop-generating"], button[aria-label^="Stop generating" i], button[aria-label^="Stop streaming" i]',
-    )].find(isProbablyVisible);
+    )].find((node) => isProbablyVisible(node, accessibilitySnapshot));
     if (stopButton) return true;
     const assistants = getAssistantTurns(doc);
     const latest = assistants[assistants.length - 1];
@@ -1117,6 +1117,20 @@
     );
   }
 
+  function accessibilityMaskHides(node, snapshot = null, includeInert = true) {
+    const before = snapshot?.get?.(node);
+    return node.getAttribute('aria-hidden') === 'true' && before?.ariaHidden !== false ||
+      includeInert && node.hasAttribute('inert') && before?.inert !== false;
+  }
+
+  function snapshotAccessibility(doc) {
+    const snapshot = new WeakMap();
+    for (const node of doc.querySelectorAll('*')) snapshot.set(node, {
+      ariaHidden: node.getAttribute('aria-hidden') === 'true', inert: node.hasAttribute('inert'),
+    });
+    return snapshot;
+  }
+
   function readableNodeText(root, options = {}) {
     if (!root) return '';
     const blockTags = new Set([
@@ -1127,7 +1141,7 @@
     const ignoredSelector = [
       `#${UI_ROOT_ID}`, `.${TURN_BUTTON_CLASS}`, '.cgs-turn-fallback-row',
       'button', 'input', 'textarea', 'select', 'option', 'script', 'style', 'svg', 'canvas', 'noscript',
-      '[hidden]', '[inert]', '[aria-hidden="true"]', '[data-state="closed"]',
+      '[hidden]', '[data-state="closed"]',
       '[class~="hidden"]', '[class~="invisible"]', '[class~="sr-only"]', '[class~="visually-hidden"]',
       '[data-testid*="turn-action"]', '[data-testid*="message-actions"]',
       '[data-testid*="feedback"]', '[data-cgs-injected]',
@@ -1161,7 +1175,7 @@
     const visit = (node) => {
       if (!node) return '';
       if (node.nodeType === 3) return String(node.nodeValue || '');
-      if (node.nodeType !== 1 || node.matches(ignoredSelector) || inlineStyleHidesContent(node.getAttribute('style')) ||
+      if (node.nodeType !== 1 || node.matches(ignoredSelector) || accessibilityMaskHides(node, options.accessibilitySnapshot) || inlineStyleHidesContent(node.getAttribute('style')) ||
         computedHidden(node)) return '';
       const tag = node.tagName;
       if (tag === 'BR') return '\n';
@@ -1206,15 +1220,15 @@
     return text.slice(0, ASSISTANT_CONTENT_MAX_LENGTH).trim();
   }
 
-  function assistantTurnFingerprint(turn) {
-    const text = normalizeText(extractAssistantContent(turn) || readableNodeText(turn));
+  function assistantTurnFingerprint(turn, options = {}) {
+    const text = normalizeText(extractAssistantContent(turn, options) || readableNodeText(turn, options));
     if (!text) return '';
     if (text.length <= TARGET_FINGERPRINT_MAX_LENGTH - 20) return `${text.length}:${text}`;
     const edgeLength = Math.floor((TARGET_FINGERPRINT_MAX_LENGTH - 30) / 2);
     return `${text.length}:${text.slice(0, edgeLength)}\u241f${text.slice(-edgeLength)}`;
   }
 
-  function conversationContextFingerprint(root, throughTurn = null) {
+  function conversationContextFingerprint(root, throughTurn = null, options = {}) {
     const turns = getTurns(root);
     const lastIndex = throughTurn ? turns.indexOf(throughTurn) : turns.length - 1;
     if (lastIndex < 0) return '';
@@ -1232,7 +1246,7 @@
     };
     for (const turn of turns.slice(0, lastIndex + 1)) {
       const role = roleOfTurn(turn);
-      const content = role === 'assistant' ? extractAssistantContent(turn) : readableNodeText(turn);
+      const content = role === 'assistant' ? extractAssistantContent(turn, options) : readableNodeText(turn, options);
       update(`${role}\u241e${normalizeText(content)}\u241f`);
     }
     return `${lastIndex + 1}:${length}:${hashA.toString(16).padStart(8, '0')}:${hashB.toString(16).padStart(8, '0')}`;
@@ -1550,10 +1564,11 @@
     ].filter(Boolean).join(' '));
   }
 
-  function isProbablyVisible(element) {
-    if (!element || !element.isConnected || element.hidden || element.getAttribute('aria-hidden') === 'true') return false;
-    const hiddenParent = element.closest && element.closest('[hidden], [aria-hidden="true"]');
-    if (hiddenParent) return false;
+  function isProbablyVisible(element, accessibilitySnapshot = null) {
+    if (!element || !element.isConnected) return false;
+    for (let node = element; node; node = node.parentElement) {
+      if (node.hidden || accessibilityMaskHides(node, accessibilitySnapshot, false)) return false;
+    }
     const inlineStyle = element.style;
     if (inlineStyle && (inlineStyle.display === 'none' || inlineStyle.visibility === 'hidden')) return false;
     try {
@@ -2303,12 +2318,29 @@
     }
   }
 
-  function branchTargetIsStillLatest(doc, turn, expectedTargetFingerprint = '', expectedContextFingerprint = '') {
-    if (!turn || !turn.isConnected || hasActiveGeneration(doc)) return false;
+  function branchTargetIsStillLatest(doc, turn, expectedTargetFingerprint = '', expectedContextFingerprint = '', readOptions = {}) {
+    if (!turn || !turn.isConnected || hasActiveGeneration(doc, readOptions.accessibilitySnapshot)) return false;
     const turns = getTurns(doc);
     if (!turns.length || turns[turns.length - 1] !== turn || getLatestCompletedAssistantTurn(doc) !== turn) return false;
-    if (expectedTargetFingerprint && assistantTurnFingerprint(turn) !== expectedTargetFingerprint) return false;
-    return !expectedContextFingerprint || conversationContextFingerprint(doc, turn) === expectedContextFingerprint;
+    if (expectedTargetFingerprint && assistantTurnFingerprint(turn, readOptions) !== expectedTargetFingerprint) return false;
+    return !expectedContextFingerprint || conversationContextFingerprint(doc, turn, readOptions) === expectedContextFingerprint;
+  }
+
+  function mountedResponseMenuRoots(doc) {
+    return [...doc.querySelectorAll(
+      '[data-radix-popper-content-wrapper], [data-radix-menu-content], [data-slot="dropdown-menu-content"], [role="menu"]',
+    )].filter((root) => isMountedAndNotHidden(root));
+  }
+
+  async function dismissOpenBranchMenu(doc, win) {
+    const isOpen = () => mountedResponseMenuRoots(doc).some((root) =>
+      branchLeafControls(root).length || branchSubmenuTriggers(root).length);
+    if (!isOpen()) return true;
+    try { doc.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); }
+    catch (_error) { return false; }
+    return Boolean(await waitForCondition(() => !isOpen(), {
+      root: doc.documentElement, win, timeout: 1_000, attributes: true,
+    }));
   }
 
   async function clickNativeBranch(
@@ -2323,6 +2355,7 @@
   ) {
     const discoveryTimeout = clampInteger(actionTimeout, 6_000, 100, 20_000);
     const locator = getTurnLocator(turn, doc);
+    const readOptions = {};
     const stillExpected = () => !expectedConversation || conversationIdentity(win.location.href) === expectedConversation;
     const resolveTarget = (verifyFingerprints = false) => {
       if (!stillExpected()) return null;
@@ -2332,11 +2365,28 @@
         candidate,
         verifyFingerprints ? expectedTargetFingerprint : '',
         verifyFingerprints ? expectedContextFingerprint : '',
+        readOptions,
       )) || null;
     };
     const targetStillExpected = () => Boolean(resolveTarget(true));
+    const submenuVerificationFailure = () => {
+      const candidate = getLatestCompletedAssistantTurn(doc);
+      const detail = !stillExpected() ? 'conversation changed'
+        : hasActiveGeneration(doc, readOptions.accessibilitySnapshot) ? 'generation active'
+        : !candidate || getTurns(doc).at(-1) !== candidate ? 'latest response unavailable'
+        : expectedTargetFingerprint && assistantTurnFingerprint(candidate, readOptions) !== expectedTargetFingerprint ? 'response display differs'
+        : 'displayed history differs';
+      return { ok: false, attempted: false,
+        reason: `Workflow Toolkit could not re-verify the source chat before opening the branch submenu. ChatGPT may have re-rendered the displayed messages. Nothing was sent. Details (v${VERSION}): ${detail}.` };
+    };
     if (!stillExpected()) return { ok: false, attempted: false, reason: 'The source conversation changed before branching.' };
     if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+    // Native menus can add aria-hidden/inert to background messages. Preserve
+    // their pre-menu accessibility state ONLY for this operation's comparisons.
+    // Previously hidden content and new/replaced nodes keep normal filtering;
+    // actual text edits, generation, new turns and route changes still fail.
+    // No attributes on the live page are removed or changed here.
+    readOptions.accessibilitySnapshot = snapshotAccessibility(doc);
     let lastRevealedTurn = null;
     let lastRevealAt = 0;
     const revealActions = (force = false) => {
@@ -2382,26 +2432,9 @@
       }
     }
 
-    const mountedMenuRoots = () => [...doc.querySelectorAll(
-      '[data-radix-popper-content-wrapper], [data-radix-menu-content], [data-slot="dropdown-menu-content"], [role="menu"]',
-    )].filter((root) => isMountedAndNotHidden(root));
-    const openMenuBranchActions = () => uniqueElements(mountedMenuRoots()
-      .flatMap((root) => [...branchLeafControls(root), ...branchSubmenuTriggers(root)]));
-    if (openMenuBranchActions().length) {
-      try {
-        doc.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-      } catch (_error) {
-        // The visibility check below still fails closed.
-      }
-      const closed = await waitForCondition(() => openMenuBranchActions().length === 0, {
-        root: doc.documentElement,
-        win,
-        timeout: 1_000,
-        attributes: true,
-      });
-      if (!closed) return { ok: false, attempted: false, unavailable: true, reason: 'ChatGPT’s open response menu could not be reused.' };
-      if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
-    }
+    const mountedMenuRoots = () => mountedResponseMenuRoots(doc);
+    if (!await dismissOpenBranchMenu(doc, win)) return { ok: false, attempted: false, unavailable: true, reason: 'ChatGPT’s open response menu could not be reused.' };
+    if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
     const menuRootsBeforeOpen = new Set(mountedMenuRoots());
 
     let moreButton = findMoreButton(liveTurn, actionScopes, turnMessageIds(liveTurn));
@@ -2519,7 +2552,7 @@
     let branchAction = menuStep.control;
     let branchRoots = matchingMenuRoots;
     if (menuStep.kind === 'submenu') {
-      if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before opening the branch submenu. Nothing was sent.' };
+      if (!targetStillExpected()) return submenuVerificationFailure();
       const rootsBeforeSubmenu = new Set(mountedMenuRoots());
       const resolveSubmenuTrigger = () => {
         const triggers = uniqueElements((matchingMenuRoots() || []).flatMap(branchSubmenuTriggers));
@@ -2556,7 +2589,7 @@
       catch (_error) { return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not open the “Open new branch” submenu.' }; }
       await waitForCondition(submenuIsOpen, { root: doc.documentElement, win, timeout: 300, attributes: true, pollInterval: 75 });
       if (!submenuIsOpen()) {
-        if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before opening the branch submenu. Nothing was sent.' };
+        if (!targetStillExpected()) return submenuVerificationFailure();
         const trigger = resolveSubmenuTrigger();
         if (!trigger) return { ok: false, attempted: false, unavailable: true, reason: 'The branch submenu trigger changed before it could be opened.' };
         try {
@@ -4659,6 +4692,13 @@
         const navigationCapture = captureBranchNavigation(doc, win, pageWindow, job.sourceUrl);
         try {
           if (!state.branchClickAttempted) {
+            // A retry can start with the failed attempt's menu still open and
+            // its background accessibility mask applied. Let the native menu
+            // close before taking a fresh source fingerprint.
+            if (!await dismissOpenBranchMenu(doc, win)) {
+              showRecovery(job, 'ChatGPT’s previous branch menu could not be closed. Close it and try again. Nothing was sent.');
+              return false;
+            }
             const turn = await waitForCondition(() => {
               if (conversationIdentity(win.location.href) !== job.sourceConversation) return null;
               if (hasActiveGeneration(doc)) return null;
