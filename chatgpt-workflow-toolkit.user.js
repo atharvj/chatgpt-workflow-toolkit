@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.16
+// @version      1.10.17
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.16';
+  const VERSION = '1.10.17';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -3110,7 +3110,7 @@
   function createReadingTools(doc, win, { root, getSettings, toast, scheduleDockPosition }) {
     const el = (selector) => root.querySelector(selector);
     const panel = el('#cgs-bookmarks-panel');
-    const state = { key: '', bookmarks: [], loading: false, loadError: '', listEpoch: 0, pending: null, back: null, restoreCancel: null, capture: null, focus: null, writes: Promise.resolve() };
+    const state = { key: '', bookmarks: [], loading: false, loadError: '', listEpoch: 0, pending: null, back: null, restoreCancel: null, capture: null, jumpCapture: null, focus: null, writes: Promise.resolve() };
     const keyForPage = () => {
       const id = conversationIdentity(win.location.href);
       return id && !isReadOnlyChatPage(win.location.href)
@@ -3153,7 +3153,7 @@
       if (key === state.key) return;
       state.restoreCancel?.();
       const epoch = ++state.listEpoch;
-      state.key = key; state.back = null; state.pending = null; state.capture = null;
+      state.key = key; state.back = null; state.pending = null; state.capture = null; state.jumpCapture = null;
       state.bookmarks = []; state.loading = Boolean(key); state.loadError = ''; panel.hidden = true;
       controls();
       let bookmarks = [], error = '';
@@ -3238,11 +3238,23 @@
       state.writes = task;
       return task;
     }
-    function remember(skipAtBottom = false) {
-      if (!state.key) return;
-      state.restoreCancel?.();
+    function scrollRange(scroller) {
+      const extent = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      // A bottom-anchored flex scroller has zero at the bottom and NEGATIVE
+      // offsets above it. Clamping Return to zero silently jumps back down.
+      const style = win.getComputedStyle(scroller);
+      return /^(?:inline-)?flex$/u.test(style.display) && style.flexDirection === 'column-reverse'
+        ? { minimum: -extent, maximum: 0 } : { minimum: 0, maximum: extent };
+    }
+    function boundedScrollTop(scroller, top) {
+      const range = scrollRange(scroller);
+      return Math.min(range.maximum, Math.max(range.minimum, top));
+    }
+    function readingPosition(skipAtBottom = false) {
+      const key = keyForPage();
+      if (!key) return null;
       const scroller = chatScrollContainer(doc, win);
-      if (skipAtBottom && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 32) return;
+      if (skipAtBottom && Math.abs(scrollRange(scroller).maximum - scroller.scrollTop) <= 32) return null;
       const viewportTop = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
       const viewportBottom = Math.min(win.innerHeight, viewportTop + (scroller.clientHeight || win.innerHeight));
       const turn = getTurns(doc).find((item) => {
@@ -3250,8 +3262,15 @@
         const rect = item.getBoundingClientRect();
         return rect.bottom > viewportTop + 8 && rect.top < viewportBottom && rect.height > 0;
       });
-      state.back = { key: state.key, node: turn, anchor: turn ? readingAnchor(turn) : null,
+      return { key, node: turn, anchor: turn ? readingAnchor(turn) : null,
         offset: turn ? turn.getBoundingClientRect().top - viewportTop : 0, top: scroller.scrollTop, scroller };
+    }
+    function remember(skipAtBottom = false, captured = undefined) {
+      if (!state.key) return;
+      state.restoreCancel?.();
+      const position = captured === undefined ? readingPosition(skipAtBottom) : captured;
+      if (!position || position.key !== state.key) return;
+      state.back = position;
       controls();
     }
     function instantScroll(scroller, top) {
@@ -3266,10 +3285,10 @@
         else scroller.style.removeProperty('scroll-behavior');
       }
     }
-    function jumpLatest() {
-      remember(true);
+    function jumpLatest(captured) {
+      remember(true, captured);
       const scroller = chatScrollContainer(doc, win);
-      instantScroll(scroller, scroller.scrollHeight);
+      instantScroll(scroller, scrollRange(scroller).maximum === 0 ? 0 : scroller.scrollHeight);
     }
     function jumpTo(bookmark) {
       const turn = locateReadingAnchor(doc, bookmark);
@@ -3282,7 +3301,7 @@
       remember();
       const scroller = chatScrollContainer(doc, win, turn);
       const top = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
-      instantScroll(scroller, Math.max(0, scroller.scrollTop + targetRect.top - top - 24));
+      instantScroll(scroller, boundedScrollTop(scroller, scroller.scrollTop + targetRect.top - top - 24));
       close();
       if (highlight?.approximate) toast('Opened the saved paragraph; the exact highlighted line could not be located.');
     }
@@ -3323,7 +3342,7 @@
         const rect = turn && scroller.contains(turn) && turn.getBoundingClientRect();
         const exact = Boolean(rect && rect.height > 0);
         const viewportTop = rootScroll ? 0 : scroller.getBoundingClientRect().top;
-        const wanted = Math.max(0, exact ? scroller.scrollTop + rect.top - viewportTop - saved.offset : saved.top);
+        const wanted = boundedScrollTop(scroller, exact ? scroller.scrollTop + rect.top - viewportTop - saved.offset : saved.top);
         // If the chat scroller disappeared and cannot be identified again,
         // don't substitute a non-scrolling document or an unrelated panel.
         const usable = scroller.isConnected && scroller.scrollHeight > scroller.clientHeight + 1;
@@ -3350,22 +3369,38 @@
       restore();
     }
     function capture(event) {
-      const button = event.target.closest && event.target.closest('[data-cgs-action="reading-add"]');
-      if (button) state.capture = { button, key: keyForPage(), bookmark: selectedBookmark(responseControlTurn(button)) };
+      const button = event.target.closest && event.target.closest('button, [role="button"]');
+      if (button?.matches('[data-cgs-action="reading-add"]')) {
+        state.capture = { button, key: keyForPage(), bookmark: selectedBookmark(responseControlTurn(button)) };
+      }
+      if (!button || event.button !== 0 || event.isPrimary === false || !isNativeReadingJump(button, doc)) {
+        state.jumpCapture = null; return;
+      }
+      // Native pointer handlers and browser focus can scroll BEFORE click.
+      // Capture once on pointerdown; its compatibility mousedown must not
+      // replace that point with the newly reached bottom. Commit only on click.
+      const previous = state.jumpCapture;
+      if (event.type === 'mousedown' && previous?.button === button && previous.type === 'pointerdown' &&
+        previous.key === keyForPage() && Date.now() - previous.at < 2_000) return;
+      state.jumpCapture = { button, key: keyForPage(), type: event.type, at: Date.now(), position: readingPosition(true) };
     }
     async function click(event) {
       const button = event.target.closest && event.target.closest('button, [role="button"]');
       if (!button) return;
       void syncRoute(); // Clears old-page state synchronously, before any action.
+      const pendingJump = state.jumpCapture;
+      state.jumpCapture = null;
+      const captured = pendingJump?.button === button && pendingJump.key === state.key && Date.now() - pendingJump.at < 2_000
+        ? pendingJump.position : undefined;
       const action = button.dataset.cgsAction || '';
       if (!action.startsWith('reading-')) {
         if (['ask-turn', 'ask-selection', 'toggle-settings'].includes(action) && !panel.hidden) close();
         if (state.key && isNativeReadingJump(button, doc)) {
-          if (!getSettings().instantScrollToBottom) { remember(true); return; }
+          if (!getSettings().instantScrollToBottom) { remember(true, captured); return; }
           // Replace the recognized control's animation, rather than starting a
           // competing scroll. Other controls keep their native handlers.
           event.preventDefault(); event.stopPropagation();
-          jumpLatest();
+          jumpLatest(captured);
         }
         return;
       }
@@ -3431,6 +3466,7 @@
     };
     doc.addEventListener('pointerdown', capture, true);
     doc.addEventListener('mousedown', capture, true);
+    doc.addEventListener('pointercancel', () => { state.jumpCapture = null; }, true);
     doc.addEventListener('click', click, true);
     doc.addEventListener('keydown', escape);
     win.addEventListener('popstate', syncRoute);

@@ -874,6 +874,74 @@ test('a later jump records the new reading position instead of keeping an obsole
   assert.equal(scroller.scrollTop, 1400);
 });
 
+for (const unloaded of [false, true]) test(`return supports negative scroll positions in a bottom-anchored chat: unloaded=${unloaded}`, async (t) => {
+  const { win, app, turns, scroller, click } = await setup(t);
+  scroller.style.display = 'flex'; scroller.style.flexDirection = 'column-reverse';
+  let top = -1800;
+  Object.defineProperty(scroller, 'scrollTop', {
+    configurable: true, get: () => top, set: (value) => { top = Math.max(-2500, Math.min(0, value)); },
+  });
+  turns[0].getBoundingClientRect = () => ({ top: -2000 - top, bottom: -1000 - top, height: 1000 });
+  click('native-latest'); assert.equal(top, 0);
+  assert.equal(app.state.readingTools.state.back.top, -1800);
+  click('native-latest'); // Already at the real bottom (zero), not +2500.
+  assert.equal(app.state.readingTools.state.back.top, -1800);
+  if (unloaded) turns[0].remove();
+  click('reading-back'); assert.equal(top, -1800);
+  await settle(win, () => !app.state.readingTools.state.restoreCancel);
+  assert.equal(app.state.readingTools.state.back, null);
+});
+
+for (const instant of [false, true]) test(`capture precedes a native pointer-down jump: instant=${instant}`, async (t) => {
+  const { doc, win, app, scroller, click } = await setup(t);
+  app.state.settings.instantScrollToBottom = instant;
+  const button = doc.querySelector('#native-latest');
+  button.addEventListener('pointerdown', () => { scroller.scrollTop = 2500; });
+  button.dispatchEvent(new win.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  button.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, button: 0 }));
+  button.click();
+  assert.equal(app.state.readingTools.state.back?.top, 200, 'save before native pointer handler/focus scroll');
+  click('reading-back'); assert.equal(scroller.scrollTop, 200);
+});
+
+test('pointer capture alone never commits a Return point or scrolls the chat', async (t) => {
+  const { doc, win, app, scroller, click } = await setup(t);
+  const button = doc.querySelector('#native-latest');
+  button.dispatchEvent(new win.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  assert.equal(app.state.readingTools.state.back, null);
+  assert.equal(scroller.scrollTop, 200);
+  button.dispatchEvent(new win.Event('pointercancel', { bubbles: true }));
+  scroller.scrollTop = 1200;
+  click('native-latest'); click('reading-back');
+  assert.equal(scroller.scrollTop, 1200, 'cancelled capture is discarded');
+});
+
+test('stale, secondary, and cross-chat pointer captures cannot restore an obsolete spot', async (t) => {
+  const { doc, win, app, scroller, click } = await setup(t);
+  const button = doc.querySelector('#native-latest');
+  button.dispatchEvent(new win.MouseEvent('pointerdown', { bubbles: true, button: 2 }));
+  assert.equal(app.state.readingTools.state.jumpCapture, null);
+  button.dispatchEvent(new win.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  app.state.readingTools.state.jumpCapture.at -= 3_000;
+  scroller.scrollTop = 1200;
+  click('native-latest'); click('reading-back');
+  assert.equal(scroller.scrollTop, 1200);
+  button.dispatchEvent(new win.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  win.history.pushState({}, '', '/c/another-chat');
+  scroller.scrollTop = 1800;
+  click('native-latest'); click('reading-back');
+  assert.equal(scroller.scrollTop, 1800);
+});
+
+test('mousedown-only browsers capture before native focus/jump without a pointer event', async (t) => {
+  const { doc, win, scroller, click } = await setup(t);
+  const button = doc.querySelector('#native-latest');
+  button.addEventListener('mousedown', () => { scroller.scrollTop = 2500; });
+  button.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, button: 0 }));
+  button.click(); click('reading-back');
+  assert.equal(scroller.scrollTop, 200);
+});
+
 test('window scrolling is supported when no nested scroll container is present', async (t) => {
   const { doc, turns, scroller, click } = await setup(t);
   scroller.style.overflowY = 'visible';
