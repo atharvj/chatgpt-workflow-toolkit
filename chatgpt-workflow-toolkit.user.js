@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.15
+// @version      1.10.16
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.15';
+  const VERSION = '1.10.16';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -109,10 +109,9 @@
     openMode: 'popup',
     hideStartWriting: true,
     hideShareHighlighted: true,
-    showTurnButtons: true,
+    darkMode: false,
     showSelectionButton: true,
     bookmarks: true,
-    returnToReading: true,
     instantScrollToBottom: true,
   });
 
@@ -126,6 +125,31 @@
       font-size: 14px;
       line-height: 1.4;
     }
+    #${UI_ROOT_ID}[data-cgs-theme="light"] {
+      color-scheme: light;
+      --text-primary: #111827;
+      --text-secondary: #586174;
+      --main-surface-primary: #ffffff;
+      --main-surface-secondary: #f0f2f5;
+    }
+    #${UI_ROOT_ID}[data-cgs-theme="dark"] {
+      color-scheme: dark;
+      --text-primary: #f3f4f6;
+      --text-secondary: #b6bfce;
+      --main-surface-primary: #171c26;
+      --main-surface-secondary: #293140;
+    }
+    #${UI_ROOT_ID} #cgs-toast,
+    #${UI_ROOT_ID} #cgs-selection-tools,
+    #${UI_ROOT_ID} #cgs-selection-tools button {
+      color: var(--text-primary);
+      background: var(--main-surface-secondary);
+    }
+    #${UI_ROOT_ID} #cgs-selection-tools button:hover,
+    #${UI_ROOT_ID} #cgs-selection-tools button:focus-visible { background: #087f5b; color: #fff; }
+    #${UI_ROOT_ID} .cgs-link-button, #${UI_ROOT_ID} .cgs-help-link { color: #087f5b; }
+    #${UI_ROOT_ID}[data-cgs-theme="dark"] .cgs-link-button,
+    #${UI_ROOT_ID}[data-cgs-theme="dark"] .cgs-help-link { color: #6ee7b7; }
     #${UI_ROOT_ID} [hidden] { display: none !important; }
     .${HIDDEN_START_WRITING_CLASS} { display: none !important; }
     .${TURN_BUTTON_CLASS}, .cgs-bookmark-action {
@@ -560,12 +584,11 @@
       openMode: source.openMode === 'tab' ? 'tab' : 'popup',
       hideStartWriting: source.hideStartWriting !== false,
       hideShareHighlighted: source.hideShareHighlighted !== false,
-      showTurnButtons: source.showTurnButtons !== false,
+      darkMode: source.darkMode === true,
       // Older versions used one switch for both response and selection buttons.
       showSelectionButton: typeof source.showSelectionButton === 'boolean'
         ? source.showSelectionButton : source.showTurnButtons !== false,
       bookmarks: source.bookmarks !== false,
-      returnToReading: source.returnToReading !== false,
       instantScrollToBottom: source.instantScrollToBottom !== false,
     };
   }
@@ -2715,26 +2738,26 @@
             <div><h2 id="cgs-settings-title">ChatGPT Workflow Toolkit</h2><p>Bookmarks, reading shortcuts, and separate contextual chats</p></div>
             <button class="cgs-icon-button" type="button" data-cgs-action="close-settings" aria-label="Close settings">×</button>
           </div>
-          <label class="cgs-setting">
+          <div class="cgs-setting">
             <span><strong>Open side questions in</strong><small>A side window keeps the original instructions visible. Small screens use a tab.</small></span>
             <select data-cgs-setting="openMode" aria-label="Open side questions in"><option value="popup">Side window</option><option value="tab">New tab</option></select>
-          </label>
-          <label class="cgs-setting">
-            <span><strong>Show “Ask in new chat” under answers</strong><small>Add a button below each ChatGPT answer.</small></span>
-            <input type="checkbox" data-cgs-setting="showTurnButtons" aria-label="Show Ask in new chat buttons">
-          </label>
-          <label class="cgs-setting">
+          </div>
+          <div class="cgs-setting">
+            <span><strong>Dark mode for toolkit panels</strong><small>Off uses light mode. Only the toolkit’s panels and popups change; ChatGPT keeps its own theme.</small></span>
+            <input type="checkbox" data-cgs-setting="darkMode" aria-label="Dark mode for toolkit panels">
+          </div>
+          <div class="cgs-setting">
             <span><strong>Show “Ask in new chat” when highlighting</strong><small>Add our button beside selected text. Does not hide ChatGPT’s own Ask button.</small></span>
             <input type="checkbox" data-cgs-setting="showSelectionButton" aria-label="Show Ask in new chat when highlighting">
-          </label>
-          <label class="cgs-setting">
+          </div>
+          <div class="cgs-setting">
             <span><strong>Remove “Start writing”</strong><small>Clears that exact placeholder/control without touching message content.</small></span>
             <input type="checkbox" data-cgs-setting="hideStartWriting" aria-label="Remove Start writing">
-          </label>
-          <label class="cgs-setting">
+          </div>
+          <div class="cgs-setting">
             <span><strong>Hide “Share highlighted”</strong><small>Turn off to restore ChatGPT’s selection-sharing button.</small></span>
             <input type="checkbox" data-cgs-setting="hideShareHighlighted" aria-label="Hide Share highlighted">
-          </label>
+          </div>
           <button class="cgs-link-button" type="button" data-cgs-action="cookie-preferences" hidden>Cookie preferences</button>
           <div class="cgs-version">v${VERSION}</div>
         </section>
@@ -2790,10 +2813,9 @@
 
     for (const [key, title, description] of [
       ['bookmarks', 'Bookmarks', 'Save labeled answers or highlighted passages in this browser.'],
-      ['returnToReading', 'Return to where I was', 'Remember your spot when jumping to the latest message.'],
-      ['instantScrollToBottom', 'Jump to bottom instantly', 'Turn off for ChatGPT’s normal scrolling animation. Your place is still saved when Return to where I was is on.'],
+      ['instantScrollToBottom', 'Jump to bottom instantly', 'Turn off for ChatGPT’s normal scrolling animation. Your reading position is still saved.'],
     ]) {
-      const label = doc.createElement('label');
+      const label = doc.createElement('div');
       label.className = 'cgs-setting';
       const span = doc.createElement('span');
       const strong = doc.createElement('strong'); strong.textContent = title;
@@ -3066,18 +3088,29 @@
     return null;
   }
 
-  function chatScrollContainer(doc, win, turn = getTurns(doc)[0]) {
-    for (let node = turn && turn.parentElement; node && node !== doc.body; node = node.parentElement) {
-      const style = win.getComputedStyle(node);
-      if (/(auto|scroll|overlay)/u.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1) return node;
+  function chatScrollContainer(doc, win, turn = null) {
+    // The first DOM turn can belong to a hidden transcript. Find the scroll
+    // container owning the most mounted chat turns, preferring the inner one
+    // on ties. A known target narrows this to its own ancestor chain.
+    const candidates = new Map();
+    for (const item of turn ? [turn] : getTurns(doc)) {
+      if (!item.isConnected || item.closest(`#${UI_ROOT_ID}, nav, aside, header`) || !isMountedAndNotHidden(item)) continue;
+      for (let node = item.parentElement; node && node !== doc.body; node = node.parentElement) {
+        const style = win.getComputedStyle(node);
+        if (/(auto|scroll|overlay)/u.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1) {
+          candidates.set(node, (candidates.get(node) || 0) + 1);
+          if (turn) return node;
+        }
+      }
     }
+    if (candidates.size) return [...candidates].sort((a, b) => b[1] - a[1])[0][0];
     return doc.scrollingElement || doc.documentElement;
   }
 
   function createReadingTools(doc, win, { root, getSettings, toast, scheduleDockPosition }) {
     const el = (selector) => root.querySelector(selector);
     const panel = el('#cgs-bookmarks-panel');
-    const state = { key: '', bookmarks: [], loading: false, loadError: '', listEpoch: 0, pending: null, back: null, capture: null, focus: null, writes: Promise.resolve() };
+    const state = { key: '', bookmarks: [], loading: false, loadError: '', listEpoch: 0, pending: null, back: null, restoreCancel: null, capture: null, focus: null, writes: Promise.resolve() };
     const keyForPage = () => {
       const id = conversationIdentity(win.location.href);
       return id && !isReadOnlyChatPage(win.location.href)
@@ -3094,7 +3127,7 @@
     function controls() {
       const settings = getSettings();
       el('[data-cgs-action="reading-bookmarks"]').hidden = !settings.bookmarks || !state.key;
-      el('[data-cgs-action="reading-back"]').hidden = !settings.returnToReading || !state.back || !state.key;
+      el('[data-cgs-action="reading-back"]').hidden = !state.back || !state.key;
       scheduleDockPosition();
     }
     function render() {
@@ -3118,6 +3151,7 @@
     async function syncRoute() {
       const key = keyForPage();
       if (key === state.key) return;
+      state.restoreCancel?.();
       const epoch = ++state.listEpoch;
       state.key = key; state.back = null; state.pending = null; state.capture = null;
       state.bookmarks = []; state.loading = Boolean(key); state.loadError = ''; panel.hidden = true;
@@ -3205,16 +3239,18 @@
       return task;
     }
     function remember(skipAtBottom = false) {
-      if (!getSettings().returnToReading || !state.key) return;
+      if (!state.key) return;
+      state.restoreCancel?.();
       const scroller = chatScrollContainer(doc, win);
       if (skipAtBottom && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 32) return;
       const viewportTop = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
       const viewportBottom = Math.min(win.innerHeight, viewportTop + (scroller.clientHeight || win.innerHeight));
       const turn = getTurns(doc).find((item) => {
+        if (!scroller.contains(item) || !isMountedAndNotHidden(item)) return false;
         const rect = item.getBoundingClientRect();
         return rect.bottom > viewportTop + 8 && rect.top < viewportBottom && rect.height > 0;
       });
-      state.back = { key: state.key, anchor: turn ? readingAnchor(turn) : null,
+      state.back = { key: state.key, node: turn, anchor: turn ? readingAnchor(turn) : null,
         offset: turn ? turn.getBoundingClientRect().top - viewportTop : 0, top: scroller.scrollTop, scroller };
       controls();
     }
@@ -3253,15 +3289,65 @@
     function goBack() {
       const saved = state.back;
       if (!saved || saved.key !== keyForPage()) return;
-      const turn = saved.anchor && locateReadingAnchor(doc, saved.anchor);
-      if (saved.anchor && !turn) { toast('Your earlier spot is not loaded. Scroll to load older messages, then try Return again.'); return; }
-      const scroller = chatScrollContainer(doc, win, turn || undefined);
-      if (turn) {
-        const top = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
-        instantScroll(scroller, Math.max(0, scroller.scrollTop + turn.getBoundingClientRect().top - top - saved.offset));
-      } else if (scroller === saved.scroller) instantScroll(scroller, saved.top);
-      else { toast('The conversation layout changed. Please return manually.'); return; }
-      state.back = null; controls();
+      state.restoreCancel?.();
+      let timer = null, cancelled = false, stable = 0;
+      const started = Date.now();
+      const cancel = () => {
+        cancelled = true;
+        if (timer !== null) win.clearTimeout(timer);
+        for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) doc.removeEventListener(type, cancel, true);
+        if (state.restoreCancel === cancel) state.restoreCancel = null;
+      };
+      state.restoreCancel = cancel;
+      // Never fight a new scroll, click, keypress, reading jump, or chat switch.
+      for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) doc.addEventListener(type, cancel, { capture: true, passive: true });
+      const savedTurn = () => {
+        // Duplicate prompt wrappers can make persistent ID lookup ambiguous.
+        // A still-mounted, identity-checked node is unambiguous for this
+        // temporary reading point (not for persisted bookmarks).
+        if (saved.node?.isConnected && saved.anchor) {
+          const current = readingAnchor(saved.node);
+          if (current.role === saved.anchor.role && (saved.anchor.messageId
+            ? current.messageId === saved.anchor.messageId : current.fingerprint === saved.anchor.fingerprint)) return saved.node;
+        }
+        return saved.anchor && locateReadingAnchor(doc, saved.anchor);
+      };
+      const restore = () => {
+        if (cancelled || keyForPage() !== saved.key || state.back && state.back !== saved) { cancel(); return; }
+        const candidate = savedTurn();
+        const turn = candidate && isMountedAndNotHidden(candidate) ? candidate : null;
+        const savedScrollerIsCurrent = saved.scroller.isConnected && isMountedAndNotHidden(saved.scroller) &&
+          (!turn || saved.scroller.contains(turn));
+        const scroller = savedScrollerIsCurrent ? saved.scroller : chatScrollContainer(doc, win, turn);
+        const rootScroll = scroller === doc.scrollingElement || scroller === doc.documentElement;
+        const rect = turn && scroller.contains(turn) && turn.getBoundingClientRect();
+        const exact = Boolean(rect && rect.height > 0);
+        const viewportTop = rootScroll ? 0 : scroller.getBoundingClientRect().top;
+        const wanted = Math.max(0, exact ? scroller.scrollTop + rect.top - viewportTop - saved.offset : saved.top);
+        // If the chat scroller disappeared and cannot be identified again,
+        // don't substitute a non-scrolling document or an unrelated panel.
+        const usable = scroller.isConnected && scroller.scrollHeight > scroller.clientHeight + 1;
+        if (usable && Math.abs(scroller.scrollTop - wanted) > 1) instantScroll(scroller, wanted);
+        const reached = usable && Math.abs(scroller.scrollTop - wanted) <= 2;
+        stable = reached ? stable + 1 : 0;
+        if (exact && reached) { state.back = null; controls(); }
+        const elapsed = Date.now() - started;
+        if (exact && stable >= 2 && elapsed >= 400 || elapsed >= 1200) {
+          cancel();
+          if (reached) {
+            state.back = null; controls();
+            if (!exact) toast('Returned to the saved scroll position. The original message is not currently rendered.');
+          } else {
+            state.back = saved; controls();
+            toast('The saved position could not be restored yet. Your spot is still saved; try Return again.');
+          }
+          return;
+        }
+        // Returning by pixels lets virtualized history mount; then align its
+        // message again to compensate for updated heights. Bounded, not idle polling.
+        timer = win.setTimeout(restore, 80);
+      };
+      restore();
     }
     function capture(event) {
       const button = event.target.closest && event.target.closest('[data-cgs-action="reading-add"]');
@@ -3274,7 +3360,7 @@
       const action = button.dataset.cgsAction || '';
       if (!action.startsWith('reading-')) {
         if (['ask-turn', 'ask-selection', 'toggle-settings'].includes(action) && !panel.hidden) close();
-        if (getSettings().returnToReading && state.key && isNativeReadingJump(button, doc)) {
+        if (state.key && isNativeReadingJump(button, doc)) {
           if (!getSettings().instantScrollToBottom) { remember(true); return; }
           // Replace the recognized control's animation, rather than starting a
           // competing scroll. Other controls keep their native handlers.
@@ -3286,7 +3372,7 @@
       if (!root.contains(button) && !button.matches('.cgs-bookmark-action[data-cgs-injected="true"]')) return;
       event.preventDefault(); event.stopPropagation();
       if (action === 'reading-close') return close();
-      if (action === 'reading-back' && getSettings().returnToReading) return goBack();
+      if (action === 'reading-back') return goBack();
       if (!getSettings().bookmarks || !state.key) return;
       if (action === 'reading-bookmarks') return panel.hidden ? open(null, button) : close();
       if (action === 'reading-add') {
@@ -3335,7 +3421,6 @@
           if (row && !row.children.length) row.remove();
         }
       }
-      if (!getSettings().returnToReading) state.back = null;
       controls(); process(doc.body);
     }
     const escape = (event) => {
@@ -3419,6 +3504,7 @@
 
     function syncSettingsUI() {
       if (!state.root) return;
+      state.root.dataset.cgsTheme = state.settings.darkMode ? 'dark' : 'light';
       for (const input of state.root.querySelectorAll('[data-cgs-setting]')) {
         const key = input.dataset.cgsSetting;
         if (input.type === 'checkbox') input.checked = Boolean(state.settings[key]);
@@ -3451,7 +3537,7 @@
         state.scanScheduled = false;
         const roots = [...state.pendingRoots];
         state.pendingRoots.clear();
-        const decorationContext = (state.settings.showTurnButtons || state.settings.bookmarks) && !isReadOnlyChatPage(win.location.href)
+        const decorationContext = !isReadOnlyChatPage(win.location.href)
           ? { streamingTurn: inferredStreamingTurn(doc) }
           : null;
         for (const scanRoot of roots) processRoot(scanRoot, decorationContext);
@@ -3468,7 +3554,7 @@
       if (state.readingTools) state.readingTools.process(root, context);
       if (state.settings.hideShareHighlighted) cleanShareHighlighted(root);
       if (state.settings.hideStartWriting) cleanStartWriting(root);
-      if (state.settings.showTurnButtons && !isReadOnlyChatPage(win.location.href)) {
+      if (!isReadOnlyChatPage(win.location.href)) {
         for (const turn of potentialTurnsFromRoot(root)) decorateTurn(doc, turn, context);
       }
     }
@@ -4770,19 +4856,15 @@
 
     async function handleSettingChange(target) {
       const key = target.dataset.cgsSetting;
-      if (!key) return;
+      if (!key || !Object.prototype.hasOwnProperty.call(DEFAULT_SETTINGS, key)) return;
       const next = { ...state.settings };
       next[key] = target.type === 'checkbox' ? target.checked : target.value;
       state.settings = sanitizeSettings(next);
       syncSettingsUI();
-      if (key === 'bookmarks' || key === 'returnToReading') state.readingTools.settingsChanged();
+      if (key === 'bookmarks') state.readingTools.settingsChanged();
       if (key === 'hideStartWriting') {
         if (state.settings.hideStartWriting) scheduleScan(doc.body);
         else restoreStartWriting(doc);
-      }
-      if (key === 'showTurnButtons') {
-        if (state.settings.showTurnButtons) scheduleScan(doc.body);
-        else removeTurnButtons(doc);
       }
       if (key === 'showSelectionButton' || key === 'bookmarks') {
         // Discard any stale pill so its next click uses the updated preference.

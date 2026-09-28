@@ -98,7 +98,7 @@ test('a fresh page restores saved preferences and reflects them in the settings 
   const { set, values } = await setup(t);
   await set('hideShareHighlighted', false);
   await set('hideStartWriting', false);
-  await set('showTurnButtons', false);
+  await set('darkMode', true);
   await set('showSelectionButton', true);
   const saved = structuredClone(values.get('chatgptSidecar.settings.v1'));
   values.set('chatgptSidecar.settings.v1', { ...saved, preserveMathFormatting: false, showMathNotices: true });
@@ -117,17 +117,16 @@ test('a fresh page restores saved preferences and reflects them in the settings 
   assert.notEqual(fresh.window.getComputedStyle(fresh.window.document.querySelector('#start')).display, 'none');
 });
 
-test('response and highlight buttons are independent while math copying stays enabled', async (t) => {
+test('response buttons stay enabled independently of highlighting and math copying', async (t) => {
   const { doc, app, set, highlight } = await setup(t);
-  await set('showTurnButtons', false);
-  assert.equal(doc.querySelector('.cgs-turn-action'), null);
+  assert.equal(doc.querySelector('[data-cgs-setting="showTurnButtons"]'), null);
+  assert.ok(doc.querySelector('.cgs-turn-action'));
   const pill = await highlight();
   assert.equal(pill.hidden, false);
   pill.click();
   const preview = doc.querySelector('#cgs-selected-context');
   assert.equal(preview.textContent, String.raw`\(x^2\)`);
   doc.querySelector('[data-cgs-action="cancel-question"]').click();
-  await set('showTurnButtons', true);
   app.processRoot(doc.body);
   await set('showSelectionButton', false);
   assert.ok(doc.querySelector('.cgs-turn-action'));
@@ -135,4 +134,50 @@ test('response and highlight buttons are independent while math copying stays en
   await set('showSelectionButton', true);
   (await highlight()).click();
   assert.equal(preview.textContent, String.raw`\(x^2\)`);
+});
+
+test('only the checkbox toggles settings; descriptions and row whitespace do not', async (t) => {
+  const { doc, values } = await setup(t);
+  for (const input of doc.querySelectorAll('#cgs-settings input[type="checkbox"]')) {
+    const row = input.closest('.cgs-setting');
+    const before = input.checked;
+    assert.equal(row.tagName, 'DIV');
+    row.click(); row.querySelector('strong').click(); row.querySelector('small').click();
+    assert.equal(input.checked, before);
+    input.click();
+    assert.equal(input.checked, !before);
+    assert.ok(input.getAttribute('aria-label'), 'checkbox remains accessible to keyboard/screen readers');
+    input.click();
+    assert.equal(input.checked, before);
+  }
+  assert.equal(doc.querySelector('[data-cgs-setting="returnToReading"]'), null);
+  assert.equal(doc.querySelector('[data-cgs-setting="showTurnButtons"]'), null);
+  assert.equal(values.get('chatgptSidecar.settings.v1')?.returnToReading, undefined);
+});
+
+test('panel light/dark mode is immediate, scoped to toolkit UI, and persists on reload', async (t) => {
+  const { dom, doc, app, values, set } = await setup(t);
+  const root = doc.querySelector('#cgs-root');
+  const pageStyle = doc.documentElement.getAttribute('style');
+  const pageClass = doc.documentElement.className;
+  assert.equal(root.dataset.cgsTheme, 'light');
+  assert.equal(dom.window.getComputedStyle(root).getPropertyValue('--main-surface-primary').trim(), '#ffffff');
+  await set('darkMode', true);
+  assert.equal(root.dataset.cgsTheme, 'dark');
+  assert.equal(dom.window.getComputedStyle(root).colorScheme, 'dark');
+  assert.equal(dom.window.getComputedStyle(root).getPropertyValue('--main-surface-primary').trim(), '#171c26');
+  for (const selector of ['#cgs-settings', '#cgs-bookmarks-panel', '#cgs-dialog-backdrop .cgs-dialog', '#cgs-recovery-backdrop .cgs-dialog', '#cgs-toast']) {
+    assert.ok(root.contains(doc.querySelector(selector)), selector);
+  }
+  assert.equal(doc.documentElement.getAttribute('style'), pageStyle);
+  assert.equal(doc.documentElement.className, pageClass);
+  assert.equal(doc.querySelector('.cgs-turn-action').closest('#cgs-root'), null);
+  const fresh = new JSDOM('<!doctype html><body></body>', { url: 'https://chatgpt.com/c/theme-test', pretendToBeVisual: true });
+  const next = await toolkit.install(fresh.window.document, fresh.window);
+  t.after(() => { next.state.observer.disconnect(); fresh.window.close(); });
+  assert.equal(fresh.window.document.querySelector('#cgs-root').dataset.cgsTheme, 'dark');
+  await set('darkMode', false);
+  assert.equal(root.dataset.cgsTheme, 'light');
+  assert.equal(values.get('chatgptSidecar.settings.v1').darkMode, false);
+  assert.equal(app.state.settings.darkMode, false);
 });

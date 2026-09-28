@@ -328,7 +328,7 @@ test('dock has no duplicate down arrow after install, native navigation, or sett
   };
   verifyDock();
   click('native-latest'); verifyDock(); click('reading-back');
-  const toggle = doc.querySelector('[data-cgs-setting="returnToReading"]');
+  const toggle = doc.querySelector('[data-cgs-setting="instantScrollToBottom"]');
   for (const enabled of [false, true]) {
     toggle.checked = enabled; toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
     app.processRoot(doc.body); verifyDock();
@@ -348,16 +348,17 @@ test('recognized native jump is replaced with instant jump; unrelated controls d
   assert.equal(scroller.scrollTop, 200);
 });
 
-test('Bookmark shares the native footer and survives independent Ask toggling', async (t) => {
+test('Bookmark shares the native footer and toggles without removing Ask', async (t) => {
   const { doc, win, app, turns } = await setup(t);
   for (const turn of turns) {
     const button = turn.querySelector('.cgs-bookmark-action');
     assert.equal(button.parentElement, turn.querySelector('[data-testid="copy-turn-action-button"]').parentElement);
     assert.notEqual(button.parentElement, turn);
   }
-  const toggle = doc.querySelector('[data-cgs-setting="showTurnButtons"]');
+  const toggle = doc.querySelector('[data-cgs-setting="bookmarks"]');
   toggle.checked = false; toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
-  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 0);
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
   toggle.checked = true; toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
   app.processRoot(doc.body);
   assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
@@ -583,9 +584,8 @@ test('down icons inside answers and submit/menu controls do not save reading pos
   button.innerHTML = '<svg><use href="#arrow-down"></use></svg>'; button.click();
   assert.equal(app.state.readingTools.state.back, null);
   button.setAttribute('aria-label', 'Scroll to bottom');
-  const toggle = doc.querySelector('[data-cgs-setting="returnToReading"]'); toggle.checked = false;
-  toggle.dispatchEvent(new win.Event('change', { bubbles: true })); button.click();
-  assert.equal(app.state.readingTools.state.back, null);
+  button.click();
+  assert.ok(app.state.readingTools.state.back);
 });
 
 for (const [container, target] of [['main', 'button'], ['main', 'path'], ['main', '.e33vkq_waveDot'], ['form', 'button'], ['body', 'button']]) {
@@ -642,17 +642,16 @@ test('reported native arrow pattern does not claim quoted controls, generic dots
   }
 });
 
-test('reported native arrow remains native with Return to where I was disabled', async (t) => {
-  const { doc, win, app } = await setup(t);
-  const toggle = doc.querySelector('[data-cgs-setting="returnToReading"]'); toggle.checked = false;
-  toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
+test('old disabled Return preference cannot disable the always-on native arrow capture', async (t) => {
+  const { doc, app } = await setup(t, new Map([['chatgptSidecar.settings.v1', { returnToReading: false }]]));
+  assert.equal(doc.querySelector('[data-cgs-setting="returnToReading"]'), null);
   const template = doc.createElement('template'); template.innerHTML = nativeArrowHTML;
   const button = template.content.firstElementChild; doc.querySelector('main').append(button);
   let calls = 0;
   button.addEventListener('click', (event) => { assert.equal(event.defaultPrevented, false); calls++; });
   button.click();
-  assert.equal(calls, 1);
-  assert.equal(app.state.readingTools.state.back, null);
+  assert.equal(calls, 0);
+  assert.ok(app.state.readingTools.state.back);
 });
 
 test('instant jumps override smooth CSS only during scrolling and restore its value and priority', async (t) => {
@@ -679,18 +678,14 @@ test('instant jumps override smooth CSS only during scrolling and restore its va
   assert.equal(scroller.style.getPropertyValue('scroll-behavior'), '');
 });
 
-test('turning off return-to-reading restores the recognized native arrow handler', async (t) => {
-  const { doc, win, app, scroller } = await setup(t);
-  const toggle = doc.querySelector('[data-cgs-setting="returnToReading"]'); toggle.checked = false;
-  toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
-  let calls = 0;
-  doc.querySelector('#native-latest').addEventListener('click', (event) => {
-    assert.equal(event.defaultPrevented, false); calls++; scroller.scrollTop = 2500;
-  });
-  doc.querySelector('#native-latest').click();
-  assert.equal(calls, 1);
-  assert.equal(scroller.scrollTop, 2500);
-  assert.equal(app.state.readingTools.state.back, null);
+test('theme changes do not discard the saved reading position', async (t) => {
+  const { doc, win, app, scroller, click } = await setup(t);
+  click('native-latest');
+  const saved = app.state.readingTools.state.back;
+  doc.querySelector('[data-cgs-setting="darkMode"]').click();
+  assert.equal(app.state.readingTools.state.back, saved);
+  click('reading-back');
+  assert.equal(scroller.scrollTop, 200);
 });
 
 test('missing or ambiguous answers never jump to a positional substitute', async (t) => {
@@ -718,16 +713,16 @@ test('switching chats discards pending editor and return spot before a stale act
   assert.equal(doc.querySelector('#cgs-bookmarks-panel').hidden, true);
 });
 
-test('both settings turn off independently without deleting saved bookmarks or existing side-chat controls', async (t) => {
+test('disabling bookmarks preserves saved data, return position, and side-chat controls', async (t) => {
   const { doc, win, app, values, click, save } = await setup(t);
   await save(); click('native-latest');
-  for (const key of ['bookmarks', 'returnToReading']) {
+  for (const key of ['bookmarks']) {
     const input = doc.querySelector(`[data-cgs-setting="${key}"]`); input.checked = false;
     input.dispatchEvent(new win.Event('change', { bubbles: true }));
   }
   assert.equal(doc.querySelector('.cgs-bookmark-action'), null);
   assert.ok(doc.querySelector('.cgs-turn-action'));
-  assert.equal(app.state.readingTools.state.back, null);
+  assert.ok(app.state.readingTools.state.back);
   assert.equal(values.get(storageKey).length, 1);
   const input = doc.querySelector('[data-cgs-setting="bookmarks"]'); input.checked = true;
   input.dispatchEvent(new win.Event('change', { bubbles: true }));
@@ -775,12 +770,101 @@ test('a different message with identical text cannot impersonate a missing bookm
   assert.equal(toolkit.locateReadingAnchor(doc, anchor), null);
 });
 
-test('return fails safely if its saved answer is no longer mounted', async (t) => {
-  const { doc, turns, scroller, click } = await setup(t);
+test('return restores saved pixels when the answer is virtualized out of the DOM', async (t) => {
+  const { doc, win, app, turns, scroller, click } = await setup(t);
   click('native-latest'); turns[0].remove();
   click('reading-back');
+  assert.equal(scroller.scrollTop, 200);
+  await settle(win, () => !app.state.readingTools.state.restoreCancel);
+  assert.equal(app.state.readingTools.state.back, null);
+  assert.match(doc.querySelector('#cgs-toast').textContent, /saved scroll position/u);
+});
+
+test('return aligns a remounted answer after virtualization updates its height', async (t) => {
+  const { doc, win, app, turns, scroller, click, grow } = await setup(t);
+  click('native-latest');
+  const old = turns[0]; old.remove();
+  click('reading-back');
+  assert.equal(scroller.scrollTop, 200);
+  const replacement = old.cloneNode(true);
+  replacement.getBoundingClientRect = old.getBoundingClientRect;
+  grow(150); scroller.prepend(replacement);
+  await settle(win, () => !app.state.readingTools.state.restoreCancel);
+  assert.equal(scroller.scrollTop, 350);
+  assert.equal(app.state.readingTools.state.back, null);
+});
+
+test('duplicate message wrappers do not invalidate a still-mounted temporary reading point', async (t) => {
+  const { doc, app, turns, scroller, click } = await setup(t);
+  click('native-latest');
+  turns[0].after(turns[0].cloneNode(true));
+  assert.equal(toolkit.locateReadingAnchor(doc, app.state.readingTools.state.back.anchor), null, 'bookmarks still reject ambiguous IDs');
+  click('reading-back');
+  assert.equal(scroller.scrollTop, 200);
+  assert.equal(app.state.readingTools.state.back, null);
+});
+
+test('return corrects a delayed automatic snap to bottom without continuing to poll at idle', async (t) => {
+  const { win, app, scroller, click } = await setup(t);
+  click('native-latest'); click('reading-back');
+  assert.equal(scroller.scrollTop, 200);
+  scroller.scrollTop = 2500;
+  await settle(win, () => !app.state.readingTools.state.restoreCancel);
+  assert.equal(scroller.scrollTop, 200);
+  scroller.scrollTop = 1000;
+  await new Promise((resolve) => win.setTimeout(resolve, 180));
+  assert.equal(scroller.scrollTop, 1000);
+});
+
+test('an earlier hidden transcript cannot steal the chat scroll container', async (t) => {
+  const { doc, win, scroller, click } = await setup(t);
+  const hidden = scroller.cloneNode(true); hidden.hidden = true;
+  doc.querySelector('main').prepend(hidden);
+  assert.equal(toolkit.chatScrollContainer(doc, win), scroller);
+  click('native-latest'); assert.equal(scroller.scrollTop, 2500);
+  click('reading-back'); assert.equal(scroller.scrollTop, 200);
+});
+
+test('return can find a replacement chat scroller instead of writing into the detached one', async (t) => {
+  const { doc, win, app, scroller, click } = await setup(t);
+  click('native-latest');
+  const replacement = scroller.cloneNode(true);
+  Object.defineProperties(replacement, { scrollHeight: { value: 3000 }, clientHeight: { value: 500 } });
+  replacement.scrollTop = 2500;
+  replacement.getBoundingClientRect = scroller.getBoundingClientRect;
+  scroller.replaceWith(replacement);
+  click('reading-back');
+  assert.equal(replacement.scrollTop, 200);
   assert.equal(scroller.scrollTop, 2500);
-  assert.match(doc.querySelector('#cgs-toast').textContent, /earlier spot is not loaded/u);
+  await settle(win, () => !app.state.readingTools.state.restoreCancel);
+  assert.equal(app.state.readingTools.state.back, null);
+});
+
+test('ignored scroll writes retain a retryable reading point instead of silently succeeding', async (t) => {
+  const { doc, win, app, scroller, click } = await setup(t);
+  click('native-latest');
+  const descriptor = Object.getOwnPropertyDescriptor(scroller, 'scrollTop');
+  Object.defineProperty(scroller, 'scrollTop', { ...descriptor, set() {} });
+  click('reading-back');
+  await settle(win, () => !app.state.readingTools.state.restoreCancel);
+  assert.equal(scroller.scrollTop, 2500);
+  assert.ok(app.state.readingTools.state.back);
+  assert.match(doc.querySelector('#cgs-toast').textContent, /could not be restored/u);
+  Object.defineProperty(scroller, 'scrollTop', descriptor);
+  click('reading-back'); assert.equal(scroller.scrollTop, 200);
+});
+
+for (const interrupt of ['wheel', 'route']) test(`pending return corrections stop on ${interrupt}`, async (t) => {
+  const { doc, win, app, turns, scroller, click, grow } = await setup(t);
+  click('native-latest'); turns[0].remove(); click('reading-back');
+  assert.equal(scroller.scrollTop, 200);
+  if (interrupt === 'wheel') doc.dispatchEvent(new win.WheelEvent('wheel', { bubbles: true }));
+  else win.history.pushState({}, '', '/c/different-chat');
+  scroller.scrollTop = 900;
+  grow(150); scroller.prepend(turns[0]);
+  await new Promise((resolve) => win.setTimeout(resolve, 250));
+  assert.equal(scroller.scrollTop, 900);
+  assert.equal(app.state.readingTools.state.restoreCancel, null);
 });
 
 test('a later jump records the new reading position instead of keeping an obsolete one', async (t) => {
@@ -802,11 +886,10 @@ test('window scrolling is supported when no nested scroll container is present',
   click('reading-back'); assert.equal(root.scrollTop, 200);
 });
 
-test('disabling Ask buttons leaves bookmarks working independently', async (t) => {
-  const { doc, win, app, save, values } = await setup(t);
-  const input = doc.querySelector('[data-cgs-setting="showTurnButtons"]'); input.checked = false;
-  input.dispatchEvent(new win.Event('change', { bubbles: true }));
-  assert.equal(doc.querySelector('.cgs-turn-action'), null);
+test('old disabled Ask preference cannot remove answer buttons or bookmarks', async (t) => {
+  const { doc, app, save, values } = await setup(t, new Map([['chatgptSidecar.settings.v1', { showTurnButtons: false }]]));
+  assert.equal(doc.querySelector('[data-cgs-setting="showTurnButtons"]'), null);
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
   await save();
   assert.equal(values.get(storageKey).length, 1);
   app.processRoot(doc.body);

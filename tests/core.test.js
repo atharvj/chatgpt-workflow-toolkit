@@ -18,7 +18,6 @@ test('normalizeText and settings sanitization use stable defaults', () => {
     ...toolkit.DEFAULT_SETTINGS,
     openMode: 'tab',
     hideStartWriting: false,
-    showTurnButtons: false,
     showSelectionButton: false,
   });
   assert.equal(toolkit.sanitizeSettings({ openMode: 'window' }).openMode, 'popup');
@@ -31,8 +30,9 @@ test('optional changes have persistent independent switches with legacy selectio
   assert.equal('preserveMathFormatting' in migrated, false);
   assert.equal(toolkit.sanitizeSettings({ showTurnButtons: false }).showSelectionButton, false);
   assert.equal(toolkit.sanitizeSettings({ showTurnButtons: false, showSelectionButton: true }).showSelectionButton, true);
-  assert.equal(toolkit.sanitizeSettings({ showSelectionButton: false }).showTurnButtons, true);
-  for (const key of ['hideStartWriting', 'hideShareHighlighted', 'showTurnButtons', 'showSelectionButton']) {
+  assert.equal('showTurnButtons' in toolkit.sanitizeSettings({ showTurnButtons: false }), false);
+  assert.equal('returnToReading' in toolkit.sanitizeSettings({ returnToReading: false }), false);
+  for (const key of ['hideStartWriting', 'hideShareHighlighted', 'darkMode', 'showSelectionButton']) {
     assert.equal(toolkit.sanitizeSettings({ [key]: false })[key], false);
     assert.equal(toolkit.sanitizeSettings({ [key]: true })[key], true);
   }

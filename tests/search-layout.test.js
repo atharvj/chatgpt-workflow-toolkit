@@ -128,14 +128,14 @@ test('checkbox appearance survives the page reset without changing native inputs
   const { doc, win, values } = await fixture(t);
   for (const input of doc.querySelectorAll('#cgs-settings input')) {
     assert.equal(win.getComputedStyle(input).appearance, 'auto');
-    assert.equal(input.checked, true);
+    assert.equal(input.checked, input.dataset.cgsSetting !== 'darkMode');
   }
   assert.equal(win.getComputedStyle(doc.querySelector('#native-checkbox')).appearance, 'none');
-  const input = doc.querySelector('[data-cgs-setting="showTurnButtons"]');
+  const input = doc.querySelector('[data-cgs-setting="bookmarks"]');
   input.click(); await new Promise((resolve) => win.setTimeout(resolve, 50));
-  assert.equal(values.get('chatgptSidecar.settings.v1').showTurnButtons, false);
-  assert.equal(doc.querySelector('.cgs-turn-action'), null);
-  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
+  assert.equal(values.get('chatgptSidecar.settings.v1').bookmarks, false);
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 0);
   input.click(); await new Promise((resolve) => win.setTimeout(resolve, 50));
   assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
 });
