@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.14
+// @version      1.10.15
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.14';
+  const VERSION = '1.10.15';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1555,7 +1555,7 @@
     // Closed content/ancestors must still be rejected.
     const closedParent = element.closest && element.closest('[data-state="closed"]');
     if (closedParent && !(allowClosedMenuTrigger && closedParent === element &&
-      element.matches('button[aria-haspopup="menu"], [role="button"][aria-haspopup="menu"]') &&
+      element.matches('button[aria-haspopup="menu"], [role="button"][aria-haspopup="menu"], [role="menuitem"][aria-haspopup="menu"]') &&
       !element.parentElement?.closest('[data-state="closed"]'))) return false;
     try {
       const view = element.ownerDocument && element.ownerDocument.defaultView;
@@ -1953,14 +1953,32 @@
     return text === 'branch in new chat' || text === 'branch in a new chat' || text.startsWith('branch in new chat ') || text.startsWith('branch in a new chat ');
   }
 
-  function findBranchAction(root, excluded = new Set()) {
-    if (!root) return null;
+  function branchMenuControls(root, predicate, allowClosedMenuTrigger = false, excluded = new Set()) {
+    if (!root) return [];
     const candidates = [...root.querySelectorAll('[role="menuitem"], [role="option"], [data-radix-collection-item], button, a')];
-    const matches = candidates.filter((candidate) => !excluded.has(candidate) && !candidate.closest(`#${UI_ROOT_ID}`) &&
-      !candidate.matches(':disabled, [aria-disabled="true"], [data-disabled]') && isProbablyVisible(candidate) &&
-      isBranchLabel(accessibleText(candidate)));
-    const distinct = matches.filter((candidate) => !matches.some((other) => other !== candidate && candidate.contains(other)));
-    return distinct.length === 1 ? distinct[0] : null;
+    const matches = candidates.filter((candidate) => !excluded.has(candidate) &&
+      !candidate.closest(`#${UI_ROOT_ID}, ${ROLE_SELECTOR}, .markdown, .prose, pre, code, [contenteditable]`) &&
+      !candidate.matches(':disabled, [aria-disabled="true"], [data-disabled]') &&
+      isMountedAndNotHidden(candidate, allowClosedMenuTrigger) && isProbablyVisible(candidate) && predicate(candidate));
+    return matches.filter((candidate) => !matches.some((other) => other !== candidate && candidate.contains(other)));
+  }
+
+  function branchLeafControls(root, excluded = new Set()) {
+    // Until the active mode has a verified UI signal, use the user's normal
+    // Chat fallback. A Work option or a message mentioning Work is not proof.
+    return branchMenuControls(root, (candidate) => !candidate.matches('[aria-haspopup="menu"]') &&
+      isBranchLabel(accessibleText(candidate)), false, excluded);
+  }
+
+  function branchSubmenuTriggers(root) {
+    return branchMenuControls(root, (candidate) => candidate.getAttribute('aria-haspopup') === 'menu' &&
+      [candidate.getAttribute('aria-label'), candidate.getAttribute('title'), candidate.textContent]
+        .some((label) => lowerText(label).replace(/[.!…]+$/gu, '') === 'open new branch'), true);
+  }
+
+  function findBranchAction(root, excluded = new Set()) {
+    const controls = branchLeafControls(root, excluded);
+    return controls.length === 1 ? controls[0] : null;
   }
 
   function findDirectBranchAction(turn, suppliedScopes = null) {
@@ -2345,7 +2363,7 @@
       '[data-radix-popper-content-wrapper], [data-radix-menu-content], [data-slot="dropdown-menu-content"], [role="menu"]',
     )].filter((root) => isMountedAndNotHidden(root));
     const openMenuBranchActions = () => uniqueElements(mountedMenuRoots()
-      .map((root) => findBranchAction(root)).filter(Boolean));
+      .flatMap((root) => [...branchLeafControls(root), ...branchSubmenuTriggers(root)]));
     if (openMenuBranchActions().length) {
       try {
         doc.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
@@ -2459,10 +2477,12 @@
           reason: `Workflow Toolkit could not open the response’s three-dot menu. Details (v${VERSION}): ${eventStep}; ${errorType}.` };
       }
     }
-    const branchAction = await waitForCondition(() => {
+    const menuStep = await waitForCondition(() => {
       const roots = matchingMenuRoots() || [];
-      const actions = uniqueElements(roots.map((root) => findBranchAction(root)).filter(Boolean));
-      return actions.length === 1 ? actions[0] : null;
+      const actions = uniqueElements(roots.flatMap((root) => branchLeafControls(root)));
+      if (actions.length) return actions.length === 1 ? { kind: 'branch', control: actions[0] } : null;
+      const triggers = uniqueElements(roots.flatMap(branchSubmenuTriggers));
+      return triggers.length === 1 ? { kind: 'submenu', control: triggers[0] } : null;
     }, {
       root: doc.documentElement,
       win,
@@ -2470,10 +2490,79 @@
       attributes: true,
       pollInterval: 125,
     });
-    if (!branchAction) return { ok: false, attempted: false, unavailable: true, reason: menuIsOpen()
+    if (!menuStep) return { ok: false, attempted: false, unavailable: true, reason: menuIsOpen()
       ? 'The response menu opened, but Workflow Toolkit could not identify “Branch in new chat” inside it.'
       : 'The response’s three-dot menu did not open, so Workflow Toolkit could not reach the Branch action.' };
+    let branchAction = menuStep.control;
+    let branchRoots = matchingMenuRoots;
+    if (menuStep.kind === 'submenu') {
+      if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before opening the branch submenu. Nothing was sent.' };
+      const rootsBeforeSubmenu = new Set(mountedMenuRoots());
+      const resolveSubmenuTrigger = () => {
+        const triggers = uniqueElements((matchingMenuRoots() || []).flatMap(branchSubmenuTriggers));
+        return triggers.length === 1 ? triggers[0] : null;
+      };
+      const submenuRoots = () => {
+        const trigger = resolveSubmenuTrigger();
+        if (!trigger) return [];
+        const controlledId = normalizeText(trigger.getAttribute('aria-controls'));
+        const controlled = controlledId && doc.getElementById(controlledId);
+        if (controlled && isMountedAndNotHidden(controlled)) return [controlled];
+        const roots = mountedMenuRoots();
+        const linked = trigger.id ? roots.filter((root) =>
+          normalizeText(root.getAttribute('aria-labelledby')).split(/\s+/u).includes(trigger.id)) : [];
+        if (linked.length) return linked;
+        const stateExposed = trigger.hasAttribute('aria-expanded') || trigger.hasAttribute('data-state');
+        if (stateExposed && trigger.getAttribute('aria-expanded') !== 'true' && trigger.getAttribute('data-state') !== 'open') return [];
+        // Portalled submenus are siblings of the top menu, not descendants.
+        // If ARIA linkage is absent, accept only ONE newly visible menu, never
+        // an existing menu or one explicitly labelled by another trigger.
+        const fresh = roots.filter((root) => !rootsBeforeSubmenu.has(root));
+        const menus = uniqueElements(fresh.flatMap((root) => root.matches('[role="menu"]') ? [root]
+          : [...root.querySelectorAll('[role="menu"]')].filter((menu) => isMountedAndNotHidden(menu))));
+        if (menus.length !== 1 || normalizeText(menus[0].getAttribute('aria-labelledby'))) return [];
+        return menus;
+      };
+      branchRoots = submenuRoots;
+      const submenuIsOpen = () => {
+        const trigger = resolveSubmenuTrigger();
+        return Boolean(submenuRoots().length || trigger &&
+          (trigger.getAttribute('aria-expanded') === 'true' || trigger.getAttribute('data-state') === 'open'));
+      };
+      try { menuStep.control.click(); }
+      catch (_error) { return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not open the “Open new branch” submenu.' }; }
+      await waitForCondition(submenuIsOpen, { root: doc.documentElement, win, timeout: 300, attributes: true, pollInterval: 75 });
+      if (!submenuIsOpen()) {
+        if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before opening the branch submenu. Nothing was sent.' };
+        const trigger = resolveSubmenuTrigger();
+        if (!trigger) return { ok: false, attempted: false, unavailable: true, reason: 'The branch submenu trigger changed before it could be opened.' };
+        try {
+          // Directional keyboard opening does not toggle an already opening
+          // submenu shut. Hover also covers pointer-only submenu variants.
+          trigger.focus({ preventScroll: true });
+          const rtl = doc.defaultView.getComputedStyle(trigger).direction === 'rtl';
+          const key = rtl ? 'ArrowLeft' : 'ArrowRight';
+          trigger.dispatchEvent(new win.KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }));
+          if (!submenuIsOpen()) {
+            const Pointer = win.PointerEvent || win.MouseEvent;
+            trigger.dispatchEvent(new Pointer('pointermove', { bubbles: true, cancelable: true, pointerType: 'mouse', pointerId: 1, isPrimary: true }));
+          }
+        } catch (_error) { return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not open the “Open new branch” submenu.' }; }
+      }
+      branchAction = await waitForCondition(() => {
+        const actions = uniqueElements(submenuRoots().flatMap((root) => branchLeafControls(root)));
+        return actions.length === 1 ? actions[0] : null;
+      }, { root: doc.documentElement, win, timeout: Math.max(1_000, Math.min(5_000, discoveryTimeout)), attributes: true, pollInterval: 125 });
+      if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+      if (!branchAction) return { ok: false, attempted: false, unavailable: true, reason: submenuIsOpen()
+        ? 'The branch submenu opened, but Workflow Toolkit could not identify a unique enabled “Branch in new Chat” option.'
+        : 'The “Open new branch” submenu did not open.' };
+    }
     if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+    const finalActions = uniqueElements((branchRoots() || []).flatMap((root) => branchLeafControls(root)));
+    if (finalActions.length !== 1 || finalActions[0] !== branchAction) {
+      return { ok: false, attempted: false, unavailable: true, reason: 'The Branch option changed before it could be selected. Nothing was sent.' };
+    }
     try {
       beforeBranchClick(branchAction);
       branchAction.click();

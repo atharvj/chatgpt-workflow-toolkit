@@ -89,14 +89,27 @@ test('paired prompt/answer footer: find More, put both controls beside it, and k
 });
 
 for (const duplicatePrompt of ['', 'nested', 'sibling'])
-for (const eventType of ['click', 'pointerdown', 'sandbox-pointer']) test(`paired footer opens the native menu and branches exactly once: ${eventType}, ${duplicatePrompt || 'single'} prompt`, async (t) => {
-  const { doc, win, app, turns } = await fixture(t, { duplicatePrompt, sandbox: eventType === 'sandbox-pointer' });
+for (const eventType of ['click', 'pointerdown', 'sandbox-pointer', 'submenu']) test(`paired footer opens the native menu and branches exactly once: ${eventType}, ${duplicatePrompt || 'single'} prompt`, async (t) => {
+  const { doc, win, app, turns } = await fixture(t, { duplicatePrompt, sandbox: ['sandbox-pointer', 'submenu'].includes(eventType) });
   let opens = 0, branches = 0, wrong = 0, sends = 0;
   const more = doc.querySelector('#more-2');
-  more.addEventListener(eventType === 'sandbox-pointer' ? 'pointerdown' : eventType, () => {
+  more.addEventListener(['sandbox-pointer', 'submenu'].includes(eventType) ? 'pointerdown' : eventType, () => {
     opens++; more.dataset.state = 'open'; more.setAttribute('aria-expanded', 'true');
     doc.querySelector('#menu').dataset.state = 'open';
   });
+  if (eventType === 'submenu') {
+    const branch = doc.querySelector('#branch');
+    const menu = doc.querySelector('#menu');
+    menu.innerHTML = '<div id="open-branch" role="menuitem" aria-haspopup="menu" data-state="closed">Open new branch</div>';
+    const submenu = doc.createElement('div');
+    submenu.setAttribute('role', 'menu'); submenu.setAttribute('aria-labelledby', 'open-branch'); submenu.dataset.state = 'closed';
+    submenu.innerHTML = '<button id="work-branch" role="menuitem">Branch into Work mode</button>';
+    submenu.append(branch); doc.body.append(submenu);
+    doc.querySelector('#work-branch').onclick = () => wrong++;
+    doc.querySelector('#open-branch').onclick = (event) => {
+      event.currentTarget.dataset.state = 'open'; submenu.dataset.state = 'open';
+    };
+  }
   doc.querySelector('#more-1').onclick = () => wrong++;
   for (const button of doc.querySelectorAll('[aria-label="Regenerate response"]')) button.onclick = () => wrong++;
   doc.querySelector('#branch').onclick = () => { branches++; win.history.pushState({}, '', '/c/new-branch'); };

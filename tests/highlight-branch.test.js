@@ -56,7 +56,7 @@ function openHighlight({ dom, doc, app }, text = 'Compare both groups.') {
 }
 
 for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((typedQuestion) =>
-  ['direct', 'pointer', 'sandbox-pointer', 'popup', 'blank-href', 'blank-location'].map((mode) => ({ typedQuestion, mode })))) {
+  ['direct', 'pointer', 'sandbox-pointer', 'submenu', 'popup', 'blank-href', 'blank-location'].map((mode) => ({ typedQuestion, mode })))) {
   test(`highlight from an older answer survives typing and branches all history (${typedQuestion ? 'custom question' : 'default explanation'}, ${mode})`, async (t) => {
     const values = storage(t);
     const source = await fixture(t);
@@ -93,7 +93,7 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
     const originalOpen = pageWindow.open;
     const copy = await fixture(t, 'https://chatgpt.com/c/source-chat', {
       pageInstanceId: 'source_copy_page_1234',
-      sandbox: mode === 'sandbox-pointer',
+      sandbox: mode === 'sandbox-pointer' || mode === 'submenu',
       reloadPage: () => { reloads += 1; return true; },
       pageWindow,
       branchNavigationTimeout: 600,
@@ -129,6 +129,21 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
         trigger.setAttribute('aria-expanded', 'true');
         menu.dataset.state = 'open';
       });
+      if (mode === 'submenu') {
+        const subtrigger = copy.doc.createElement('div');
+        subtrigger.id = 'open-branch'; subtrigger.textContent = 'Open new branch';
+        subtrigger.setAttribute('role', 'menuitem'); subtrigger.setAttribute('aria-haspopup', 'menu');
+        subtrigger.setAttribute('aria-expanded', 'false'); subtrigger.dataset.state = 'closed';
+        const submenu = copy.doc.createElement('div');
+        submenu.setAttribute('role', 'menu'); submenu.setAttribute('aria-labelledby', subtrigger.id); submenu.dataset.state = 'closed';
+        const work = copy.doc.createElement('button'); work.textContent = 'Branch into Work mode';
+        work.onclick = () => assert.fail('must use the normal Chat fallback');
+        menu.replaceChildren(subtrigger); submenu.append(work, branchAction); copy.doc.body.append(submenu);
+        subtrigger.onclick = () => {
+          assert.equal(branches, 0, 'opening the submenu must precede the actual branch action');
+          subtrigger.dataset.state = 'open'; subtrigger.setAttribute('aria-expanded', 'true'); submenu.dataset.state = 'open';
+        };
+      }
     }
     branchAction.addEventListener('click', () => {
       branches += 1;
@@ -174,7 +189,7 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
     assert.equal(saved.branchConversation, 'native-branch');
     // This simulates ChatGPT's native inherited history, not server-side file access.
     const branch = await fixture(t, 'https://chatgpt.com/c/native-branch', {
-      pageInstanceId: 'reloaded_branch_1234', sandbox: mode === 'sandbox-pointer',
+      pageInstanceId: 'reloaded_branch_1234', sandbox: mode === 'sandbox-pointer' || mode === 'submenu',
     });
     branch.app.state.incomingJobId = jobId;
     let sends = 0;
