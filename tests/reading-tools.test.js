@@ -256,6 +256,106 @@ test('whole-response bookmark still jumps to its preceding user message after re
   assert.equal(second.scroller.scrollTop, 76);
 });
 
+test('whole-answer bookmarks resolve a prompt inside duplicate nested search-unit wrappers', async (t) => {
+  const { doc, scroller, click, save } = await setup(t);
+  const prompt = doc.querySelector('[data-testid="conversation-turn-0"]');
+  prompt.removeAttribute('data-testid');
+  prompt.setAttribute('data-content-search-unit-key', 'fallback-turn-0:0:user');
+  const inner = doc.createElement('div');
+  inner.setAttribute('data-content-search-unit-key', 'fallback-turn-0:0:user');
+  inner.getBoundingClientRect = prompt.getBoundingClientRect;
+  inner.append(...prompt.childNodes); prompt.append(inner);
+  await save(); scroller.scrollTop = 1800;
+  click('reading-jump');
+  assert.equal(scroller.scrollTop, 76);
+});
+
+test('whole-answer bookmarks measure rendered prompt content when its wrapper has no box', async (t) => {
+  const { doc, scroller, click, save } = await setup(t);
+  const prompt = doc.querySelector('[data-testid="conversation-turn-0"]');
+  prompt.firstElementChild.getBoundingClientRect = prompt.getBoundingClientRect;
+  prompt.style.display = 'contents';
+  prompt.getBoundingClientRect = () => ({ top: 0, bottom: 0, height: 0, width: 0 });
+  await save(); scroller.scrollTop = 1800;
+  click('reading-jump');
+  assert.equal(scroller.scrollTop, 76, 'zero-size wrapper coordinates are not a destination');
+});
+
+test('bookmark jump realigns after lazy content above the target changes height', async (t) => {
+  const { doc, win, scroller, click, save, grow } = await setup(t);
+  await save(); scroller.scrollTop = 1800; click('reading-jump');
+  assert.equal(scroller.scrollTop, 76);
+  grow(400);
+  await settle(win, () => scroller.scrollTop === 476);
+  assert.equal(doc.querySelector('#cgs-bookmarks-panel').hidden, true);
+  click('reading-back'); assert.equal(scroller.scrollTop, 2200, 'Return still refers to the pre-jump spot');
+});
+
+test('bookmark jump converts scaled viewport geometry to CSS scroll coordinates', async (t) => {
+  const { doc, scroller, click, save } = await setup(t);
+  Object.defineProperty(scroller, 'offsetHeight', { value: 500 });
+  scroller.getBoundingClientRect = () => ({ top: 60, bottom: 435, height: 375 });
+  const prompt = doc.querySelector('[data-testid="conversation-turn-0"]');
+  prompt.getBoundingClientRect = () => ({ top: (180 - scroller.scrollTop) * .75, height: 60 });
+  await save(); scroller.scrollTop = 1800; click('reading-jump');
+  assert.equal(scroller.scrollTop, 68);
+  assert.equal(prompt.getBoundingClientRect().top - scroller.getBoundingClientRect().top, 24);
+});
+
+test('a failed bookmark scroll keeps the bookmark and reports failure instead of closing as success', async (t) => {
+  const { doc, win, app, values, scroller, click, save } = await setup(t);
+  await save(); scroller.scrollTop = 1800;
+  const descriptor = Object.getOwnPropertyDescriptor(scroller, 'scrollTop');
+  Object.defineProperty(scroller, 'scrollTop', { ...descriptor, set() {} });
+  click('reading-jump');
+  await settle(win, () => !app.state.readingTools.state.restoreCancel);
+  assert.equal(scroller.scrollTop, 1800);
+  assert.equal(doc.querySelector('#cgs-bookmarks-panel').hidden, false);
+  assert.match(doc.querySelector('#cgs-toast').textContent, /Could not reach the bookmarked text/u);
+  assert.equal(values.get(storageKey).length, 1);
+});
+
+for (const interrupt of ['wheel', 'pointerdown', 'route']) test(`bookmark alignment stops on ${interrupt}`, async (t) => {
+  const { doc, win, app, scroller, click, save, grow } = await setup(t);
+  await save(); scroller.scrollTop = 1800; click('reading-jump');
+  if (interrupt === 'route') win.history.pushState({}, '', '/c/another-chat');
+  else doc.dispatchEvent(new win.Event(interrupt, { bubbles: true }));
+  grow(400); scroller.scrollTop = 1400;
+  await new Promise((resolve) => win.setTimeout(resolve, 200));
+  assert.equal(scroller.scrollTop, 1400);
+  assert.equal(app.state.readingTools.state.restoreCancel, null);
+});
+
+test('bookmark alignment re-resolves the saved highlight after the answer rerenders', async (t) => {
+  const { doc, win, app, turns, scroller, click, save } = await setup(t);
+  const range = doc.createRange(); range.selectNodeContents(doc.querySelector('#passage'));
+  win.getSelection().removeAllRanges(); win.getSelection().addRange(range);
+  await save(); scroller.scrollTop = 1800; click('reading-jump');
+  assert.equal(scroller.scrollTop, 276);
+  const replacement = turns[0].cloneNode(true);
+  replacement.querySelector('#passage').getBoundingClientRect = () => ({ top: 780 - scroller.scrollTop, height: 100 });
+  turns[0].replaceWith(replacement);
+  await settle(win, () => !app.state.readingTools.state.restoreCancel);
+  assert.equal(scroller.scrollTop, 676);
+  scroller.scrollTop = 1200;
+  await new Promise((resolve) => win.setTimeout(resolve, 160));
+  assert.equal(scroller.scrollTop, 1200, 'no background polling after the bounded jump');
+});
+
+for (const conflict of ['key', 'attributes', 'content', 'ids']) test(`nested bookmark candidates still reject conflicting ${conflict}`, async (t) => {
+  const { doc } = await setup(t);
+  const outer = doc.querySelector('[data-testid="conversation-turn-0"]');
+  outer.removeAttribute('data-testid');
+  outer.setAttribute('data-content-search-unit-key', 'fallback-turn-0:0:user');
+  const inner = doc.createElement('div');
+  inner.setAttribute('data-content-search-unit-key', conflict === 'key' ? 'fallback-turn-0:1:user' : 'fallback-turn-0:0:user');
+  inner.append(...outer.childNodes); outer.append(inner);
+  if (conflict === 'attributes') inner.setAttribute('data-chatgpt-search-unit-key', 'fallback-turn-0:1:user');
+  if (conflict === 'content') outer.append('Another prompt');
+  if (conflict === 'ids') outer.setAttribute('data-message-id', 'conflicting-prompt');
+  assert.equal(toolkit.locateReadingAnchor(doc, { messageId: 'prompt-one', role: 'user' }), null);
+});
+
 test('pre-update highlighted bookmarks use their saved quote instead of the prompt', async (t) => {
   const values = new Map([[storageKey, [{ id: 'legacy_highlight_1234', label: 'Highlight', messageId: 'message-one',
     quote: 'lab instruction.', blockText: 'First lab instruction.' }]]]);

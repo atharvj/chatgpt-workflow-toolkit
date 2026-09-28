@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.17
+// @version      1.10.18
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.17';
+  const VERSION = '1.10.18';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -2974,15 +2974,44 @@
   function locateReadingAnchor(doc, anchor) {
     if (!anchor) return null;
     const turns = getTurns(doc).filter((turn) => !anchor.role || roleOfTurn(turn) === anchor.role);
-    if (anchor.messageId) {
-      const matching = turns.filter((turn) => turnMessageIds(turn).has(anchor.messageId));
-      // A known ID is authoritative. Another answer with the same words is
-      // not a safe substitute for an unloaded/deleted message.
-      return matching.length === 1 ? matching[0] : null;
+    // A known ID is authoritative. Identical words in another message are
+    // never a substitute for an unloaded/deleted message.
+    const matching = turns.filter((turn) => anchor.messageId ? turnMessageIds(turn).has(anchor.messageId)
+      : anchor.fingerprint && assistantTurnFingerprint(turn) === anchor.fingerprint)
+      .filter((turn) => isMountedAndNotHidden(turn));
+    if (matching.length < 2) return matching[0] || null;
+    const keyOf = (turn) => {
+      const keys = ['data-chatgpt-search-unit-key', 'data-content-search-unit-key']
+        .map((attribute) => turn.getAttribute(attribute)).filter(Boolean);
+      return keys.length && keys.every((key) => key === keys[0]) ? keys[0] : '';
+    };
+    // The same search message may have nested wrappers. Collapse ONLY that
+    // proven nesting, not sibling copies, conflicting IDs, or matching text
+    // elsewhere. Keep transcript/branch ownership checks unchanged.
+    const distinct = matching.filter((outer) => !matching.some((inner) => {
+      if (outer === inner || !outer.contains(inner) || !keyOf(outer) || keyOf(outer) !== keyOf(inner)) return false;
+      const outerIds = turnMessageIds(outer), innerIds = turnMessageIds(inner);
+      return outerIds.size === innerIds.size && [...outerIds].every((id) => innerIds.has(id)) &&
+        normalizeText(readableNodeText(outer)) === normalizeText(readableNodeText(inner));
+    }));
+    return distinct.length === 1 ? distinct[0] : null;
+  }
+
+  function readingTurnRect(turn) {
+    if (!turn || !isMountedAndNotHidden(turn)) return null;
+    // display:contents wrappers have a zero rectangle even when their message
+    // is rendered. Measure content, never treat that zero as a scroll target.
+    const selector = roleOfTurn(turn) === 'user' ? USER_CONTENT_SELECTOR : ASSISTANT_CONTENT_SELECTOR;
+    for (const node of uniqueElements([turn, ...collectMatches(turn, selector)])) {
+      if (!isMountedAndNotHidden(node)) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.height > 0 && Number.isFinite(rect.top)) return rect;
+      const range = turn.ownerDocument.createRange(); range.selectNodeContents(node);
+      const contentRect = typeof range.getClientRects === 'function' && [...range.getClientRects()]
+        .find((item) => item.width > 0 && item.height > 0 && Number.isFinite(item.top));
+      if (contentRect) return contentRect;
     }
-    if (!anchor.fingerprint) return null;
-    const matching = turns.filter((turn) => assistantTurnFingerprint(turn) === anchor.fingerprint);
-    return matching.length === 1 ? matching[0] : null;
+    return null;
   }
 
   function sanitizeBookmarks(raw) {
@@ -3290,20 +3319,74 @@
       const scroller = chatScrollContainer(doc, win);
       instantScroll(scroller, scrollRange(scroller).maximum === 0 ? 0 : scroller.scrollHeight);
     }
-    function jumpTo(bookmark) {
+    function bookmarkDestination(bookmark) {
       const turn = locateReadingAnchor(doc, bookmark);
-      if (!turn) { toast('That answer is not loaded or has changed. Scroll to load older messages, then try again.'); return; }
+      if (!turn) return { error: 'That answer is not loaded or has changed. Scroll to load older messages, then try again.' };
       const highlight = bookmark.quote ? locateBookmarkPassage(turn, bookmark) : null;
       const prompt = bookmark.quote ? null : bookmark.prompt ? locateReadingAnchor(doc, bookmark.prompt) : precedingUserTurn(doc, turn);
-      if (bookmark.quote && !highlight) { toast('The saved highlight could not be located. The answer may have changed.'); return; }
-      if (!bookmark.quote && !prompt) { toast('The original user message is not loaded. Scroll to load older messages, then try again.'); return; }
-      const targetRect = highlight ? highlight.rect : prompt.getBoundingClientRect();
+      if (bookmark.quote && !highlight) return { error: 'The saved highlight could not be located. The answer may have changed.' };
+      if (!bookmark.quote && !prompt) return { error: 'The original user message is not loaded. Scroll to load older messages, then try again.' };
+      const rect = highlight ? highlight.rect : readingTurnRect(prompt);
+      if (!rect || rect.height <= 0 || !Number.isFinite(rect.top)) return { error: 'The bookmarked text is not rendered yet. Scroll to load that message, then try again.' };
+      return { target: prompt || turn, rect, approximate: highlight?.approximate === true };
+    }
+    function jumpTo(bookmark) {
+      state.restoreCancel?.();
+      const initial = bookmarkDestination(bookmark);
+      if (initial.error) { toast(initial.error); return; }
       remember();
-      const scroller = chatScrollContainer(doc, win, turn);
-      const top = scroller === doc.scrollingElement || scroller === doc.documentElement ? 0 : scroller.getBoundingClientRect().top;
-      instantScroll(scroller, boundedScrollTop(scroller, scroller.scrollTop + targetRect.top - top - 24));
-      close();
-      if (highlight?.approximate) toast('Opened the saved paragraph; the exact highlighted line could not be located.');
+      const key = keyForPage(), started = Date.now();
+      let timer = null, cancelled = false, stable = 0, reportedApproximate = false;
+      const cancel = () => {
+        cancelled = true;
+        if (timer !== null) win.clearTimeout(timer);
+        for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) doc.removeEventListener(type, cancel, true);
+        if (state.restoreCancel === cancel) state.restoreCancel = null;
+      };
+      state.restoreCancel = cancel;
+      for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) doc.addEventListener(type, cancel, { capture: true, passive: true });
+      const align = () => {
+        if (cancelled || keyForPage() !== key || !getSettings().bookmarks) { cancel(); return; }
+        const destination = bookmarkDestination(bookmark);
+        let reached = false;
+        if (!destination.error) {
+          const scroller = chatScrollContainer(doc, win, destination.target);
+          const rootScroll = scroller === doc.scrollingElement || scroller === doc.documentElement;
+          const frame = scroller.getBoundingClientRect();
+          // DOM rectangles use displayed pixels; scrollTop uses CSS pixels.
+          // ChatGPT's window zoom (and a scaled chat pane) can make them differ.
+          const scale = scroller.offsetHeight > 0 && frame.height > 0 ? frame.height / scroller.offsetHeight : 1;
+          const top = rootScroll ? 0 : frame.top + scroller.clientTop * scale;
+          const wanted = boundedScrollTop(scroller, scroller.scrollTop + (destination.rect.top - top - 24) / scale);
+          if (Math.abs(scroller.scrollTop - wanted) > 1) instantScroll(scroller, wanted);
+          const updated = bookmarkDestination(bookmark);
+          const error = updated.error ? Infinity : updated.rect.top - top - 24;
+          const range = scrollRange(scroller);
+          // At a scroll boundary the text may not reach the 24px inset, but
+          // it must at least be visible. A changed number alone isn't success.
+          const atBoundary = Math.abs(scroller.scrollTop - range.minimum) <= 2 || Math.abs(scroller.scrollTop - range.maximum) <= 2;
+          const visible = !updated.error && updated.rect.top >= top && updated.rect.top < top + scroller.clientHeight * scale;
+          reached = Math.abs(scroller.scrollTop - wanted) <= 2 && (Math.abs(error) <= 2 || atBoundary && visible);
+          if (reached) {
+            if (!panel.hidden) close();
+            if (destination.approximate && !reportedApproximate) {
+              reportedApproximate = true;
+              toast('Opened the saved paragraph; the exact highlighted line could not be located.');
+            }
+          }
+        }
+        stable = reached ? stable + 1 : 0;
+        const elapsed = Date.now() - started;
+        if (stable >= 3 && elapsed >= 600 || elapsed >= 1_200) {
+          cancel();
+          if (!reached) toast(destination.error || 'Could not reach the bookmarked text. Your bookmark is still saved; try again.');
+          return;
+        }
+        // Lazy layout/replaced message nodes can move the text after the first
+        // write. Re-resolve briefly, and stop immediately on user interaction.
+        timer = win.setTimeout(align, 80);
+      };
+      align();
     }
     function goBack() {
       const saved = state.back;
