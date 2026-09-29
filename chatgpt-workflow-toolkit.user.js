@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.21
+// @version      1.10.22
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.21';
+  const VERSION = '1.10.22';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -4259,6 +4259,7 @@
     }
 
     async function waitForSideSendAcknowledgement(job, expectedConversation, baselineUserCount) {
+      let serverConversation = '';
       return waitForCondition(() => {
         const users = getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user');
         const userCount = users.length;
@@ -4267,14 +4268,33 @@
           // transition only AFTER Send and only with our exact question and
           // the same inherited context; it never authorizes another Send.
           const current = conversationIdentity(win.location.href);
-          const sent = users[baselineUserCount];
-          if (job.sendAttempted && isClientConversationIdentity(expectedConversation) && current &&
-            !isClientConversationIdentity(current) && current !== job.sourceConversation && sent &&
-            normalizeText(readableNodeText(sent)) === normalizeText(buildAccuracyGuardedPrompt(job.question)) &&
-            findInheritedBranchTurn(job, true)) {
-            state.branchConversation = current;
-            job.branchConversation = current;
-            return { status: 'sent' };
+          if (job.sendAttempted && isClientConversationIdentity(expectedConversation) && current !== job.sourceConversation &&
+            (!current || !isClientConversationIdentity(current))) {
+            // The URL often updates BEFORE the posted bubble and provenance
+            // remount. Wait for acknowledgement instead of treating that gap
+            // as a failed Send. Never send again from this observation loop.
+            if (!current) return null;
+            if (serverConversation && current !== serverConversation) return { status: 'drift' };
+            serverConversation = current;
+            const inherited = findInheritedBranchTurn(job, true, { acknowledgement: true });
+            const native = nativeBranchContext(doc, job.sourceUrl);
+            const boundary = native?.paragraph || inherited;
+            const expected = normalizeText(buildAccuracyGuardedPrompt(job.question));
+            // Mounted user counts/indices change during virtualization. The
+            // exact new question AFTER the native separator is the evidence,
+            // not users[baselineUserCount] or a matching quote in old history.
+            const sent = inherited && boundary && users.some((turn) => {
+              const content = turn.matches(USER_CONTENT_SELECTOR) ? turn : turn.querySelector(USER_CONTENT_SELECTOR) || turn;
+              return !content.contains(boundary) && !boundary.contains(content) &&
+                Boolean(boundary.compareDocumentPosition(content) & 4) &&
+                normalizeText(readableNodeText(content)) === expected;
+            });
+            if (sent) {
+              state.branchConversation = current;
+              job.branchConversation = current;
+              return { status: 'sent' };
+            }
+            return null;
           }
           return { status: 'drift' };
         }
@@ -4286,6 +4306,7 @@
         timeout: sideSendAckTimeout,
         attributes: true,
         characterData: true,
+        pollInterval: 100,
       });
     }
 
@@ -4313,6 +4334,7 @@
         );
         return false;
       }
+      closeRecovery();
       toast('Side question sent in the separate chat.');
       return true;
     }
@@ -4551,7 +4573,7 @@
       return !job.contextFingerprint || conversationContextFingerprint(turn.ownerDocument, turn) === job.contextFingerprint;
     }
 
-    function verifiedLocalBranchTransition(job, native) {
+    function verifiedLocalBranchTransition(job, native, { acknowledgement = false } = {}) {
       const proof = state.localBranchTransition;
       const current = conversationIdentity(win.location.href);
       if (!proof || !state.incomingJobId || proof.jobId !== state.incomingJobId || proof.sourceUrl !== job.sourceUrl ||
@@ -4561,6 +4583,10 @@
         // the acknowledgement still requires the exact outgoing user message.
         (current !== proof.destination && !(job.sendAttempted && !isClientConversationIdentity(current))) ||
         !native?.sourceMatches || !native.turn || proof.links.has(native.link)) return false;
+      // After Send the editor may unmount or become read-only while generating.
+      // Its readiness governs writing, not whether an exact posted bubble is
+      // already visible in the verified branch.
+      if (acknowledgement && job.sendAttempted) return true;
       const composer = findComposer(doc);
       // The native local branch can reuse the editor node. A new source
       // separator after OUR Branch click, not the URL or editor alone, proves
@@ -4570,13 +4596,13 @@
       return Boolean(composer && isEditableComposer(composer));
     }
 
-    function findInheritedBranchTurn(job, allowNewMessages = job.questionInserted || job.sendAttempted) {
+    function findInheritedBranchTurn(job, allowNewMessages = job.questionInserted || job.sendAttempted, options = {}) {
       const native = nativeBranchContext(doc, job.sourceUrl);
       if (native) {
         // Native provenance replaces rendered-history equality after our branch
         // action plus either a fresh-page transfer or an observed local branch.
         const freshPage = job.branchReloadFrom && job.branchReloadFrom !== state.pageInstanceId;
-        if (!job.branchClickAttempted || (!freshPage && !verifiedLocalBranchTransition(job, native)) ||
+        if (!job.branchClickAttempted || (!freshPage && !verifiedLocalBranchTransition(job, native, options)) ||
           !conversationIdentity(win.location.href) || conversationIdentity(win.location.href) === job.sourceConversation ||
           !native.sourceMatches || !allowNewMessages && native.hasNewMessages) return null;
         return native.turn;

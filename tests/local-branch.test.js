@@ -53,6 +53,8 @@ for (const wrapper of ['plain', 'answer', 'code', 'sidebar', 'dialog', 'hidden',
 }
 
 for (const mode of ['remounted-editor', 'reused-editor', 'server-on-send', 'delayed-marker', 'retry-late-marker',
+  'server-delayed-bubble', 'server-count-shift', 'server-no-editor', 'server-delayed-provenance',
+  'server-wrong-question', 'server-old-copy', 'server-source-return', 'server-second-route',
   'url-only', 'wrong-source', 'quoted-marker', 'preexisting-marker', 'existing-draft', 'source-return',
   'marker-changes-on-input', 'route-changes-on-input', 'unacknowledged', 'new-user', 'saved-job-only']) {
   test(`local branch → Continued from → id-less composer → Send: ${mode}`, async (t) => {
@@ -66,7 +68,8 @@ for (const mode of ['remounted-editor', 'reused-editor', 'server-on-send', 'dela
     };
     let reloads = 0, branches = 0, sends = 0, outgoing = '';
     const app = toolkit.createApp(doc, win, { pageInstanceId: 'local_page_12345', branchComposerTimeout: 1600,
-      branchNavigationTimeout: 400, sideSendAckTimeout: 250, reloadPage: () => { reloads++; return true; } });
+      branchNavigationTimeout: 400, sideSendAckTimeout: mode.startsWith('server-') ? 600 : 250,
+      reloadPage: () => { reloads++; return true; } });
     t.after(() => {
       app.state.observer?.disconnect(); win.close();
       if (previousGM === undefined) delete globalThis.GM; else globalThis.GM = previousGM;
@@ -104,10 +107,27 @@ for (const mode of ['remounted-editor', 'reused-editor', 'server-on-send', 'dela
         assert.equal(values.get(jobKey).sendAttempted, true, 'persist Send before clicking');
         sends++; outgoing = toolkit.getComposerText(composer);
         if (mode === 'unacknowledged') return;
-        const sent = doc.createElement('article'); sent.dataset.testid = 'conversation-turn-sent';
-        const body = doc.createElement('div'); body.dataset.messageAuthorRole = 'user'; body.textContent = outgoing;
-        sent.append(body); doc.querySelector('form').before(sent); composer.replaceChildren();
-        if (mode === 'server-on-send') win.history.pushState({}, '', '/c/persisted-branch');
+        if (mode.startsWith('server-')) win.history.pushState({}, '', '/c/persisted-branch');
+        if (mode === 'server-count-shift') doc.querySelector('[data-testid="conversation-turn-0"]').remove();
+        if (mode === 'server-old-copy') {
+          doc.querySelector('[data-message-author-role="user"]').textContent = outgoing;
+          composer.replaceChildren(); return;
+        }
+        const post = () => {
+          const sent = doc.createElement('article'); sent.dataset.testid = 'conversation-turn-sent';
+          const body = doc.createElement('div'); body.dataset.messageAuthorRole = 'user';
+          body.textContent = mode === 'server-wrong-question' ? 'A different message' : outgoing;
+          sent.append(body); doc.querySelector('form').before(sent); composer.replaceChildren();
+          if (mode === 'server-no-editor') doc.querySelector('form').remove();
+          if (mode === 'server-delayed-provenance') {
+            const separator = doc.querySelector('.separator'); separator.remove();
+            win.setTimeout(() => sent.before(separator), 180);
+          }
+        };
+        if (mode === 'server-delayed-bubble' || mode === 'server-second-route') win.setTimeout(post, 180);
+        else post();
+        if (mode === 'server-source-return') win.history.pushState({}, '', sourceUrl);
+        if (mode === 'server-second-route') win.setTimeout(() => win.history.pushState({}, '', '/c/another-chat'), 70);
       };
     };
     doc.querySelector('[data-testid="branch-turn-action-button"]').onclick = () => { branches++; arrive(); };
@@ -120,14 +140,20 @@ for (const mode of ['remounted-editor', 'reused-editor', 'server-on-send', 'dela
       doc.querySelector('form').insertAdjacentHTML('beforebegin', marker());
       done = await app.runIncomingJob(toolkit.sanitizeJob(values.get(jobKey)));
     }
-    const success = ['remounted-editor', 'reused-editor', 'server-on-send', 'delayed-marker', 'retry-late-marker'].includes(mode);
+    const success = ['remounted-editor', 'reused-editor', 'server-on-send', 'delayed-marker', 'retry-late-marker',
+      'server-delayed-bubble', 'server-count-shift', 'server-no-editor', 'server-delayed-provenance'].includes(mode);
     assert.equal(done, success, doc.querySelector('#cgs-recovery-reason').textContent);
     assert.equal(reloads, 0, 'never reload the local-only branch');
     assert.equal(branches, mode === 'saved-job-only' ? 0 : 1, 'never create a second branch on retry');
-    assert.equal(sends, success || mode === 'unacknowledged' ? 1 : 0);
+    assert.equal(sends, success || mode === 'unacknowledged' || mode.startsWith('server-') ? 1 : 0);
     if (success) {
       assert.equal(outgoing, toolkit.buildAccuracyGuardedPrompt(job.question));
       assert.equal(values.has(jobKey), false);
+      assert.equal(doc.querySelector('#cgs-recovery-backdrop').hidden, true, 'confirmed Send clears any earlier recovery popup');
+    } else if (mode.startsWith('server-')) {
+      assert.equal(values.get(jobKey).sendAttempted, true);
+      assert.equal(doc.querySelector('[data-cgs-action="retry-branch"]').hidden, true, 'never offer to resend');
+      assert.equal(doc.querySelector('#cgs-recovery-backdrop').hidden, false, 'unverified delivery still warns');
     } else if (mode === 'unacknowledged') {
       assert.equal(await app.runIncomingJob(toolkit.sanitizeJob(values.get(jobKey))), false);
       assert.equal(sends, 1, 'never resend an unacknowledged question');
