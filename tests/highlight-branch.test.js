@@ -56,7 +56,7 @@ function openHighlight({ dom, doc, app }, text = 'Compare both groups.') {
 }
 
 for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((typedQuestion) =>
-  ['direct', 'pointer', 'sandbox-pointer', 'submenu', 'submenu-mask', 'popup', 'blank-href', 'blank-location'].map((mode) => ({ typedQuestion, mode })))) {
+  ['direct', 'pointer', 'sandbox-pointer', 'submenu', 'submenu-mask', 'submenu-identity', 'popup', 'blank-href', 'blank-location'].map((mode) => ({ typedQuestion, mode })))) {
   test(`highlight from an older answer survives typing and branches all history (${typedQuestion ? 'custom question' : 'default explanation'}, ${mode})`, async (t) => {
     const values = storage(t);
     const source = await fixture(t);
@@ -108,6 +108,10 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
     });
     let branches = 0;
     const branchAction = copy.doc.querySelector('[data-testid="branch-turn-action-button"]');
+    if (mode === 'submenu-identity') {
+      branchAction.closest('article').querySelector('[data-message-author-role]')
+        .setAttribute('data-message-id', 'stable-native-answer');
+    }
     if (mode !== 'direct') {
       const trigger = copy.doc.createElement('button');
       trigger.dataset.testid = 'turn-actions-menu-button';
@@ -124,6 +128,17 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
       branchAction.setAttribute('role', 'menuitem');
       menu.append(branchAction);
       copy.doc.body.append(menu);
+      if (mode === 'submenu-identity') trigger.onclick = () => {
+        // The no-op click redraws messages before the pointer fallback. Older
+        // turns unmount, while the latest native message ID stays unchanged.
+        copy.doc.querySelector('[data-testid="conversation-turn-0"]').remove();
+        copy.doc.querySelector('[data-testid="conversation-turn-1"]').remove();
+        const answer = copy.doc.querySelector('[data-message-id="stable-native-answer"]');
+        const replacement = answer.cloneNode(true);
+        replacement.innerHTML = '<p>Later unrelated instructions. <span class="katex">x²</span></p>';
+        replacement.setAttribute('aria-hidden', 'true');
+        answer.replaceWith(replacement);
+      };
       trigger.addEventListener('pointerdown', () => {
         trigger.dataset.state = 'open';
         trigger.setAttribute('aria-expanded', 'true');
@@ -194,6 +209,12 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
     const branch = await fixture(t, 'https://chatgpt.com/c/native-branch', {
       pageInstanceId: 'reloaded_branch_1234', sandbox: mode === 'sandbox-pointer' || mode.startsWith('submenu'),
     });
+    if (mode === 'submenu-identity') {
+      branch.doc.querySelector('[data-testid="conversation-turn-3"] [data-message-author-role]').textContent += ' Updated equation display: x².';
+      branch.doc.querySelector('form').insertAdjacentHTML('beforebegin', '<p>Branched from <a href="/c/source-chat">Original chat</a></p>');
+      assert.notEqual(toolkit.conversationContextFingerprint(branch.doc), saved.contextFingerprint,
+        'fresh branch uses native provenance, not the source viewport’s rendered-history hash');
+    }
     branch.app.state.incomingJobId = jobId;
     let sends = 0;
     let outgoing = '';

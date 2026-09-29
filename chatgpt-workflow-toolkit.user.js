@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.19
+// @version      1.10.20
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.19';
+  const VERSION = '1.10.20';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -2318,12 +2318,57 @@
     }
   }
 
-  function branchTargetIsStillLatest(doc, turn, expectedTargetFingerprint = '', expectedContextFingerprint = '', readOptions = {}) {
-    if (!turn || !turn.isConnected || hasActiveGeneration(doc, readOptions.accessibilitySnapshot)) return false;
+  function branchSourceMessageIds(turn) {
+    // Search-unit/turn indexes describe the current rendering, not a message.
+    // Native message IDs survive virtualization, math rendering and remounts.
+    const attributes = ['data-message-id', 'data-chatgpt-selection-message-id', 'data-chatgpt-search-message-ids'];
+    const ids = new Set();
+    for (const node of collectMatches(turn, attributes.map((attribute) => `[${attribute}]`).join(', '))) {
+      if (node.closest('[data-cgs-injected]')) continue;
+      for (const attribute of attributes) {
+        for (const id of normalizeText(node.getAttribute(attribute)).split(/\s+/u).filter(Boolean)) ids.add(id);
+      }
+    }
+    return ids;
+  }
+
+  function captureBranchSource(turn, targetFingerprint, contextFingerprint) {
+    // Capture before storage awaits, not after a changed response could have
+    // taken its place. Never adopt a new latest ID during menu discovery.
+    return { messageIds: branchSourceMessageIds(turn), targetFingerprint, contextFingerprint };
+  }
+
+  function branchSourceState(doc, source, readOptions = {}) {
+    if (hasActiveGeneration(doc, readOptions.accessibilitySnapshot)) return { reason: 'generation active' };
     const turns = getTurns(doc);
-    if (!turns.length || turns[turns.length - 1] !== turn || getLatestCompletedAssistantTurn(doc) !== turn) return false;
-    if (expectedTargetFingerprint && assistantTurnFingerprint(turn, readOptions) !== expectedTargetFingerprint) return false;
-    return !expectedContextFingerprint || conversationContextFingerprint(doc, turn, readOptions) === expectedContextFingerprint;
+    const turn = turns.at(-1);
+    if (!turn || !turn.isConnected || !isAssistantTurn(turn)) return { reason: 'latest response unavailable' };
+    if (source.messageIds.size) {
+      if (source.messageIds.size !== 1) return { reason: 'ambiguous source message identity' };
+      const [id] = source.messageIds;
+      const candidates = turns.filter((node) => isAssistantTurn(node) && branchSourceMessageIds(node).has(id));
+      if (candidates.length > 1) return { reason: 'ambiguous source message identity' };
+      if (candidates.length !== 1 || candidates[0] !== turn || branchSourceMessageIds(turn).size !== 1) {
+        return { reason: 'latest response identity differs' };
+      }
+      // This is the same native response and hence the same branch point.
+      // Do not hash its rendered history: scrolling loads/unloads older turns,
+      // and menus/math/citations change their display without editing the chat.
+      return { turn };
+    }
+    // Older layouts without native identity retain the conservative text
+    // fallback. Never downgrade a missing/conflicting known ID to text matching.
+    if (!source.targetFingerprint || assistantTurnFingerprint(turn, readOptions) !== source.targetFingerprint) {
+      return { reason: 'response display differs (no native message ID)' };
+    }
+    if (source.contextFingerprint && conversationContextFingerprint(doc, turn, readOptions) !== source.contextFingerprint) {
+      return { reason: 'displayed history differs (no native message ID)' };
+    }
+    return { turn };
+  }
+
+  function branchSourceFailure(detail, stage = 'branching') {
+    return `Workflow Toolkit could not re-verify the source chat before ${stage}. Nothing was sent. Details (v${VERSION}): ${detail}.`;
   }
 
   function mountedResponseMenuRoots(doc) {
@@ -2346,51 +2391,30 @@
   async function clickNativeBranch(
     doc,
     win,
-    turn,
+    source,
     expectedConversation = '',
-    expectedTargetFingerprint = '',
-    expectedContextFingerprint = '',
     actionTimeout = 6_000,
     beforeBranchClick = () => {},
   ) {
     const discoveryTimeout = clampInteger(actionTimeout, 6_000, 100, 20_000);
-    const locator = getTurnLocator(turn, doc);
     const readOptions = {};
     const stillExpected = () => !expectedConversation || conversationIdentity(win.location.href) === expectedConversation;
-    const resolveTarget = (verifyFingerprints = false) => {
-      if (!stillExpected()) return null;
-      const candidates = uniqueElements([getLatestCompletedAssistantTurn(doc), locateTurn(doc, locator)]);
-      return candidates.find((candidate) => branchTargetIsStillLatest(
-        doc,
-        candidate,
-        verifyFingerprints ? expectedTargetFingerprint : '',
-        verifyFingerprints ? expectedContextFingerprint : '',
-        readOptions,
-      )) || null;
-    };
-    const targetStillExpected = () => Boolean(resolveTarget(true));
-    const submenuVerificationFailure = () => {
-      const candidate = getLatestCompletedAssistantTurn(doc);
-      const detail = !stillExpected() ? 'conversation changed'
-        : hasActiveGeneration(doc, readOptions.accessibilitySnapshot) ? 'generation active'
-        : !candidate || getTurns(doc).at(-1) !== candidate ? 'latest response unavailable'
-        : expectedTargetFingerprint && assistantTurnFingerprint(candidate, readOptions) !== expectedTargetFingerprint ? 'response display differs'
-        : 'displayed history differs';
-      return { ok: false, attempted: false,
-        reason: `Workflow Toolkit could not re-verify the source chat before opening the branch submenu. ChatGPT may have re-rendered the displayed messages. Nothing was sent. Details (v${VERSION}): ${detail}.` };
-    };
-    if (!stillExpected()) return { ok: false, attempted: false, reason: 'The source conversation changed before branching.' };
-    if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+    const sourceState = () => stillExpected() ? branchSourceState(doc, source, readOptions) : { reason: 'conversation changed' };
+    const resolveTarget = () => sourceState().turn || null;
+    const targetStillExpected = () => Boolean(resolveTarget());
+    const verificationFailure = (stage = 'branching') => ({ ok: false, attempted: false,
+      reason: branchSourceFailure(sourceState().reason || 'response unavailable', stage) });
+    if (!targetStillExpected()) return verificationFailure();
     // Native menus can add aria-hidden/inert to background messages. Preserve
     // their pre-menu accessibility state ONLY for this operation's comparisons.
-    // Previously hidden content and new/replaced nodes keep normal filtering;
-    // actual text edits, generation, new turns and route changes still fail.
+    // Used for generation detection and the legacy no-ID text fallback.
+    // Previously hidden content and new/replaced nodes keep normal filtering.
     // No attributes on the live page are removed or changed here.
     readOptions.accessibilitySnapshot = snapshotAccessibility(doc);
     let lastRevealedTurn = null;
     let lastRevealAt = 0;
     const revealActions = (force = false) => {
-      const liveTurn = resolveTarget(false);
+      const liveTurn = resolveTarget();
       if (!liveTurn) return null;
       const now = Date.now();
       const nodeChanged = liveTurn !== lastRevealedTurn;
@@ -2416,12 +2440,12 @@
       return liveTurn;
     };
     let liveTurn = revealActions(true);
-    if (!liveTurn) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+    if (!liveTurn) return verificationFailure();
 
     let actionScopes = responseActionScopes(liveTurn);
     const directBranch = findDirectBranchAction(liveTurn, actionScopes);
     if (directBranch) {
-      if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+      if (!targetStillExpected()) return verificationFailure();
       try {
         beforeBranchClick(directBranch);
         directBranch.click();
@@ -2434,7 +2458,7 @@
 
     const mountedMenuRoots = () => mountedResponseMenuRoots(doc);
     if (!await dismissOpenBranchMenu(doc, win)) return { ok: false, attempted: false, unavailable: true, reason: 'ChatGPT’s open response menu could not be reused.' };
-    if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+    if (!targetStillExpected()) return verificationFailure();
     const menuRootsBeforeOpen = new Set(mountedMenuRoots());
 
     let moreButton = findMoreButton(liveTurn, actionScopes, turnMessageIds(liveTurn));
@@ -2455,7 +2479,7 @@
         pollInterval: 250,
       });
       if (moreButton && moreButton.kind === 'branch') {
-        if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+        if (!targetStillExpected()) return verificationFailure();
         try {
           beforeBranchClick(moreButton.control);
           moreButton.control.click();
@@ -2468,7 +2492,7 @@
       moreButton = moreButton && moreButton.control;
     }
     if (!moreButton) return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not identify the latest response’s three-dot menu.' };
-    if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+    if (!targetStillExpected()) return verificationFailure();
     try {
       moreButton.click();
     } catch (_error) {
@@ -2479,7 +2503,7 @@
       if (!stillExpected()) return null;
       // The trigger itself can be replaced while ChatGPT opens a portal.
       if (!moreButton.isConnected) {
-        const target = resolveTarget(false);
+        const target = resolveTarget();
         const replacement = target && findMoreButton(target);
         if (replacement) moreButton = replacement;
       }
@@ -2501,7 +2525,7 @@
       root: doc.documentElement, win, timeout: 300, attributes: true, pollInterval: 75,
     });
     if (!menuIsOpen()) {
-      if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before opening the response menu. Nothing was sent.' };
+      if (!targetStillExpected()) return verificationFailure('opening the response menu');
       if (!moreButton.isConnected || !actionControlIsUsable(moreButton) || !isMountedAndNotHidden(moreButton, true)) {
         return { ok: false, attempted: false, unavailable: true, reason: 'The response menu button changed before it could be opened.' };
       }
@@ -2552,7 +2576,7 @@
     let branchAction = menuStep.control;
     let branchRoots = matchingMenuRoots;
     if (menuStep.kind === 'submenu') {
-      if (!targetStillExpected()) return submenuVerificationFailure();
+      if (!targetStillExpected()) return verificationFailure('opening the branch submenu');
       const rootsBeforeSubmenu = new Set(mountedMenuRoots());
       const resolveSubmenuTrigger = () => {
         const triggers = uniqueElements((matchingMenuRoots() || []).flatMap(branchSubmenuTriggers));
@@ -2589,7 +2613,7 @@
       catch (_error) { return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not open the “Open new branch” submenu.' }; }
       await waitForCondition(submenuIsOpen, { root: doc.documentElement, win, timeout: 300, attributes: true, pollInterval: 75 });
       if (!submenuIsOpen()) {
-        if (!targetStillExpected()) return submenuVerificationFailure();
+        if (!targetStillExpected()) return verificationFailure('opening the branch submenu');
         const trigger = resolveSubmenuTrigger();
         if (!trigger) return { ok: false, attempted: false, unavailable: true, reason: 'The branch submenu trigger changed before it could be opened.' };
         try {
@@ -2609,12 +2633,12 @@
         const actions = uniqueElements(submenuRoots().flatMap((root) => branchLeafControls(root)));
         return actions.length === 1 ? actions[0] : null;
       }, { root: doc.documentElement, win, timeout: Math.max(1_000, Math.min(5_000, discoveryTimeout)), attributes: true, pollInterval: 125 });
-      if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+      if (!targetStillExpected()) return verificationFailure();
       if (!branchAction) return { ok: false, attempted: false, unavailable: true, reason: submenuIsOpen()
         ? 'The branch submenu opened, but Workflow Toolkit could not identify a unique enabled “Branch in new Chat” option.'
         : 'The “Open new branch” submenu did not open.' };
     }
-    if (!targetStillExpected()) return { ok: false, attempted: false, reason: 'The source chat changed before branching. Nothing was sent.' };
+    if (!targetStillExpected()) return verificationFailure();
     const finalActions = uniqueElements((branchRoots() || []).flatMap((root) => branchLeafControls(root)));
     if (finalActions.length !== 1 || finalActions[0] !== branchAction) {
       return { ok: false, attempted: false, unavailable: true, reason: 'The Branch option changed before it could be selected. Nothing was sent.' };
@@ -4723,13 +4747,15 @@
             job.locator = getTurnLocator(turn, doc);
             job.targetFingerprint = assistantTurnFingerprint(turn);
             job.contextFingerprint = conversationContextFingerprint(doc, turn);
+            const branchSource = captureBranchSource(turn, job.targetFingerprint, job.contextFingerprint);
             if (!await persistIncomingJob(job)) {
               showRecovery(job, 'Workflow Toolkit could not safely update the saved whole-chat target. Nothing was branched or sent.', state.recoveryTurn, { canRetry: false });
               return false;
             }
-            if (conversationIdentity(win.location.href) !== job.sourceConversation ||
-              !branchTargetIsStillLatest(doc, turn, job.targetFingerprint, job.contextFingerprint)) {
-              showRecovery(job, 'The source chat changed before branching. Nothing was sent.', state.recoveryTurn, { canRetry: false });
+            const sourceState = conversationIdentity(win.location.href) === job.sourceConversation
+              ? branchSourceState(doc, branchSource) : { reason: 'conversation changed' };
+            if (!sourceState.turn) {
+              showRecovery(job, branchSourceFailure(sourceState.reason), state.recoveryTurn, { canRetry: false });
               return false;
             }
             state.recoveryTurn = turn;
@@ -4745,10 +4771,8 @@
             const clickResult = await clickNativeBranch(
               doc,
               win,
-              turn,
+              branchSource,
               job.sourceConversation,
-              job.targetFingerprint,
-              job.contextFingerprint,
               branchActionTimeout,
               (control) => navigationCapture.arm(control),
             );

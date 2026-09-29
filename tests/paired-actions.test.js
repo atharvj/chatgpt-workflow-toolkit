@@ -60,6 +60,122 @@ async function fixture(t, options = {}) {
   return { doc, win, app, turns };
 }
 
+// Reproduce the failure at the first click (before the pointer fallback), then
+// exercise the submenu. These changes affect rendering, not the branch point.
+for (const mode of [
+  'unload-history', 'load-history', 'math-remount', 'citation', 'duplicate-prompt', 'reindex', 'plural-only',
+  'save-remount', 'intent-remount', 'id-changed', 'id-missing', 'id-conflict', 'id-duplicate',
+  'save-id-changed', 'intent-id-changed', 'submenu-id-changed', 'new-user', 'streaming', 'route-changed',
+]) test(`native source identity through response menu and submenu: ${mode}`, async (t) => {
+  let reloads = 0;
+  const { doc, win, app, turns } = await fixture(t, { sandbox: true, reloadPage: () => { reloads++; return true; } });
+  const latest = () => doc.querySelector('[data-turn-key="turn-2"]');
+  const answer = () => latest().querySelector('[data-markdown-text-style="assistant-message"]').parentElement.parentElement;
+  const content = () => answer().querySelector('[data-markdown-text-style="assistant-message"]');
+  const message = () => answer().querySelector('[data-chatgpt-selection-message-id]');
+  if (mode === 'plural-only') {
+    answer().setAttribute('data-chatgpt-search-message-ids', 'assistant-2 assistant-2');
+    message().removeAttribute('data-chatgpt-selection-message-id');
+  }
+  const before = toolkit.conversationContextFingerprint(doc, answer());
+  const remount = () => {
+    const replacement = latest().cloneNode(true);
+    replacement.querySelector('[data-markdown-text-style="assistant-message"]').innerHTML =
+      '<p>Answer 2 <span class="katex"><span aria-hidden="true">x squared</span><span>x²</span></span></p>';
+    // A replacement node can already be masked by the native menu. This is not
+    // the same node as the operation's pre-menu accessibility snapshot.
+    replacement.querySelector('[data-markdown-text-style="assistant-message"]').setAttribute('aria-hidden', 'true');
+    latest().replaceWith(replacement);
+    doc.querySelector('[data-turn-key="turn-1"]')?.remove();
+  };
+  const changeIdentity = () => message().setAttribute('data-chatgpt-selection-message-id', 'different-answer');
+  let mutated = false;
+  const mutate = () => {
+    assert.equal(mutated, false); mutated = true;
+    if (mode === 'unload-history' || mode === 'plural-only') doc.querySelector('[data-turn-key="turn-1"]').remove();
+    if (mode === 'load-history') doc.querySelector('main').insertAdjacentHTML('afterbegin', exchange(0));
+    if (mode === 'math-remount' || mode.endsWith('-remount')) remount();
+    if (mode === 'citation') content().insertAdjacentHTML('beforeend', '<a href="https://example.test/citation">Source</a>');
+    if (mode === 'duplicate-prompt') {
+      const prompt = latest().querySelector('[data-chatgpt-search-unit-key$=":user"]');
+      prompt.after(prompt.cloneNode(true));
+    }
+    if (mode === 'reindex') for (const node of latest().querySelectorAll('[data-chatgpt-search-unit-key]')) {
+      const key = node.getAttribute('data-chatgpt-search-unit-key').replace('fallback-turn-2:', 'fallback-turn-9:');
+      node.setAttribute('data-chatgpt-search-unit-key', key);
+      if (node.hasAttribute('data-content-search-unit-key')) node.setAttribute('data-content-search-unit-key', key);
+    }
+    if (mode.endsWith('id-changed')) changeIdentity();
+    if (mode === 'id-missing') message().removeAttribute('data-chatgpt-selection-message-id');
+    if (mode === 'id-conflict') answer().setAttribute('data-chatgpt-search-message-ids', 'assistant-2 different-answer');
+    if (mode === 'id-duplicate') doc.querySelector('[data-turn-key="turn-1"] [data-chatgpt-selection-message-id="assistant-1"]')
+      .setAttribute('data-chatgpt-selection-message-id', 'assistant-2');
+    if (mode === 'new-user') latest().insertAdjacentHTML('afterend', '<div data-content-search-unit-key="fallback-turn-3:0:user"><div data-message-author-role="user">New question</div></div>');
+    if (mode === 'streaming') {
+      doc.querySelector('form').setAttribute('aria-hidden', 'true');
+      doc.querySelector('form').insertAdjacentHTML('beforeend', '<button data-testid="stop-button">Stop generating</button>');
+    }
+    if (mode === 'route-changed') win.history.pushState({}, '', '/c/another-chat');
+  };
+  const values = new Map(), previousGM = globalThis.GM;
+  globalThis.GM = {
+    async getValue(key, fallback) { return structuredClone(values.get(key) ?? fallback); },
+    async setValue(key, value) {
+      if (!mutated && value.kind === 'ask' && (mode.startsWith('save-') || mode.startsWith('intent-') && value.branchClickAttempted)) mutate();
+      values.set(key, structuredClone(value));
+    },
+    async deleteValue(key) { values.delete(key); },
+  };
+  t.after(() => { if (previousGM === undefined) delete globalThis.GM; else globalThis.GM = previousGM; });
+  const menu = doc.querySelector('#menu'), branch = doc.querySelector('#branch');
+  menu.innerHTML = '<button id="open-branch" role="menuitem" aria-haspopup="menu" aria-controls="submenu" data-state="closed">Open new branch</button>';
+  const submenu = doc.createElement('div');
+  submenu.id = 'submenu'; submenu.setAttribute('role', 'menu'); submenu.dataset.state = 'closed';
+  submenu.setAttribute('aria-labelledby', 'open-branch');
+  submenu.innerHTML = '<button id="work" role="menuitem">Branch into Work mode</button>';
+  submenu.append(branch); doc.body.append(submenu);
+  let clicks = 0, pointers = 0, branches = 0, sends = 0;
+  doc.addEventListener('click', (event) => {
+    if (event.target.id === 'more-2') {
+      clicks++;
+      if (!mutated && !mode.startsWith('submenu-')) mutate();
+    }
+  });
+  doc.addEventListener('pointerdown', (event) => {
+    if (event.target.id !== 'more-2') return;
+    pointers++; event.target.dataset.state = 'open'; event.target.setAttribute('aria-expanded', 'true'); menu.dataset.state = 'open';
+    content().setAttribute('aria-hidden', 'true');
+  });
+  doc.querySelector('#open-branch').onclick = (event) => {
+    if (mode.startsWith('submenu-')) mutate();
+    event.currentTarget.dataset.state = 'open'; submenu.dataset.state = 'open';
+  };
+  doc.querySelector('#work').onclick = () => assert.fail('must select normal Chat');
+  branch.onclick = () => { branches++; win.history.pushState({}, '', '/c/new-branch'); };
+  doc.querySelector('[data-testid="send-button"]').onclick = () => sends++;
+  app.state.incomingJobId = 'identity_test_job_12345';
+  const job = toolkit.sanitizeJob({ createdAt: Date.now(), sourceUrl: win.location.href, kind: 'ask',
+    locator: toolkit.getTurnLocator(turns[1], doc), targetFingerprint: toolkit.assistantTurnFingerprint(turns[1]),
+    contextFingerprint: before, question: toolkit.buildSelectedQuestion('Answer 1', 'Explain this part.') });
+  const succeeds = ['unload-history', 'load-history', 'math-remount', 'citation', 'duplicate-prompt', 'reindex', 'plural-only', 'save-remount', 'intent-remount'].includes(mode);
+  assert.equal(await app.runIncomingJob(job), false, 'transfer/reload must happen before any Send');
+  const reason = doc.querySelector('#cgs-recovery-reason').textContent;
+  assert.equal(mutated, true);
+  assert.equal(branches, succeeds ? 1 : 0, reason);
+  assert.equal(reloads, succeeds ? 1 : 0, reason);
+  assert.equal(sends, 0); assert.equal(doc.querySelector('#prompt-textarea').value, 'Existing draft');
+  if (succeeds) {
+    assert.equal(clicks, 1); assert.equal(pointers, 1);
+    assert.equal(win.location.pathname, '/c/new-branch');
+    assert.notEqual(toolkit.conversationContextFingerprint(doc, answer()), before,
+      'regression must exercise actual rendered-history drift, not just a stable DOM');
+  } else {
+    assert.equal(app.state.branchClickAttempted, false);
+    assert.match(reason, /could not re-verify the source chat/u);
+    assert.doesNotMatch(reason, /assistant-2|different-answer|Another question/u, 'diagnostics must not disclose message IDs or text');
+  }
+});
+
 test('paired prompt/answer footer: find More, put both controls beside it, and keep the answer owner', async (t) => {
   const { doc, win, app, turns } = await fixture(t);
   for (const [index, turn] of turns.entries()) {

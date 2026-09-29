@@ -115,7 +115,9 @@ for (const mode of [
       assert.equal(app.state.branchClickAttempted, false, 'safe retry remains available when Branch was never clicked');
       if (mode === 'closed') assert.match(reason, /three-dot menu did not open/u);
       if (mode === 'missing-branch') assert.match(reason, /menu opened, but .* could not identify/u);
-      if (mode.endsWith('-change')) assert.match(reason, /source chat changed/u);
+      if (mode.endsWith('-change')) assert.match(reason, /could not re-verify the source chat/u);
+      if (mode === 'route-change') assert.match(reason, /conversation changed/u);
+      if (mode === 'history-change') assert.match(reason, /response display differs \(no native message ID\)/u);
       if (mode.endsWith('-error')) {
         assert.ok(reason.includes(`Details (v${toolkit.VERSION}):`));
         assert.doesNotMatch(reason, /Private conversation details/u);
