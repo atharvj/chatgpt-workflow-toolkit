@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.20
+// @version      1.10.21
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.20';
+  const VERSION = '1.10.21';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1254,17 +1254,18 @@
 
   function nativeBranchContext(doc, sourceUrl) {
     if (!doc || !doc.querySelectorAll) return null;
-    // Native provenance is outside message content. Never accept a quoted
-    // "Branched from" link in an answer, code sample, sidebar, or our own UI.
+    // Native provenance is outside message content. "Branched from" and
+    // "Continued from" links quoted in answers, code or our UI are not proof.
     const excluded = [
       `#${UI_ROOT_ID}`, ROLE_SELECTOR, '[data-message-content]', '.markdown', '[class~="prose"]',
       '[contenteditable]', 'form', 'pre', 'code', 'blockquote', 'nav', 'aside', 'header', '[role="dialog"]',
     ].join(', ');
     let notice = null;
-    for (const link of doc.querySelectorAll('p > a[href]')) {
+    for (const link of doc.querySelectorAll('p > a[href], div > a[href]')) {
       const paragraph = link.parentElement;
       if (paragraph.closest(excluded) || paragraph.querySelectorAll('a').length !== 1 ||
-        normalizeText(paragraph.textContent) !== normalizeText(`Branched from ${link.textContent}`) ||
+        !['Branched from', 'Continued from'].some((prefix) =>
+          normalizeText(paragraph.textContent) === normalizeText(`${prefix} ${link.textContent}`)) ||
         !isMountedAndNotHidden(paragraph)) continue;
       // Keep the LAST separator: a branch of a branch may retain older ones.
       // A newer, conflicting source must not fall back to an older match.
@@ -1405,11 +1406,15 @@
 
   function sanitizeConversationIdentity(value) {
     const identity = String(value == null ? '' : value).trim();
-    return /^[a-z0-9_-]{1,200}$/iu.test(identity) || isWebConversationIdentity(identity) ? identity : '';
+    return /^[a-z0-9_-]{1,200}$/iu.test(identity) || isClientConversationIdentity(identity) ? identity : '';
   }
 
-  function isWebConversationIdentity(identity) {
-    return /^WEB:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(String(identity));
+  function isClientConversationIdentity(identity) {
+    return /^(?:WEB:|local-chatgpt:)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(String(identity));
+  }
+
+  function isLocalConversationIdentity(identity) {
+    return String(identity).startsWith('local-chatgpt:') && isClientConversationIdentity(identity);
   }
 
   function validatedBranchEntryUrl(value, sourceUrl) {
@@ -3655,6 +3660,7 @@
       recoveryTurn: null,
       incomingJobId: '',
       branchConversation: '',
+      localBranchTransition: null,
       branchClickAttempted: false,
       sideSendAttempted: false,
       sideLaunchPromise: null,
@@ -4257,13 +4263,13 @@
         const users = getTurns(doc).filter((turn) => roleOfTurn(turn) === 'user');
         const userCount = users.length;
         if (!isExpectedBranchConversation(job, expectedConversation)) {
-          // A WEB: chat may receive a server ID on its first Send. Accept that
+          // A client-side chat may receive a server ID on its first Send. Accept that
           // transition only AFTER Send and only with our exact question and
           // the same inherited context; it never authorizes another Send.
           const current = conversationIdentity(win.location.href);
           const sent = users[baselineUserCount];
-          if (job.sendAttempted && isWebConversationIdentity(expectedConversation) && current &&
-            !isWebConversationIdentity(current) && current !== job.sourceConversation && sent &&
+          if (job.sendAttempted && isClientConversationIdentity(expectedConversation) && current &&
+            !isClientConversationIdentity(current) && current !== job.sourceConversation && sent &&
             normalizeText(readableNodeText(sent)) === normalizeText(buildAccuracyGuardedPrompt(job.question)) &&
             findInheritedBranchTurn(job, true)) {
             state.branchConversation = current;
@@ -4545,17 +4551,37 @@
       return !job.contextFingerprint || conversationContextFingerprint(turn.ownerDocument, turn) === job.contextFingerprint;
     }
 
+    function verifiedLocalBranchTransition(job, native) {
+      const proof = state.localBranchTransition;
+      const current = conversationIdentity(win.location.href);
+      if (!proof || !state.incomingJobId || proof.jobId !== state.incomingJobId || proof.sourceUrl !== job.sourceUrl ||
+        !job.branchClickAttempted || !isLocalConversationIdentity(proof.destination) ||
+        !current || current === job.sourceConversation ||
+        // A server ID is acceptable only while acknowledging an attempted Send;
+        // the acknowledgement still requires the exact outgoing user message.
+        (current !== proof.destination && !(job.sendAttempted && !isClientConversationIdentity(current))) ||
+        !native?.sourceMatches || !native.turn || proof.links.has(native.link)) return false;
+      const composer = findComposer(doc);
+      // The native local branch can reuse the editor node. A new source
+      // separator after OUR Branch click, not the URL or editor alone, proves
+      // that the branch UI arrived. Composer stability, existing drafts and
+      // generation are checked again before writing and sending. This proof
+      // is in-memory only; persisted job fields cannot manufacture it.
+      return Boolean(composer && isEditableComposer(composer));
+    }
+
     function findInheritedBranchTurn(job, allowNewMessages = job.questionInserted || job.sendAttempted) {
       const native = nativeBranchContext(doc, job.sourceUrl);
       if (native) {
-        // The native source separator replaces brittle DOM equality ONLY after
-        // our branch action and fresh-page transfer. The original chat and a
-        // stale composer still cannot qualify. Readiness is checked separately.
-        if (!job.branchClickAttempted || !job.branchReloadFrom || job.branchReloadFrom === state.pageInstanceId ||
+        // Native provenance replaces rendered-history equality after our branch
+        // action plus either a fresh-page transfer or an observed local branch.
+        const freshPage = job.branchReloadFrom && job.branchReloadFrom !== state.pageInstanceId;
+        if (!job.branchClickAttempted || (!freshPage && !verifiedLocalBranchTransition(job, native)) ||
           !conversationIdentity(win.location.href) || conversationIdentity(win.location.href) === job.sourceConversation ||
           !native.sourceMatches || !allowNewMessages && native.hasNewMessages) return null;
         return native.turn;
       }
+      if (isLocalConversationIdentity(job.branchConversation)) return null;
       // Older native layouts without a source separator keep the strict check.
       const candidate = locateTurn(doc, job.locator);
       return turnMatchesBranchJob(candidate, job) ? candidate : null;
@@ -4690,6 +4716,9 @@
       if (!state.branchConversation && state.branchClickAttempted && currentConversation && currentConversation !== job.sourceConversation) {
         state.branchConversation = currentConversation;
         job.branchConversation = currentConversation;
+        if (state.localBranchTransition && !state.localBranchTransition.destination) {
+          state.localBranchTransition.destination = currentConversation;
+        }
         if (!await persistIncomingJob(job)) {
           showRecovery(job, 'The separate chat was found, but Workflow Toolkit could not save its identity safely. Nothing was sent.', state.recoveryTurn, { canRetry: false });
           return false;
@@ -4774,7 +4803,13 @@
               branchSource,
               job.sourceConversation,
               branchActionTimeout,
-              (control) => navigationCapture.arm(control),
+              (control) => {
+                state.localBranchTransition = {
+                  jobId: state.incomingJobId, sourceUrl: job.sourceUrl, destination: '',
+                  links: new WeakSet(doc.querySelectorAll('a[href]')),
+                };
+                navigationCapture.arm(control);
+              },
             );
             if (!clickResult.ok) {
               if (!clickResult.attempted) {
@@ -4801,6 +4836,9 @@
             return await navigateToBranchEntry(job);
           }
           const changedConversation = outcome.conversation;
+          if (state.localBranchTransition && !state.localBranchTransition.destination) {
+            state.localBranchTransition.destination = changedConversation;
+          }
           state.branchConversation = changedConversation;
           job.branchConversation = changedConversation;
           const capturedUrl = outcome.capturedUrl;
@@ -4826,16 +4864,29 @@
         showRecovery(job, 'The separate-chat identity changed before its context could be verified. Nothing was sent.', state.recoveryTurn, { canRetry: false });
         return false;
       }
-      // WEB: routes may not yet be persisted. Do not reload them, but still
-      // require the transfer into a fresh page; a changed SPA URL alone cannot
-      // prove that its composer is no longer writing to the original chat.
+      // Client-only routes may not survive a reload. Local branches can finish
+      // in this page only with newly mounted native provenance and a ready editor;
+      // other routes still require the persisted fresh-page transfer.
       if (!job.branchReloadFrom || job.branchReloadFrom === state.pageInstanceId) {
-        if (isWebConversationIdentity(expectedConversation)) {
+        if (isLocalConversationIdentity(expectedConversation)) {
+          const ready = await waitForCondition(() => {
+            const native = nativeBranchContext(doc, job.sourceUrl);
+            return isExpectedBranchConversation(job, expectedConversation) &&
+              verifiedLocalBranchTransition(job, native) && findInheritedBranchTurn(job);
+          }, {
+            root: doc.documentElement, win, timeout: branchComposerTimeout, attributes: true, pollInterval: 125,
+          });
+          if (!ready) {
+            showRecovery(job, 'The local branch opened, but its new source separator and message box could not be verified. Nothing was sent. Keep this tab open; Try again only checks this branch.', null);
+            return false;
+          }
+        } else if (isClientConversationIdentity(expectedConversation)) {
           showRecovery(job, 'This WEB: branch has no verified page transfer. Nothing was sent. Start a new side question from the original chat.', null, { canRetry: false });
           return false;
+        } else {
+          await requestVerifiedBranchReload(job);
+          return false;
         }
-        await requestVerifiedBranchReload(job);
-        return false;
       }
       await new Promise((resolve) => win.setTimeout(resolve, 500));
       if (!isExpectedBranchConversation(job, expectedConversation)) {
@@ -4899,6 +4950,7 @@
     function clearIncomingJobState() {
       state.incomingJobId = '';
       state.branchConversation = '';
+      state.localBranchTransition = null;
       state.branchClickAttempted = false;
       state.sideSendAttempted = false;
       try {

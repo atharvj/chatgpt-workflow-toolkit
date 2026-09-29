@@ -10,15 +10,17 @@ const toolkit = require('../chatgpt-workflow-toolkit.user.js');
 // Real ProseMirror model, view, and DOM-observer updates in an isolated DOM.
 // No ChatGPT/browser account is opened or contacted by these tests.
 async function fixture(t, mode) {
+  const local = mode.startsWith('local-');
   const sourceId = 'source-lab';
   const jobId = 'rich_editor_job_12345';
   const jobKey = `chatgptSidecar.job.v1.${jobId}`;
   const dom = new JSDOM(`<!doctype html><main>
     <article data-testid="conversation-turn-0"><div data-message-author-role="user">Explain the lab.</div></article>
-    <article data-testid="conversation-turn-1"><div data-message-author-role="assistant">Methods: follow these steps.</div></article>
-    <p>Branched from <a href="/c/${sourceId}" target="_self" rel="noopener">Example lab</a></p>
+    <article data-testid="conversation-turn-1"><div data-message-author-role="assistant" data-message-id="answer-one">Methods: follow these steps.</div>
+      ${local ? '<button data-testid="branch-turn-action-button">Branch in new chat</button>' : ''}</article>
+    ${local ? '' : `<p>Branched from <a href="/c/${sourceId}" target="_self" rel="noopener">Example lab</a></p>`}
     <form><div data-editor-host></div><button type="button" data-testid="send-button" disabled>Send</button></form>
-    </main>`, { url: 'https://chatgpt.com/c/WEB:dddddddd-dddd-4ddd-8ddd-dddddddddddd', pretendToBeVisual: true });
+    </main>`, { url: local ? `https://chatgpt.com/c/${sourceId}` : 'https://chatgpt.com/c/WEB:dddddddd-dddd-4ddd-8ddd-dddddddddddd', pretendToBeVisual: true });
   const { window: win } = dom;
   const doc = win.document;
   const storage = new Map();
@@ -43,7 +45,7 @@ async function fixture(t, mode) {
   let view;
   const mountEditor = (state) => new EditorView(doc.querySelector('[data-editor-host]'), {
     state,
-    attributes: { id: 'prompt-textarea', role: 'textbox', style: 'white-space: pre-wrap;' },
+    attributes: { ...(local ? {} : { id: 'prompt-textarea' }), role: 'textbox', style: 'white-space: pre-wrap;' },
     dispatchTransaction(transaction) {
       this.updateState(this.state.apply(transaction));
       sendButton.disabled = !this.state.doc.textContent;
@@ -80,9 +82,14 @@ async function fixture(t, mode) {
   const quote = mode === 'native-paste' ? 'Methods:' : 'Methods:\n```python\nif ready:\n  send()\n```\nUse θ₁, a*b, <tag>, and 👩‍🔬.';
   const question = toolkit.buildSelectedQuestion(quote, 'what does this word mean');
   const job = toolkit.sanitizeJob({ createdAt: Date.now(), sourceUrl: `https://chatgpt.com/c/${sourceId}`,
-    kind: 'ask', question, branchClickAttempted: true,
-    branchConversation: toolkit.conversationIdentity(win.location.href), branchReloadFrom: 'source_page_12345',
+    kind: 'ask', question, branchClickAttempted: !local,
+    branchConversation: local ? '' : toolkit.conversationIdentity(win.location.href), branchReloadFrom: local ? '' : 'source_page_12345',
   });
+  if (local) doc.querySelector('[data-testid="branch-turn-action-button"]').onclick = () => {
+    win.history.pushState({}, '', '/c/local-chatgpt%3Adddddddd-dddd-4ddd-8ddd-dddddddddddd');
+    doc.querySelector('form').insertAdjacentHTML('beforebegin', `<div><span aria-hidden="true"></span><span>Continued from </span><a href="/c/${sourceId}">Example lab</a></div>`);
+    if (mode === 'local-remount') { view.destroy(); view = mountEditor(EditorState.create({ schema })); }
+  };
   storage.set(jobKey, job);
   const sent = [];
   sendButton.addEventListener('click', () => {
@@ -99,7 +106,8 @@ async function fixture(t, mode) {
     doc.querySelector('form').before(article);
     view.dispatch(view.state.tr.delete(0, view.state.doc.content.size));
   });
-  const app = toolkit.createApp(doc, win, { branchComposerTimeout: 2_000, sideSendAckTimeout: 300 });
+  const app = toolkit.createApp(doc, win, { branchComposerTimeout: 2_000, sideSendAckTimeout: 300,
+    reloadPage: () => assert.fail('local branch must not reload') });
   t.after(() => {
     app.state.observer?.disconnect();
     view.destroy();
@@ -114,7 +122,7 @@ async function fixture(t, mode) {
   return { app, doc, job, storage, jobKey, sent, modelText: () => view.state.doc.textBetween(0, view.state.doc.content.size, '\n', '\n') };
 }
 
-for (const mode of ['native-paste', 'native-raw-newlines', 'fallback-paragraphs', 'remount']) {
+for (const mode of ['native-paste', 'native-raw-newlines', 'fallback-paragraphs', 'remount', 'local-reused', 'local-remount']) {
   test(`a verified native branch inserts and sends exactly once through real ProseMirror: ${mode}`, async (t) => {
     const { app, doc, job, storage, jobKey, sent } = await fixture(t, mode);
     assert.equal(await app.runIncomingJob(job), true, doc.querySelector('#cgs-recovery-reason').textContent);
