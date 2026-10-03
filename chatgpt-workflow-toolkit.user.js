@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.22
+// @version      1.10.23
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.22';
+  const VERSION = '1.10.23';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1371,6 +1371,41 @@
     for (const control of collectMatches(root, `.${HIDDEN_SHARE_HIGHLIGHTED_CLASS}`)) {
       control.classList.remove(HIDDEN_SHARE_HIGHLIGHTED_CLASS);
     }
+  }
+
+  function cleanChatGPTReferralUrl(value, baseUrl) {
+    const raw = String(value == null ? '' : value);
+    try {
+      const url = new URL(raw, baseUrl);
+      if (!/^https?:$/u.test(url.protocol) ||
+          ['chatgpt.com', 'chat.openai.com'].includes(url.hostname)) return raw;
+      const hashIndex = raw.indexOf('#');
+      const address = hashIndex < 0 ? raw : raw.slice(0, hashIndex);
+      const hash = hashIndex < 0 ? '' : raw.slice(hashIndex);
+      const queryIndex = address.indexOf('?');
+      if (queryIndex < 0) return raw;
+      const parts = address.slice(queryIndex + 1).split('&');
+      const kept = parts.filter((part) => {
+        const params = new URLSearchParams(part);
+        return !params.getAll('utm_source').some((source) => source.toLowerCase() === 'chatgpt.com');
+      });
+      if (kept.length === parts.length) return raw;
+      // Don't reserialize unrelated parameters: preserve their encoding, order,
+      // duplicates, and the fragment exactly as the destination supplied them.
+      const query = kept.join('&');
+      return address.slice(0, queryIndex) + (query ? `?${query}` : '') + hash;
+    } catch (_error) { return raw; }
+  }
+
+  function cleanReferralLinks(root) {
+    let changes = 0;
+    for (const link of collectMatches(root, 'a[href], area[href]')) {
+      if (link.closest(`#${UI_ROOT_ID}, [contenteditable]:not([contenteditable="false"])`)) continue;
+      const href = link.getAttribute('href');
+      const cleaned = cleanChatGPTReferralUrl(href, link.ownerDocument.baseURI);
+      if (cleaned !== href) { link.setAttribute('href', cleaned); changes++; }
+    }
+    return changes;
   }
 
   function canonicalPageUrl(value) {
@@ -3731,6 +3766,7 @@
 
     function processRoot(root, decorationContext = null) {
       if (!root || !root.isConnected || (root.closest && root.closest(`#${UI_ROOT_ID}`))) return;
+      cleanReferralLinks(root);
       syncCookieFooter(root);
       const context = decorationContext || { streamingTurn: inferredStreamingTurn(doc) };
       if (state.readingTools) state.readingTools.process(root, context);
@@ -5304,9 +5340,16 @@
             const control = mutation.target.parentElement && mutation.target.parentElement.closest(SHARE_HIGHLIGHTED_CONTROL_SELECTOR);
             if (control) scheduleScan(control);
           } else if (mutation.type === 'attributes') {
+            if (mutation.attributeName === 'href') {
+              cleanReferralLinks(mutation.target);
+              continue;
+            }
             scheduleScan(mutation.target);
           } else {
-            for (const node of mutation.addedNodes) scheduleScan(node);
+            for (const node of mutation.addedNodes) {
+              cleanReferralLinks(node);
+              scheduleScan(node);
+            }
             if (mutation.removedNodes.length) scheduleScan(mutation.target);
           }
         }
@@ -5317,7 +5360,7 @@
         characterData: true,
         attributes: true,
         attributeFilter: [
-          'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label', 'title', 'role',
+          'href', 'placeholder', 'aria-placeholder', 'data-placeholder', 'aria-label', 'title', 'role',
           'hidden', 'inert', 'aria-hidden', 'data-state', 'style', 'class',
           'data-message-author-role', 'data-turn', 'data-testid', 'data-is-streaming', 'data-streaming',
           'data-chatgpt-search-unit-key', 'data-content-search-unit-key', 'data-markdown-text-style',
@@ -5341,6 +5384,17 @@
       state.root = createUI(doc);
       state.readingTools = createReadingTools(doc, win, { root: state.root, getSettings: () => state.settings, toast, scheduleDockPosition });
       syncSettingsUI();
+      // Update the actual href, keeping native clicks, modifier keys, context
+      // menus, and popup policies intact. Also catch activation before a scan.
+      const cleanActivatedLink = (event) => {
+        const target = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
+        const link = target?.closest('a[href], area[href]');
+        if (link) cleanReferralLinks(link);
+      };
+      for (const type of ['pointerdown', 'mousedown', 'click', 'auxclick', 'contextmenu', 'keydown']) {
+        doc.addEventListener(type, cleanActivatedLink, true);
+      }
+      cleanReferralLinks(doc.body);
       doc.addEventListener('click', onAutomationClick, true);
       doc.addEventListener('keydown', onAutomationKeyDown, true);
       doc.addEventListener('submit', onAutomationSubmit, true);
@@ -5439,6 +5493,8 @@
     nativeBranchContext,
     cleanStartWriting,
     cleanShareHighlighted,
+    cleanChatGPTReferralUrl,
+    cleanReferralLinks,
     restoreStartWriting,
     canonicalPageUrl,
     routeKey,

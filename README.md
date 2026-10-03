@@ -11,6 +11,7 @@ A lightweight userscript for ChatGPT bookmarks, reading shortcuts, and separate 
 - Click **Ask in new chat** under an answer to ask about that entire answer instead. Ask and Bookmark sit beside its response actions.
 - Remove “Start writing.”
 - Hide the “Share highlighted” selection button.
+- Automatically remove `utm_source=chatgpt.com` from external links, including new-tab, middle-click, and context-menu opening. Other query parameters and anchors stay unchanged. This cleans page links, not URLs opened directly by JavaScript or tracking added by the destination site.
 - Remove the bottom Cookie preferences gap; Cookie preferences stays available in the toolkit’s settings.
 - Math highlights use source notation when available, otherwise compact display text with an instruction to check the original equations. Partial equations are included whole. **Show full highlight** expands the preview. This improves context, not a guarantee of correct answers.
 
