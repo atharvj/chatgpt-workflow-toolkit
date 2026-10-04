@@ -90,7 +90,6 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
     let navigations = 0;
     let nativePopups = 0;
     const pageWindow = { open() { nativePopups += 1; return null; } };
-    const originalOpen = pageWindow.open;
     const copy = await fixture(t, 'https://chatgpt.com/c/source-chat', {
       pageInstanceId: 'source_copy_page_1234',
       sandbox: mode === 'sandbox-pointer' || mode.startsWith('submenu'),
@@ -106,6 +105,7 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
         return !(mode === 'popup' && !typedQuestion && navigations === 1);
       },
     });
+    const originalOpen = pageWindow.open;
     let branches = 0;
     const branchAction = copy.doc.querySelector('[data-testid="branch-turn-action-button"]');
     if (mode === 'submenu-identity') {

@@ -92,3 +92,56 @@ for (const type of ['pointerdown', 'mousedown', 'click', 'auxclick', 'contextmen
     assert.equal(observed, true, 'toolkit does not stop event propagation');
   });
 }
+
+test('page click handlers retaining the original URL and source buttons open clean URLs', async (t) => {
+  const tagged = 'https://example.com/article?keep=a%20b&utm_source=chatgpt.com#section';
+  const dom = new JSDOM(`<body><a target="_blank" href="${tagged}">Source</a><button>Source citation</button></body>`, {
+    url: 'https://chatgpt.com/c/test', pretendToBeVisual: true,
+  });
+  const calls = [];
+  const result = { closed: false };
+  const page = { open(...args) { calls.push({ receiver: this, args }); return result; } };
+  const { document: doc } = dom.window;
+  const app = toolkit.createApp(doc, dom.window, { pageWindow: page });
+  t.after(() => { app.state.observer.disconnect(); dom.window.close(); });
+  // This models a handler reading its React prop rather than the live href.
+  const link = doc.querySelector('a');
+  link.addEventListener('click', (event) => { event.preventDefault(); assert.equal(page.open(tagged, '_blank', 'noopener,noreferrer'), result); });
+  doc.querySelector('button').addEventListener('click', () => page.open(tagged, '_blank'));
+  await app.start();
+  assert.equal(link.href, 'https://example.com/article?keep=a%20b#section');
+  link.click();
+  doc.querySelector('button').click();
+  assert.equal(calls.length, 2, 'one tab per click');
+  assert.deepEqual(calls[0].args, ['https://example.com/article?keep=a%20b#section', '_blank', 'noopener,noreferrer']);
+  assert.deepEqual(calls[1].args, ['https://example.com/article?keep=a%20b#section', '_blank']);
+  assert.equal(calls[0].receiver, page);
+});
+
+test('open cleanup preserves internal Branch URLs, blank reservations and third-party hooks', (t) => {
+  const dom = new JSDOM('', { url: 'https://chatgpt.com/c/source' });
+  t.after(() => dom.window.close());
+  const calls = [];
+  const original = function (...args) { calls.push(args); return null; };
+  const page = { open: original };
+  dom.window.open = original;
+  const cleanup = toolkit.installReferralOpenCleanup(dom.window.document, dom.window, page);
+  page.open('about:blank', '_blank');
+  dom.window.open(undefined, '_blank');
+  page.open('/c/source?utm_source=chatgpt.com', '_self');
+  const capture = toolkit.captureBranchNavigation(dom.window.document, dom.window, page, dom.window.location.href);
+  capture.arm();
+  assert.equal(page.open('/c/branch', '_blank'), dom.window);
+  assert.equal(capture.getDestination(), 'https://chatgpt.com/c/branch');
+  capture.dispose();
+  page.open('https://example.com/?utm_source=chatgpt.com', '_blank');
+  assert.deepEqual(calls, [
+    ['about:blank', '_blank'], [undefined, '_blank'], ['/c/source?utm_source=chatgpt.com', '_self'],
+    ['https://example.com/', '_blank'],
+  ]);
+  const unrelatedHook = () => null;
+  page.open = unrelatedHook;
+  cleanup.dispose();
+  assert.equal(page.open, unrelatedHook);
+  assert.equal(dom.window.open, original);
+});

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.23
+// @version      1.10.24
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.23';
+  const VERSION = '1.10.24';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -1406,6 +1406,32 @@
       if (cleaned !== href) { link.setAttribute('href', cleaned); changes++; }
     }
     return changes;
+  }
+
+  function installReferralOpenCleanup(doc, win, pageWindow) {
+    const originals = [];
+    // React handlers can retain the original URL even after its anchor href
+    // changes, or construct a tagged URL when a source button is clicked.
+    // Clean the URL handed to the browser in both the page and script realms.
+    for (const target of new Set([pageWindow, win].filter(Boolean))) {
+      try {
+        const original = target.open;
+        if (typeof original !== 'function' || originals.some((hook) => hook.replacement === original)) continue;
+        const replacement = function (...args) {
+          if (typeof args[0] === 'string') args[0] = cleanChatGPTReferralUrl(args[0], doc.baseURI);
+          return Reflect.apply(original, this, args);
+        };
+        target.open = replacement;
+        if (target.open === replacement) originals.push({ target, original, replacement });
+      } catch (_error) { /* Anchor cleanup still works if the page realm is restricted. */ }
+    }
+    return {
+      dispose() {
+        for (const { target, original, replacement } of originals.reverse()) {
+          try { if (target.open === replacement) target.open = original; } catch (_error) { /* Preserve another script's hook. */ }
+        }
+      },
+    };
   }
 
   function canonicalPageUrl(value) {
@@ -5384,6 +5410,7 @@
       state.root = createUI(doc);
       state.readingTools = createReadingTools(doc, win, { root: state.root, getSettings: () => state.settings, toast, scheduleDockPosition });
       syncSettingsUI();
+      installReferralOpenCleanup(doc, win, pageWindow);
       // Update the actual href, keeping native clicks, modifier keys, context
       // menus, and popup policies intact. Also catch activation before a scan.
       const cleanActivatedLink = (event) => {
@@ -5495,6 +5522,7 @@
     cleanShareHighlighted,
     cleanChatGPTReferralUrl,
     cleanReferralLinks,
+    installReferralOpenCleanup,
     restoreStartWriting,
     canonicalPageUrl,
     routeKey,

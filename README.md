@@ -11,7 +11,7 @@ A lightweight userscript for ChatGPT bookmarks, reading shortcuts, and separate 
 - Click **Ask in new chat** under an answer to ask about that entire answer instead. Ask and Bookmark sit beside its response actions.
 - Remove “Start writing.”
 - Hide the “Share highlighted” selection button.
-- Automatically remove `utm_source=chatgpt.com` from external links, including new-tab, middle-click, and context-menu opening. Other query parameters and anchors stay unchanged. This cleans page links, not URLs opened directly by JavaScript or tracking added by the destination site.
+- Automatically remove `utm_source=chatgpt.com` from external links, including new-tab, middle-click, context-menu opening, and URLs opened through JavaScript's `window.open`. Other query parameters and anchors stay unchanged. Tracking added by the destination site is outside the script's reach.
 - Remove the bottom Cookie preferences gap; Cookie preferences stays available in the toolkit’s settings.
 - Math highlights use source notation when available, otherwise compact display text with an instruction to check the original equations. Partial equations are included whole. **Show full highlight** expands the preview. This improves context, not a guarantee of correct answers.
 
@@ -19,7 +19,7 @@ Requires ChatGPT’s Branch action. Supports **Open new branch → Branch in new
 
 Bookmarks save labels and short text references per chat in your userscript manager’s browser storage (up to 100 per chat). Nothing is sent to ChatGPT. Older answers must be loaded to jump to bookmarks. Return restores saved scroll coordinates when a message is unloaded, then aligns it if it remounts; otherwise the position is approximate. The temporary return spot clears on reload or switching chats.
 
-The script uses page-window access only during automatic branching to open the result in the existing side window instead of another popup.
+The script uses page-window access to clean external URLs passed to `window.open`, and during automatic branching to open the result in the existing side window instead of another popup.
 
 ## Install
 

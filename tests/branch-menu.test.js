@@ -23,7 +23,6 @@ for (const mode of [
       <form><textarea id="prompt-textarea">My existing draft</textarea><button type="button" data-testid="send-button">Send</button></form>
     </main></body></html>`, { url: 'https://chatgpt.com/c/source-chat', pretendToBeVisual: true });
     const win = dom.window;
-    const originalOpen = win.open;
     const doc = win.document;
     const turn = doc.querySelector('#turn');
     const menu = doc.querySelector('#menu');
@@ -87,10 +86,12 @@ for (const mode of [
     }
     let hovers = 0;
     turn.addEventListener('pointerover', () => { hovers++; });
-    const scriptOpen = scriptWindow.open;
     const app = toolkit.createApp(doc, scriptWindow, { pageWindow: win, branchActionTimeout: 100, branchNavigationTimeout: 600 });
     t.after(() => { app.state.observer?.disconnect(); win.close(); });
     await app.start();
+    // The URL cleaner is permanent; only the temporary Branch hook is removed.
+    const originalOpen = win.open;
+    const scriptOpen = scriptWindow.open;
     const job = toolkit.sanitizeJob({
       createdAt: Date.now(), sourceUrl: win.location.href, kind: 'ask', autoSend: true,
       locator: toolkit.getTurnLocator(turn, doc),

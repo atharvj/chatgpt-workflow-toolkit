@@ -74,7 +74,6 @@ for (const mode of ['redirect-after-start', 'redirect-before-start', 'WEB-to-ser
     const source = page(t, sourceUrl);
     let normalPopups = 0;
     const realPage = { open() { normalPopups += 1; return null; } };
-    const originalOpen = realPage.open;
     let navigation = '';
     let reloads = 0;
     const app = toolkit.createApp(source.doc, source.win, {
@@ -89,6 +88,7 @@ for (const mode of ['redirect-after-start', 'redirect-before-start', 'WEB-to-ser
     });
     t.after(() => app.state.observer?.disconnect());
     await app.start();
+    const originalOpen = realPage.open;
     const turn = source.doc.querySelectorAll('article')[1];
     const question = toolkit.buildSelectedQuestion('Keep the units consistent.', 'Why is this important?');
     const job = toolkit.sanitizeJob({
