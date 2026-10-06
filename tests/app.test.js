@@ -1,5 +1,7 @@
 'use strict';
 
+const highlightText = require('./helpers/highlight');
+
 const assert = require('node:assert/strict');
 const { join } = require('node:path');
 const test = require('node:test');
@@ -74,11 +76,11 @@ test('app smoke: installs a single whole-chat, auto-send side-question flow', as
 
   const { document } = dom.window;
   const app = await toolkit.install(document, dom.window);
-  await waitFor(() => document.querySelector('.cgs-turn-action') && !document.querySelector('#cgs-dock').hidden, dom.window);
+  await waitFor(() => !document.querySelector('#cgs-dock').hidden, dom.window);
 
-  const turnButton = document.querySelector('.cgs-turn-action');
-  assert.ok(turnButton, 'assistant response receives one Ask in new chat control');
-  assert.equal(turnButton.textContent, '↗ Ask in new chat');
+  assert.equal(document.querySelector('.cgs-turn-action, .cgs-bookmark-action'), null);
+  const turnButton = await highlightText(document);
+  assert.equal(turnButton.hidden, false);
   assert.equal(document.querySelector('#cgs-dock').hidden, false);
   assert.equal(document.querySelector('[data-cgs-action="toggle-settings"]').textContent, '⚙');
   assert.equal(document.querySelector('#cgs-selection-pill').textContent, 'Ask in new chat');
@@ -281,9 +283,7 @@ test('side question from an older answer targets the latest answer and always au
   try {
     app = toolkit.createApp(dom.window.document, dom.window);
     await app.start();
-    await waitFor(() => dom.window.document.querySelectorAll('.cgs-turn-action').length === 2, dom.window);
-
-    dom.window.document.querySelector('[data-testid="conversation-turn-1"] .cgs-turn-action').click();
+    (await highlightText(dom.window.document)).click();
     dom.window.document.querySelector('#cgs-question').value = 'Explain the newest answer in another way.';
     const submit = dom.window.document.querySelector('[data-cgs-action="submit-question"]');
     submit.click();
@@ -298,7 +298,7 @@ test('side question from an older answer targets the latest answer and always au
     assert.equal(job.locator.testId, 'conversation-turn-3');
     assert.equal(job.sourceConversation, 'whole-chat-test');
     assert.match(job.targetFingerprint, /Newest answer/u);
-    assert.equal(job.question, toolkit.buildResponseQuestion('Older answer', 'Explain the newest answer in another way.'));
+    assert.equal(job.question, toolkit.buildSelectedQuestion('Older answer', 'Explain the newest answer in another way.'));
     assert.equal(job.autoSend, true);
     assert.equal(openCalls.length, 1, 'a double submit reserves only one child window');
     assert.equal(openCalls[0].url, 'about:blank', 'the popup is reserved synchronously from the submit click');
@@ -328,9 +328,7 @@ test('side question waits instead of silently omitting an unfinished latest resp
   dom.window.open = () => { openCount += 1; return null; };
   const app = toolkit.createApp(dom.window.document, dom.window);
   await app.start();
-  await waitFor(() => dom.window.document.querySelector('.cgs-turn-action'), dom.window);
-
-  dom.window.document.querySelector('.cgs-turn-action').click();
+  (await highlightText(dom.window.document)).click();
   dom.window.document.querySelector('#cgs-question').value = 'What about the unfinished part?';
   dom.window.document.querySelector('[data-cgs-action="submit-question"]').click();
 

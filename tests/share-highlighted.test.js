@@ -1,5 +1,7 @@
 'use strict';
 
+const highlightText = require('./helpers/highlight');
+
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { JSDOM } = require('jsdom');
@@ -103,7 +105,7 @@ for (const scenario of [
     const calls = [];
     const child = { location: { replace(url) { this.href = url; } }, focus() {} };
     dom.window.open = (url, name, features) => { calls.push({ url, name, features }); return child; };
-    document.querySelector('.cgs-turn-action').click();
+    (await highlightText(document)).click();
     document.querySelector('#cgs-question').value = 'Explain this';
     document.querySelector('[data-cgs-action="submit-question"]').click();
     assert.equal(calls.length, 1, 'the popup is reserved synchronously before async storage work');

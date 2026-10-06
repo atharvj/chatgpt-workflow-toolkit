@@ -120,28 +120,11 @@ test('extractAssistantContent rejects non-assistant turns', () => {
   assert.equal(toolkit.extractAssistantContent(null), '');
 });
 
-test('decorateTurn adds one Ask in new chat control per assistant response', () => {
-  const { document } = createDom(`
-    <article id="assistant" data-testid="conversation-turn-1" data-turn="assistant">
-      <div class="actions"><button data-testid="copy-turn-action-button">Copy</button></div>
-    </article>
-    <article id="fallback" data-testid="conversation-turn-2" data-turn="assistant"><p>Answer</p></article>
-    <article id="user" data-testid="conversation-turn-3" data-turn="user"><p>Question</p></article>
-  `).window;
-  const assistant = document.querySelector('#assistant');
-  const fallback = document.querySelector('#fallback');
-
-  assert.equal(toolkit.decorateTurn(document, assistant), true);
-  assert.equal(assistant.querySelector('.actions > .cgs-turn-action').textContent, '↗ Ask in new chat');
-  assert.equal(toolkit.decorateTurn(document, assistant), false, 'duplicate controls are not added');
-  assert.equal(toolkit.decorateTurn(document, fallback), true);
-  assert.ok(fallback.querySelector('.cgs-turn-fallback-row > .cgs-turn-action'));
-  assert.equal(toolkit.decorateTurn(document, document.querySelector('#user')), false);
-
+test('legacy footer cleanup removes injected buttons and keeps native actions', () => {
+  const { document } = createDom('<article><div class="actions"><button>Copy</button><button class="cgs-turn-action" data-cgs-injected="true">Ask</button><button class="cgs-bookmark-action" data-cgs-injected="true">Bookmark</button></div><div class="cgs-turn-fallback-row"><button class="cgs-turn-action" data-cgs-injected="true">Ask</button></div></article>').window;
   toolkit.removeTurnButtons(document);
-  assert.equal(document.querySelectorAll('.cgs-turn-action').length, 0);
-  assert.equal(document.querySelectorAll('.cgs-turn-fallback-row').length, 0);
-  assert.ok(assistant.querySelector('.actions'), 'native action rows remain intact');
+  assert.equal(document.querySelector('.cgs-turn-action, .cgs-bookmark-action, .cgs-turn-fallback-row'), null);
+  assert.equal(document.querySelector('.actions').textContent, 'Copy');
 });
 
 test('cleanStartWriting clears editable hints and hides standalone controls', () => {

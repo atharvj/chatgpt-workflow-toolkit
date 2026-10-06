@@ -1,5 +1,7 @@
 'use strict';
 
+const highlightText = require('./helpers/highlight');
+
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { JSDOM } = require('jsdom');
@@ -176,14 +178,13 @@ for (const mode of [
   }
 });
 
-test('paired prompt/answer footer: find More, put both controls beside it, and keep the answer owner', async (t) => {
+test('paired prompt/answer footer remains native and highlights keep the answer owner', async (t) => {
   const { doc, win, app, turns } = await fixture(t);
   for (const [index, turn] of turns.entries()) {
     const more = doc.querySelector(`#more-${index + 1}`);
     assert.equal(toolkit.findMoreButton(turn), more);
-    assert.equal(more.nextElementSibling?.dataset.cgsAction, 'ask-turn');
-    assert.equal(more.nextElementSibling.nextElementSibling?.dataset.cgsAction, 'reading-add');
-    more.nextElementSibling.click();
+    assert.equal(more.parentElement.querySelector('[data-cgs-injected]'), null);
+    (await highlightText(doc, turn.querySelector('[data-markdown-text-style]') || turn)).click();
     assert.equal(app.state.activeTurn, turn);
     assert.equal(doc.querySelector('#cgs-selected-context').textContent, `Answer ${index + 1}`);
     doc.querySelector('[data-cgs-action="cancel-question"]').click();
@@ -192,8 +193,8 @@ test('paired prompt/answer footer: find More, put both controls beside it, and k
   const row = doc.querySelector('#more-2').parentElement;
   const replacement = row.cloneNode(true); row.replaceWith(replacement);
   app.processRoot(replacement);
-  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
-  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 0);
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 0);
   assert.equal(toolkit.findMoreButton(turns[1]), doc.querySelector('#more-2'));
   await new Promise((resolve) => win.setTimeout(resolve, 200));
   const changes = [];
@@ -242,20 +243,19 @@ for (const eventType of ['click', 'pointerdown', 'sandbox-pointer', 'submenu']) 
   assert.equal(doc.querySelector('#prompt-textarea').value, 'Existing draft');
 });
 
-for (const duplicatePrompt of ['nested', 'sibling']) test(`duplicate ${duplicatePrompt} prompt key keeps stable footer controls owned by the answer`, async (t) => {
+for (const duplicatePrompt of ['nested', 'sibling']) test(`duplicate ${duplicatePrompt} prompt key keeps native footers and the selected answer`, async (t) => {
   const { doc, win, app, turns } = await fixture(t, { duplicatePrompt });
   const answer = turns[1], more = doc.querySelector('#more-2');
   assert.equal(toolkit.findMoreButton(answer), more);
-  assert.equal(more.nextElementSibling?.dataset.cgsAction, 'ask-turn');
-  assert.equal(more.nextElementSibling.nextElementSibling?.dataset.cgsAction, 'reading-add');
-  more.nextElementSibling.click();
+  assert.equal(more.parentElement.querySelector('[data-cgs-injected]'), null);
+  (await highlightText(doc, answer.querySelector('[data-markdown-text-style]') || answer)).click();
   assert.equal(app.state.activeTurn, answer);
   assert.equal(doc.querySelector('#cgs-selected-context').textContent, 'Answer 2');
   doc.querySelector('[data-cgs-action="cancel-question"]').click();
   app.processRoot(answer.closest('[data-content-search-turn-key]'));
   await new Promise((resolve) => win.setTimeout(resolve, 150));
-  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
-  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 0);
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 0);
   assert.equal(doc.querySelector('.cgs-turn-fallback-row'), null);
 });
 

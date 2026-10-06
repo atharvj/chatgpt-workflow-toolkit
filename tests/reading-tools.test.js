@@ -1,5 +1,7 @@
 'use strict';
 
+const highlightText = require('./helpers/highlight');
+
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { readFileSync } = require('node:fs');
@@ -63,18 +65,29 @@ async function setup(t, values = new Map(), options = {}) {
     assert.ok(target, action); target.click(); return target;
   };
   async function save(label = 'Lab instructions') {
-    click('reading-add');
+    const selection = win.getSelection();
+    const range = selection.rangeCount && !selection.isCollapsed ? selection.getRangeAt(0).cloneRange() : null;
+    await highlightText(doc, doc.querySelector('#passage'), range);
+    click('bookmark-selection');
     doc.querySelector('#cgs-bookmark-label').value = label;
     click('reading-save');
     await app.state.readingTools.state.writes;
     await settle(win, () => !doc.querySelector('[data-cgs-action="reading-save"]').disabled);
+  }
+  async function saveLegacy(label = 'Legacy whole answer') {
+    const bookmark = { id: 'legacy_bookmark_123', label, ...toolkit.readingAnchor(turns[0]),
+      prompt: toolkit.readingAnchor(prompts[0]), quote: '' };
+    values.set(storageKey, [bookmark]);
+    if (!doc.querySelector('#cgs-bookmarks-panel').hidden) click('reading-close');
+    click('reading-bookmarks');
+    await settle(win, () => app.state.readingTools.state.bookmarks.some(item => item.id === bookmark.id));
   }
   t.after(() => {
     assert.equal(sends, 0, 'never send a message');
     assert.equal(doc.querySelector('#prompt-textarea').value, 'Do not change my draft.');
     app.state.observer.disconnect(); win.close();
   });
-  return { doc, win, app, values, turns, scroller, click, save, fingerprint, grow: (amount) => { growth += amount; } };
+  return { doc, win, app, values, turns, scroller, click, save, saveLegacy, fingerprint, grow: (amount) => { growth += amount; } };
 }
 
 async function highlightForBookmark(fixture, node = fixture.doc.querySelector('#passage'), end = null) {
@@ -205,7 +218,8 @@ test('highlight is captured before focus and falls back to its paragraph when li
   const { doc, win, click, app, values, scroller } = await setup(t);
   const range = doc.createRange(); range.selectNodeContents(doc.querySelector('#passage'));
   win.getSelection().removeAllRanges(); win.getSelection().addRange(range);
-  const button = doc.querySelector('[data-cgs-action="reading-add"]');
+  await highlightText(doc, doc.querySelector('#passage'), range);
+  const button = doc.querySelector('#cgs-selection-bookmark');
   button.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true }));
   win.getSelection().removeAllRanges();
   button.click();
@@ -248,7 +262,7 @@ test('sentence bookmark survives reload and jumps to its line across changed inl
 });
 
 test('whole-response bookmark still jumps to its preceding user message after reload', async (t) => {
-  const first = await setup(t); await first.save('Whole answer');
+  const first = await setup(t); await first.saveLegacy('Whole answer');
   assert.equal(first.values.get(storageKey)[0].quote, '');
   const second = await setup(t, first.values);
   second.scroller.scrollTop = 1800;
@@ -257,7 +271,7 @@ test('whole-response bookmark still jumps to its preceding user message after re
 });
 
 test('whole-answer bookmarks resolve a prompt inside duplicate nested search-unit wrappers', async (t) => {
-  const { doc, scroller, click, save } = await setup(t);
+  const { doc, scroller, click, saveLegacy: save } = await setup(t);
   const prompt = doc.querySelector('[data-testid="conversation-turn-0"]');
   prompt.removeAttribute('data-testid');
   prompt.setAttribute('data-content-search-unit-key', 'fallback-turn-0:0:user');
@@ -271,7 +285,7 @@ test('whole-answer bookmarks resolve a prompt inside duplicate nested search-uni
 });
 
 test('whole-answer bookmarks measure rendered prompt content when its wrapper has no box', async (t) => {
-  const { doc, scroller, click, save } = await setup(t);
+  const { doc, scroller, click, saveLegacy: save } = await setup(t);
   const prompt = doc.querySelector('[data-testid="conversation-turn-0"]');
   prompt.firstElementChild.getBoundingClientRect = prompt.getBoundingClientRect;
   prompt.style.display = 'contents';
@@ -282,7 +296,7 @@ test('whole-answer bookmarks measure rendered prompt content when its wrapper ha
 });
 
 test('bookmark jump realigns after lazy content above the target changes height', async (t) => {
-  const { doc, win, scroller, click, save, grow } = await setup(t);
+  const { doc, win, scroller, click, saveLegacy: save, grow } = await setup(t);
   await save(); scroller.scrollTop = 1800; click('reading-jump');
   assert.equal(scroller.scrollTop, 76);
   grow(400);
@@ -292,7 +306,7 @@ test('bookmark jump realigns after lazy content above the target changes height'
 });
 
 test('bookmark jump converts scaled viewport geometry to CSS scroll coordinates', async (t) => {
-  const { doc, scroller, click, save } = await setup(t);
+  const { doc, scroller, click, saveLegacy: save } = await setup(t);
   Object.defineProperty(scroller, 'offsetHeight', { value: 500 });
   scroller.getBoundingClientRect = () => ({ top: 60, bottom: 435, height: 375 });
   const prompt = doc.querySelector('[data-testid="conversation-turn-0"]');
@@ -448,157 +462,39 @@ test('recognized native jump is replaced with instant jump; unrelated controls d
   assert.equal(scroller.scrollTop, 200);
 });
 
-test('Bookmark shares the native footer and toggles without removing Ask', async (t) => {
-  const { doc, win, app, turns } = await setup(t);
-  for (const turn of turns) {
-    const button = turn.querySelector('.cgs-bookmark-action');
-    assert.equal(button.parentElement, turn.querySelector('[data-testid="copy-turn-action-button"]').parentElement);
-    assert.notEqual(button.parentElement, turn);
-  }
-  const toggle = doc.querySelector('[data-cgs-setting="bookmarks"]');
-  toggle.checked = false; toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
-  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 0);
-  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
-  toggle.checked = true; toggle.dispatchEvent(new win.Event('change', { bubbles: true }));
-  app.processRoot(doc.body);
-  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
-  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
-});
-
-test('both controls use a temporary row and migrate when the native footer mounts', async (t) => {
-  const { doc, turns, app } = await setup(t);
-  const footer = turns[0].querySelector('[data-testid="copy-turn-action-button"]').parentElement;
-  footer.remove();
-  app.processRoot(turns[0]);
-  assert.ok(turns[0].querySelector('.cgs-turn-fallback-row .cgs-bookmark-action'));
-  assert.ok(turns[0].querySelector('.cgs-turn-fallback-row .cgs-turn-action'));
-  turns[0].append(footer); app.processRoot(footer); app.processRoot(footer);
-  assert.equal(footer.querySelectorAll('.cgs-bookmark-action').length, 1);
-  assert.equal(footer.querySelectorAll('.cgs-turn-action').length, 1);
-  assert.equal(turns[0].querySelector('.cgs-turn-fallback-row'), null);
-});
-
-for (const layout of ['div-turn', 'div-turn-inside-article']) {
-  test(`Sources and nested response scans keep one stable pair beside More: ${layout}`, async (t) => {
-    const { doc, win, app, turns } = await setup(t);
-    const original = turns[0];
-    const turn = doc.createElement('div');
-    turn.dataset.testid = original.dataset.testid;
-    original.replaceWith(turn); turn.append(...original.childNodes);
-    if (layout === 'div-turn-inside-article') {
-      const article = doc.createElement('article'); turn.before(article); article.append(turn);
-    }
-    const content = turn.querySelector('[data-message-author-role]');
-    const sources = doc.createElement('button'); sources.textContent = 'Sources';
-    content.after(sources);
-    const footer = turn.querySelector('[aria-label="More actions"]').parentElement;
-    app.processRoot(turn);
-    const ask = footer.querySelector('.cgs-turn-action');
-    const bookmark = footer.querySelector('.cgs-bookmark-action');
-    for (const root of [content, sources, content.firstElementChild, turn, footer]) {
-      app.processRoot(root);
-      assert.equal(turn.querySelector('.cgs-turn-fallback-row'), null);
-      assert.equal(ask.parentElement, footer);
-      assert.equal(bookmark.parentElement, footer);
-    }
-    assert.equal(turn.querySelector('.cgs-turn-fallback-row'), null);
-    assert.equal(ask.parentElement, footer);
-    assert.equal(bookmark.parentElement, footer);
-    await new Promise((resolve) => win.setTimeout(resolve, 300));
-    const changes = [];
-    const observer = new win.MutationObserver((records) => changes.push(...records));
-    observer.observe(turn, { childList: true, subtree: true });
-    t.after(() => observer.disconnect());
-    for (let i = 0; i < 3; i++) {
-      content.classList.toggle('sources-expanded');
-      await new Promise((resolve) => win.setTimeout(resolve, 100));
-    }
-    assert.equal(changes.length, 0, 'no repeated button moves or fallback rows');
-    assert.equal(turn.querySelectorAll('.cgs-turn-action').length, 1);
-    assert.equal(turn.querySelectorAll('.cgs-bookmark-action').length, 1);
-    assert.equal(sources.textContent, 'Sources');
-    ask.click(); assert.equal(app.state.activeTurn, turn);
-  });
-}
-
-test('response Ask uses the entire response even with a live highlight; selection Ask stays scoped to the highlight', async (t) => {
+test('message scans leave native footer structure unchanged through streaming and rerenders', async (t) => {
   const fixture = await setup(t);
-  const { doc, app, click } = fixture;
-  await highlightForBookmark(fixture);
-  click('ask-turn');
-  assert.equal(app.state.questionScope, 'response');
-  assert.match(doc.querySelector('#cgs-selected-context').textContent, /First lab instruction\.[\s\S]*More information\./u);
-  assert.doesNotMatch(doc.querySelector('#cgs-selected-context').textContent, /Second answer|Bookmark|Ask in new chat/u);
-  assert.equal(doc.querySelector('#cgs-selected-context').getAttribute('aria-label'), 'Entire response');
-  click('cancel-question');
-  await highlightForBookmark(fixture); click('ask-selection');
-  assert.equal(app.state.questionScope, 'highlight');
-  assert.equal(doc.querySelector('#cgs-selected-context').textContent, 'First lab instruction.');
+  const { doc, win, app, turns } = fixture;
+  const turn = turns[0], footer = turn.querySelector('[aria-label="More actions"]').parentElement;
+  const before = turn.innerHTML;
+  for (const root of [turn, footer, turn.querySelector('#passage'), doc.body]) app.processRoot(root);
+  assert.equal(turn.innerHTML, before);
+  footer.remove(); app.processRoot(turn);
+  assert.equal(turn.querySelector('.cgs-turn-fallback-row'), null);
+  turn.append(footer);
+  const changes = [];
+  const observer = new win.MutationObserver(records => changes.push(...records));
+  observer.observe(turn, { subtree: true, childList: true });
+  t.after(() => observer.disconnect());
+  turn.dataset.isStreaming = 'true';
+  await new Promise(resolve => win.setTimeout(resolve, 100));
+  delete turn.dataset.isStreaming;
+  const toggle = doc.querySelector('[data-cgs-setting="bookmarks"]');
+  toggle.click(); toggle.click(); app.processRoot(footer);
+  await new Promise(resolve => win.setTimeout(resolve, 150));
+  assert.equal(changes.length, 0, 'no added or moved controls');
+  assert.equal(doc.querySelector('.cgs-turn-action, .cgs-bookmark-action, .cgs-turn-fallback-row'), null);
+  const bookmark = await highlightForBookmark(fixture);
+  assert.equal(bookmark.hidden, false);
+  assert.equal(doc.querySelector('#cgs-selection-pill').hidden, false);
 });
 
-test('whole-response preview preserves math source and code without action labels', async (t) => {
-  const { doc, turns, click } = await setup(t);
-  turns[0].querySelector('[data-message-author-role]').innerHTML = '<p>Use <span class="katex"><span class="katex-mathml"><math><semantics><annotation encoding="application/x-tex">x^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">x2</span></span>.</p><pre><code>a*b</code></pre><p>Final step.</p>';
-  click('ask-turn');
-  const text = doc.querySelector('#cgs-selected-context').textContent;
-  assert.ok(text.includes('\\(x^2\\)'));
-  assert.ok(text.includes('```\na*b\n```'));
-  assert.ok(text.includes('Final step.'));
-  assert.doesNotMatch(text, /Bookmark|Ask in new chat/u);
-});
-
-for (const layout of ['more-only', 'sibling', 'linked', 'rerender', 'tooltip-wrappers']) {
-  test(`both footer controls stay next to More and target the correct response: ${layout}`, async (t) => {
-    const { doc, turns, app, values, click } = await setup(t);
-    const turn = turns[0];
-    let footer = turn.querySelector('[aria-label="More actions"]').parentElement;
-    if (layout === 'more-only') footer.querySelector('[data-testid="copy-turn-action-button"]').remove();
-    if (layout === 'sibling') {
-      const wrapper = doc.createElement('div'); turn.before(wrapper); wrapper.append(turn, footer);
-    }
-    if (layout === 'linked') {
-      footer.dataset.messageId = 'message-one'; doc.querySelector('main').append(footer);
-    }
-    if (layout === 'rerender') {
-      const clone = footer.cloneNode(true); footer.replaceWith(clone); footer = clone;
-    }
-    if (layout === 'tooltip-wrappers') {
-      for (const control of [...footer.querySelectorAll('button:not([data-cgs-injected])')]) {
-        const wrapper = doc.createElement('span'); control.before(wrapper); wrapper.append(control);
-      }
-    }
-    const decoy = doc.createElement('div'); decoy.className = 'prose';
-    decoy.innerHTML = '<button aria-label="More actions">example menu</button>';
-    turn.querySelector('[data-message-author-role]').append(decoy);
-    app.processRoot(footer); app.processRoot(footer);
-    assert.equal(footer.querySelectorAll('.cgs-turn-action').length, 1);
-    assert.equal(footer.querySelectorAll('.cgs-bookmark-action').length, 1);
-    assert.equal(decoy.querySelector('.cgs-turn-action, .cgs-bookmark-action'), null);
-    const more = footer.querySelector('[aria-label="More actions"]');
-    const anchor = layout === 'tooltip-wrappers' ? more.parentElement : more;
-    assert.equal(anchor.nextElementSibling.dataset.cgsAction, 'ask-turn');
-    assert.equal(anchor.nextElementSibling.nextElementSibling.dataset.cgsAction, 'reading-add');
-    footer.querySelector('.cgs-turn-action').click();
-    assert.equal(app.state.activeTurn, turn);
-    assert.match(doc.querySelector('#cgs-selected-context').textContent, /First lab instruction/u);
-    click('cancel-question');
-    footer.querySelector('.cgs-bookmark-action').click(); click('reading-save');
-    await app.state.readingTools.state.writes;
-    assert.equal(values.get(storageKey)[0].messageId, 'message-one');
-  });
-}
-
-test('completed responses get both controls after streaming stops, without duplicates', async (t) => {
-  const { doc, app } = await setup(t);
-  const turn = doc.createElement('article'); turn.dataset.testid = 'conversation-turn-5'; turn.dataset.isStreaming = 'true';
-  turn.innerHTML = '<div data-message-author-role="assistant">New response</div><div><button aria-label="More actions">...</button></div>';
-  doc.querySelector('#history').append(turn); app.processRoot(turn);
-  assert.equal(turn.querySelector('.cgs-turn-action, .cgs-bookmark-action'), null);
-  turn.removeAttribute('data-is-streaming');
-  await settle(doc.defaultView, () => turn.querySelector('.cgs-turn-action') && turn.querySelector('.cgs-bookmark-action'));
-  app.processRoot(turn);
-  assert.equal(turn.querySelectorAll('.cgs-turn-action').length, 1);
-  assert.equal(turn.querySelectorAll('.cgs-bookmark-action').length, 1);
+test('selection Ask focuses on the highlighted passage with no footer actions', async (t) => {
+  const fixture = await setup(t);
+  await highlightForBookmark(fixture); fixture.click('ask-selection');
+  assert.equal(fixture.app.state.questionScope, 'highlight');
+  assert.equal(fixture.doc.querySelector('#cgs-selected-context').textContent, 'First lab instruction.');
+  assert.equal(fixture.doc.querySelector('[data-cgs-action="ask-turn"], [data-cgs-action="reading-add"]'), null);
 });
 
 test('normal scrolling setting preserves the native click and still records the reading position', async (t) => {
@@ -637,7 +533,7 @@ test('old bookmarks jump to the preceding user prompt without migration', async 
 });
 
 test('missing original prompt never substitutes a different earlier user message', async (t) => {
-  const { doc, click, scroller, save } = await setup(t);
+  const { doc, click, scroller, saveLegacy: save } = await setup(t);
   await save();
   doc.querySelector('[data-testid="conversation-turn-0"]').remove();
   scroller.scrollTop = 1800;
@@ -802,7 +698,8 @@ test('missing or ambiguous answers never jump to a positional substitute', async
 
 test('switching chats discards pending editor and return spot before a stale action can run', async (t) => {
   const { doc, win, app, values, click, scroller } = await setup(t);
-  click('native-latest'); click('reading-add');
+  click('native-latest');
+  await highlightText(doc, doc.querySelector('#passage')); click('bookmark-selection');
   win.history.pushState({}, '', '/c/new-chat');
   click('reading-save');
   await app.state.readingTools.syncRoute();
@@ -821,14 +718,14 @@ test('disabling bookmarks preserves saved data, return position, and side-chat c
     input.dispatchEvent(new win.Event('change', { bubbles: true }));
   }
   assert.equal(doc.querySelector('.cgs-bookmark-action'), null);
-  assert.ok(doc.querySelector('.cgs-turn-action'));
+  assert.ok(doc.querySelector('#cgs-selection-pill'));
   assert.ok(app.state.readingTools.state.back);
   assert.equal(values.get(storageKey).length, 1);
   const input = doc.querySelector('[data-cgs-setting="bookmarks"]'); input.checked = true;
   input.dispatchEvent(new win.Event('change', { bubbles: true }));
-  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 0);
   app.processRoot(doc.body); app.processRoot(doc.body);
-  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2, 'no duplicates after rescans');
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 0, 'no duplicates after rescans');
 });
 
 test('storage failure is reported and does not pretend a bookmark was saved', async (t) => {
@@ -1054,14 +951,14 @@ test('window scrolling is supported when no nested scroll container is present',
   click('reading-back'); assert.equal(root.scrollTop, 200);
 });
 
-test('old disabled Ask preference cannot remove answer buttons or bookmarks', async (t) => {
+test('old Ask preferences never restore footer controls or disable highlight bookmarks', async (t) => {
   const { doc, app, save, values } = await setup(t, new Map([['chatgptSidecar.settings.v1', { showTurnButtons: false }]]));
   assert.equal(doc.querySelector('[data-cgs-setting="showTurnButtons"]'), null);
-  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 0);
   await save();
   assert.equal(values.get(storageKey).length, 1);
   app.processRoot(doc.body);
-  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 0);
 });
 
 test('bookmarks are unavailable on unsaved or shared chats', async (t) => {

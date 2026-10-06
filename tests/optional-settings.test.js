@@ -117,10 +117,10 @@ test('a fresh page restores saved preferences and reflects them in the settings 
   assert.notEqual(fresh.window.getComputedStyle(fresh.window.document.querySelector('#start')).display, 'none');
 });
 
-test('response buttons stay enabled independently of highlighting and math copying', async (t) => {
+test('highlight Ask can be toggled without creating response buttons', async (t) => {
   const { doc, app, set, highlight } = await setup(t);
   assert.equal(doc.querySelector('[data-cgs-setting="showTurnButtons"]'), null);
-  assert.ok(doc.querySelector('.cgs-turn-action'));
+  assert.equal(doc.querySelector('.cgs-turn-action, .cgs-bookmark-action'), null);
   const pill = await highlight();
   assert.equal(pill.hidden, false);
   pill.click();
@@ -129,7 +129,7 @@ test('response buttons stay enabled independently of highlighting and math copyi
   doc.querySelector('[data-cgs-action="cancel-question"]').click();
   app.processRoot(doc.body);
   await set('showSelectionButton', false);
-  assert.ok(doc.querySelector('.cgs-turn-action'));
+  assert.equal(doc.querySelector('.cgs-turn-action, .cgs-bookmark-action'), null);
   assert.equal((await highlight()).hidden, true);
   await set('showSelectionButton', true);
   (await highlight()).click();
@@ -171,7 +171,7 @@ test('panel light/dark mode is immediate, scoped to toolkit UI, and persists on 
   }
   assert.equal(doc.documentElement.getAttribute('style'), pageStyle);
   assert.equal(doc.documentElement.className, pageClass);
-  assert.equal(doc.querySelector('.cgs-turn-action').closest('#cgs-root'), null);
+  assert.equal(doc.querySelector('.cgs-turn-action, .cgs-bookmark-action'), null);
   const fresh = new JSDOM('<!doctype html><body></body>', { url: 'https://chatgpt.com/c/theme-test', pretendToBeVisual: true });
   const next = await toolkit.install(fresh.window.document, fresh.window);
   t.after(() => { next.state.observer.disconnect(); fresh.window.close(); });

@@ -1,5 +1,7 @@
 'use strict';
 
+const highlightText = require('./helpers/highlight');
+
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { JSDOM } = require('jsdom');
@@ -252,13 +254,14 @@ test('HTML-only screenshot equations reach the full preview and outgoing questio
   assert.match(job.question, /Locate the original equations/u);
   assert.equal(doc.querySelector('#prompt-textarea').value, '');
   app.processRoot(doc.body);
-  doc.querySelector('.cgs-turn-action').click();
-  assert.equal(app.state.questionScope, 'response');
-  assert.equal(app.state.questionUsesVisualMath, true, 'whole response includes its own visual-only equations');
+  (await highlightText(doc)).click();
+  assert.equal(app.state.questionScope, 'highlight');
+  assert.equal(app.state.questionUsesVisualMath, true, 'highlight includes its own visual-only equations');
   assert.equal(toggle.hidden, false);
+  doc.querySelector('[data-cgs-action="cancel-question"]').click();
   const plain = doc.createElement('article'); plain.dataset.testid = 'conversation-turn-99';
   plain.innerHTML = '<div data-message-author-role="assistant">A plain answer.</div>';
   doc.querySelector('main').append(plain); app.processRoot(plain);
-  plain.querySelector('.cgs-turn-action').click();
+  (await highlightText(doc, plain.querySelector('[data-message-author-role]'))).click();
   assert.equal(app.state.questionUsesVisualMath, false, 'a different plain response does not inherit the math caveat');
 });

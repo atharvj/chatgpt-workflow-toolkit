@@ -239,44 +239,7 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
   });
 }
 
-for (const question of ['', 'Explain each step.']) {
-  test(`footer Ask branches all history but focuses on the whole clicked response (${question || 'default question'})`, async (t) => {
-    const values = storage(t);
-    const source = await fixture(t);
-    source.dom.window.open = () => ({ location: { replace() {} }, focus() {} });
-    source.doc.querySelector('.cgs-turn-action').click();
-    assert.equal(source.app.state.questionScope, 'response');
-    source.doc.querySelector('#cgs-question').value = question;
-    source.doc.querySelector('[data-cgs-action="submit-question"]').click();
-    assert.equal(await source.app.state.sideLaunchPromise, true);
-    const job = [...values.values()].find((value) => value.kind === 'ask');
-    assert.equal(job.locator.testId, 'conversation-turn-3', 'branch still contains the whole chat');
-    assert.match(job.question, /entire assistant response/u);
-    assert.match(job.question, /Step 1: prepare\.[\s\S]*Compare both groups\.[\s\S]*Step 3: submit\./u);
-    assert.doesNotMatch(job.question, /Later unrelated instructions|Highlighted passage/u);
-    assert.ok(job.question.endsWith(question || 'Explain this entire response clearly.'));
-    assert.equal(source.doc.querySelector('#prompt-textarea').value, '');
-  });
-}
-
-test('long response is identified in full native history instead of silently treating its beginning as the whole answer', async (t) => {
-  const values = storage(t);
-  const source = await fixture(t);
-  const full = 'Opening of the target response. ' + 'Middle of a long explanation. '.repeat(1300) + ' Final important instruction.';
-  source.doc.querySelector('[data-testid="conversation-turn-1"] [data-message-author-role]').textContent = full;
-  source.dom.window.open = () => ({ location: { replace() {} }, focus() {} });
-  source.doc.querySelector('.cgs-turn-action').click();
-  assert.ok(source.doc.querySelector('#cgs-selected-context').textContent === full.replace(/ {2,}/gu, ' '), 'full preview includes the end of the response without truncation');
-  source.doc.querySelector('[data-cgs-action="submit-question"]').click();
-  assert.equal(await source.app.state.sideLaunchPromise, true);
-  const job = [...values.values()].find((value) => value.kind === 'ask');
-  assert.match(job.question, /consider ALL of it, including the middle/u);
-  assert.match(job.question, /Opening of the target response/u);
-  assert.match(job.question, /Final important instruction/u);
-  assert.ok(job.question.length < 30000);
-});
-
-test('selection preview is safe literal text and is replaced by the entire response for its footer action', async (t) => {
+test('selection preview is safe literal text and is replaced by a new highlight', async (t) => {
   const source = await fixture(t);
   const highlight = '<img src=x onerror=alert(1)>\nSecond line';
   openHighlight(source, highlight);
@@ -284,11 +247,10 @@ test('selection preview is safe literal text and is replaced by the entire respo
   assert.equal(preview.textContent, highlight);
   assert.equal(preview.children.length, 0);
   source.doc.querySelector('[data-cgs-action="cancel-question"]').click();
-  source.doc.querySelector('.cgs-turn-action').click();
-  assert.equal(source.app.state.questionScope, 'response');
+  openHighlight(source, 'Another selected passage.');
+  assert.equal(source.app.state.questionScope, 'highlight');
   assert.equal(preview.hidden, false);
-  assert.match(preview.textContent, /^Step 1: prepare\./u);
-  assert.match(preview.textContent, /Step 3: submit\.$/u);
+  assert.equal(preview.textContent, 'Another selected passage.');
   assert.equal(preview.children.length, 0);
 });
 

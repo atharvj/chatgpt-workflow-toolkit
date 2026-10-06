@@ -4,11 +4,11 @@ A lightweight userscript for ChatGPT bookmarks, reading shortcuts, and separate 
 
 ## Features
 
-- **Bookmarks:** highlight a sentence and click ☆ Bookmark to return to that sentence later. Bookmark a whole answer from its action row to return to your preceding message instead. Manage saved bookmarks using ☆ beside Settings.
+- **Bookmarks:** highlight a sentence and click ☆ Bookmark to return to that sentence later. Manage saved bookmarks using ☆ beside Settings. Previously saved whole-answer bookmarks still return to the preceding message.
 - **Return to where I was:** click ChatGPT’s down arrow, then ↩ beside Settings to return. Turn off **Jump to bottom instantly** for normal animated scrolling while still saving your place.
-- Return and answer-level Ask buttons are always enabled. Click checkboxes directly to change settings. **Dark mode for toolkit panels** switches the toolkit’s boxes between light and dark independently of ChatGPT.
+- Return is always enabled. Click checkboxes directly to change settings. **Dark mode for toolkit panels** switches the toolkit’s boxes between light and dark independently of ChatGPT.
 - Highlight a passage and **Ask in new chat**: automatically branch the whole chat, then send a question focused on that passage. Previous files and images stay in ChatGPT’s native history—not a text-only copy.
-- Click **Ask in new chat** under an answer to ask about that entire answer instead. Ask and Bookmark sit beside its response actions.
+- **Ask in new chat** and **Bookmark** appear only beside highlighted text. The toolkit does not add or reposition buttons under messages.
 - Remove “Start writing.”
 - Hide the “Share highlighted” selection button.
 - Automatically remove `utm_source=chatgpt.com` from external links, including new-tab, middle-click, context-menu opening, and URLs opened through JavaScript's `window.open`. Other query parameters and anchors stay unchanged. Tracking added by the destination site is outside the script's reach.

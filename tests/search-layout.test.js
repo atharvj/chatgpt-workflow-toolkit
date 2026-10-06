@@ -59,7 +59,7 @@ async function fixture(t, values = new Map()) {
   return { win, doc, app, turns, footers, click, highlight, values };
 }
 
-test('search-layout turns, content, IDs and footer owners are recognized without legacy attributes', async (t) => {
+test('search-layout turns, content, IDs and native footers are recognized without legacy attributes', async (t) => {
   const { doc, turns, footers, app, click } = await fixture(t);
   assert.equal(doc.querySelectorAll('[data-testid^="conversation-turn-"], [data-message-author-role]').length, 0);
   assert.equal(turns.length, 4);
@@ -67,16 +67,10 @@ test('search-layout turns, content, IDs and footer owners are recognized without
   assert.equal(toolkit.extractAssistantContent(turns[1]), 'First instruction. Second instruction.');
   assert.equal(toolkit.readingAnchor(turns[1]).messageId, 'message-1');
   for (const [i, footer] of footers.entries()) {
-    assert.equal(footer.querySelectorAll('.cgs-turn-action').length, 1);
-    assert.equal(footer.querySelectorAll('.cgs-bookmark-action').length, 1);
+    assert.equal(footer.querySelectorAll('.cgs-turn-action').length, 0);
+    assert.equal(footer.querySelectorAll('.cgs-bookmark-action').length, 0);
     const more = footer.querySelector('[aria-label="More actions"]');
     assert.equal(toolkit.findMoreButton(turns[1 + i * 2]), more);
-    assert.equal(more.nextElementSibling.dataset.cgsAction, 'ask-turn');
-    footer.querySelector('.cgs-turn-action').click();
-    assert.equal(app.state.activeTurn, turns[1 + i * 2]);
-    assert.equal(app.state.questionScope, 'response');
-    assert.doesNotMatch(doc.querySelector('#cgs-selected-context').textContent, /Sources|Copy|Bookmark/u);
-    click('cancel-question');
   }
 });
 
@@ -119,8 +113,8 @@ test('search-layout Sources rescans stay idle and mixed legacy wrappers do not d
   content.classList.toggle('expanded');
   await new Promise((resolve) => win.setTimeout(resolve, 250));
   assert.equal(changes.length, 0);
-  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
-  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 0);
+  assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 0);
   assert.equal(doc.querySelector('.cgs-turn-fallback-row'), null);
 });
 
@@ -134,20 +128,19 @@ test('checkbox appearance survives the page reset without changing native inputs
   const input = doc.querySelector('[data-cgs-setting="bookmarks"]');
   input.click(); await new Promise((resolve) => win.setTimeout(resolve, 50));
   assert.equal(values.get('chatgptSidecar.settings.v1').bookmarks, false);
-  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 0);
   assert.equal(doc.querySelectorAll('.cgs-bookmark-action').length, 0);
   input.click(); await new Promise((resolve) => win.setTimeout(resolve, 50));
-  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 2);
+  assert.equal(doc.querySelectorAll('.cgs-turn-action').length, 0);
 });
 
-test('Bookmark and Ask share appearance and interaction styles in both action locations', async (t) => {
+test('highlight Bookmark and Ask share appearance and interaction styles', async (t) => {
   const { doc, win, footers } = await fixture(t);
   const properties = ['color', 'backgroundColor', 'opacity', 'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'padding', 'borderRadius', 'minHeight', 'display', 'cursor'];
   const rules = [...doc.querySelector('#cgs-style').sheet.cssRules].filter((rule) => rule.selectorText);
   for (const color of ['rgb(235, 235, 235)', 'rgb(20, 20, 20)']) {
     footers[0].style.color = color;
     const pairs = [
-      [footers[0].querySelector('.cgs-turn-action'), footers[0].querySelector('.cgs-bookmark-action')],
       [doc.querySelector('#cgs-selection-pill'), doc.querySelector('#cgs-selection-bookmark')],
     ];
     for (const [ask, bookmark] of pairs) {
@@ -178,17 +171,17 @@ test('native provenance in new answer markup stays untrusted, outside separator 
   assert.equal(context.turn, turns[3]);
 });
 
-test('search-layout whole-answer bookmarks retain the preceding prompt and no selection', async (t) => {
-  const { app, values, click, doc, turns } = await fixture(t);
-  click('reading-add'); click('reading-save'); await app.state.readingTools.state.writes;
-  const saved = values.get('chatgptWorkflowToolkit.bookmarks.v1.https://chatgpt.com.layout-test')[0];
-  assert.equal(saved.quote, '');
-  assert.equal(saved.messageId, 'message-1');
-  assert.equal(saved.prompt.messageId, 'message-0');
+test('search-layout legacy whole-answer bookmarks retain their preceding prompt', async (t) => {
+  const saved = { id: 'legacy_bookmark_123', label: 'Saved answer', messageId: 'message-1', quote: '', prompt: { messageId: 'message-0', role: 'user' } };
+  const values = new Map([['chatgptWorkflowToolkit.bookmarks.v1.https://chatgpt.com.layout-test', [saved]]]);
+  const { app, doc, turns, click } = await fixture(t, values);
+  click('reading-bookmarks');
+  assert.equal(app.state.readingTools.state.bookmarks[0].quote, '');
+  assert.equal(toolkit.locateReadingAnchor(doc, saved), turns[1]);
   assert.equal(toolkit.locateReadingAnchor(doc, saved.prompt), turns[0]);
 });
 
-test('new-layout controls mount after streaming ends and after identity attributes arrive', async (t) => {
+test('new-layout streaming and late identity attributes never add footer controls', async (t) => {
   const { doc, win } = await fixture(t);
   const fragment = doc.createElement('div'); fragment.innerHTML = message(5, 'assistant', 'A new answer.');
   const turn = fragment.querySelector('[data-chatgpt-search-unit-key]');
@@ -198,8 +191,7 @@ test('new-layout controls mount after streaming ends and after identity attribut
   assert.equal(fragment.querySelector('.cgs-turn-action, .cgs-bookmark-action'), null);
   turn.removeAttribute('data-is-streaming');
   await new Promise((resolve) => win.setTimeout(resolve, 150));
-  assert.ok(fragment.querySelector('.native-actions .cgs-turn-action'));
-  assert.ok(fragment.querySelector('.native-actions .cgs-bookmark-action'));
+  assert.equal(fragment.querySelector('.cgs-turn-action, .cgs-bookmark-action'), null);
   const late = doc.createElement('div'); late.innerHTML = message(7, 'assistant', 'Late markers.');
   const wrapper = late.querySelector('[data-chatgpt-search-unit-key]');
   const content = late.querySelector('[data-markdown-text-style]');
@@ -210,8 +202,8 @@ test('new-layout controls mount after streaming ends and after identity attribut
   wrapper.setAttribute('data-chatgpt-search-unit-key', 'fallback-turn-7:1:assistant');
   content.setAttribute('data-markdown-text-style', 'assistant-message');
   await new Promise((resolve) => win.setTimeout(resolve, 150));
-  assert.equal(late.querySelectorAll('.cgs-turn-action').length, 1);
-  assert.equal(late.querySelectorAll('.cgs-bookmark-action').length, 1);
+  assert.equal(late.querySelectorAll('.cgs-turn-action').length, 0);
+  assert.equal(late.querySelectorAll('.cgs-bookmark-action').length, 0);
 });
 
 function cookieFooter(doc) {
