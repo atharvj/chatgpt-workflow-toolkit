@@ -149,7 +149,7 @@ for (const { typedQuestion, mode } of ['Why is this necessary?', ''].flatMap((ty
       });
       if (mode.startsWith('submenu')) {
         const subtrigger = copy.doc.createElement('div');
-        subtrigger.id = 'open-branch'; subtrigger.textContent = 'Open new branch';
+        subtrigger.id = 'open-branch'; subtrigger.textContent = mode === 'submenu' ? 'Branch conversation' : 'Open new branch';
         subtrigger.setAttribute('role', 'menuitem'); subtrigger.setAttribute('aria-haspopup', 'menu');
         subtrigger.setAttribute('aria-expanded', 'false'); subtrigger.dataset.state = 'closed';
         const submenu = copy.doc.createElement('div');

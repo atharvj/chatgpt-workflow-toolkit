@@ -6,14 +6,14 @@ const { JSDOM } = require('jsdom');
 const toolkit = require('../chatgpt-workflow-toolkit.user.js');
 const userscriptWindow = require('./helpers/userscript-window');
 
-for (const mode of [
+for (const label of ['Open new branch', 'Branch conversation']) for (const mode of [
   'click', 'keyboard', 'rtl-keyboard', 'hover', 'delayed', 'unlinked', 'inline', 'remount',
   'already-open', 'missing-chat', 'disabled-chat', 'closed-submenu', 'ambiguous-chat',
   'unrelated-menu', 'ambiguous-unlinked', 'route-change', 'history-change',
   'aria-mask', 'inert-mask', 'aria-mask-edited', 'aria-mask-user-edited', 'aria-mask-stream',
   'aria-mask-root', 'aria-mask-prehidden', 'aria-mask-new-turn',
   'already-open-mask',
-]) test(`Open new branch submenu: ${mode}`, async (t) => {
+]) test(`${label} submenu: ${mode}`, async (t) => {
   // Labels from the supplied screenshot; synthetic ARIA menu/portal variants.
   const dom = new JSDOM(`<!doctype html><main>
     <article data-testid="conversation-turn-0"><div data-message-author-role="user">A question about Work mode</div></article>
@@ -23,7 +23,7 @@ for (const mode of [
       </div>
     </article>
     <div id="menu" role="menu" data-state="closed" aria-labelledby="more">
-      <div id="subtrigger" role="menuitem" tabindex="-1" aria-haspopup="menu" aria-expanded="false" data-state="closed" aria-controls="submenu">Open new branch</div>
+      <div id="subtrigger" role="menuitem" tabindex="-1" aria-haspopup="menu" aria-expanded="false" data-state="closed" aria-controls="submenu">${label}</div>
     </div>
     <div id="submenu" role="menu" data-state="closed" aria-labelledby="subtrigger">
       <div role="menuitem" id="work">Branch into Work mode</div>

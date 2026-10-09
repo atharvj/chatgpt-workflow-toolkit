@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Workflow Toolkit
 // @namespace    https://github.com/atharvj/chatgpt-workflow-toolkit
-// @version      1.10.25
+// @version      1.10.26
 // @description  Bookmark ChatGPT answers, return to your reading spot, ask in native branches, and clean up the interface.
 // @author       Intellectual07
 // @license      MIT
@@ -45,7 +45,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function chatGPTWorkflowToolkitFactory(global) {
   'use strict';
 
-  const VERSION = '1.10.25';
+  const VERSION = '1.10.26';
   const LEGACY_INSTALL_VERSION = '1.1.0';
   // Preserve the original storage keys so upgrades retain settings and one-time side-chat transfers.
   const SETTINGS_KEY = 'chatgptSidecar.settings.v1';
@@ -2033,9 +2033,10 @@
   }
 
   function branchSubmenuTriggers(root) {
+    // ChatGPT uses both labels for the same native branch submenu.
     return branchMenuControls(root, (candidate) => candidate.getAttribute('aria-haspopup') === 'menu' &&
       [candidate.getAttribute('aria-label'), candidate.getAttribute('title'), candidate.textContent]
-        .some((label) => lowerText(label).replace(/[.!…]+$/gu, '') === 'open new branch'), true);
+        .some((label) => /^(?:open new branch|branch conversation)$/u.test(lowerText(label).replace(/[.!…]+$/gu, ''))), true);
   }
 
   function findBranchAction(root, excluded = new Set()) {
@@ -2634,7 +2635,7 @@
           (trigger.getAttribute('aria-expanded') === 'true' || trigger.getAttribute('data-state') === 'open'));
       };
       try { menuStep.control.click(); }
-      catch (_error) { return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not open the “Open new branch” submenu.' }; }
+      catch (_error) { return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not open the branch submenu.' }; }
       await waitForCondition(submenuIsOpen, { root: doc.documentElement, win, timeout: 300, attributes: true, pollInterval: 75 });
       if (!submenuIsOpen()) {
         if (!targetStillExpected()) return verificationFailure('opening the branch submenu');
@@ -2651,7 +2652,7 @@
             const Pointer = win.PointerEvent || win.MouseEvent;
             trigger.dispatchEvent(new Pointer('pointermove', { bubbles: true, cancelable: true, pointerType: 'mouse', pointerId: 1, isPrimary: true }));
           }
-        } catch (_error) { return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not open the “Open new branch” submenu.' }; }
+        } catch (_error) { return { ok: false, attempted: false, unavailable: true, reason: 'Workflow Toolkit could not open the branch submenu.' }; }
       }
       branchAction = await waitForCondition(() => {
         const actions = uniqueElements(submenuRoots().flatMap((root) => branchLeafControls(root)));
@@ -2660,7 +2661,7 @@
       if (!targetStillExpected()) return verificationFailure();
       if (!branchAction) return { ok: false, attempted: false, unavailable: true, reason: submenuIsOpen()
         ? 'The branch submenu opened, but Workflow Toolkit could not identify a unique enabled “Branch in new Chat” option.'
-        : 'The “Open new branch” submenu did not open.' };
+        : 'The branch submenu did not open.' };
     }
     if (!targetStillExpected()) return verificationFailure();
     const finalActions = uniqueElements((branchRoots() || []).flatMap((root) => branchLeafControls(root)));

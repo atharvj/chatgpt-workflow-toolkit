@@ -15,7 +15,7 @@ A lightweight userscript for ChatGPT bookmarks, reading shortcuts, and separate 
 - Remove the bottom Cookie preferences gap; Cookie preferences stays available in the toolkit’s settings.
 - Math highlights use source notation when available, otherwise compact display text with an instruction to check the original equations. Partial equations are included whole. **Show full highlight** expands the preview. This improves context, not a guarantee of correct answers.
 
-Requires ChatGPT’s Branch action. Supports **Open new branch → Branch in new Chat**; currently always chooses normal Chat, without automatic Work-mode detection. Attachment availability and conversation limits still depend on ChatGPT.
+Requires ChatGPT’s Branch action. Supports **Branch conversation → Branch in new chat** and the older **Open new branch** menu label; currently always chooses normal Chat, without automatic Work-mode detection. Attachment availability and conversation limits still depend on ChatGPT.
 
 Bookmarks save labels and short text references per chat in your userscript manager’s browser storage (up to 100 per chat). Nothing is sent to ChatGPT. Older answers must be loaded to jump to bookmarks. Return restores saved scroll coordinates when a message is unloaded, then aligns it if it remounts; otherwise the position is approximate. The temporary return spot clears on reload or switching chats.
 
